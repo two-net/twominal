@@ -1,0 +1,331 @@
+@import "@xterm/xterm/css/xterm.css";
+
+/* ==========================================================================
+   TWOMINAL - Fish-Inspired Modern Terminal Stylesheet (Native Frameless)
+   ========================================================================== */
+
+:root {
+  --bg-dark: #0d1117;
+  --bg-dark-surface: #161b22;
+  --bg-dark-border: #30363d;
+  --bg-light: #ffffff;
+  --bg-light-surface: #f6f8fa;
+  --bg-light-border: #d0d7de;
+
+  /* Default / Light mode Fish syntax colors - High Contrast & Crisp */
+  --twominal-fish-valid: #0e7a2b;       /* Dark crisp emerald/forest green (7:1 contrast on white) */
+  --twominal-fish-invalid: #dc2626;     /* Vivid crimson red (4.8:1 contrast on white) */
+  --twominal-fish-param: #0284c7;       /* Rich blue / sky (4.6:1 contrast on white) */
+  --twominal-fish-quote: #a16207;       /* Deep amber / ochre (5.2:1 contrast on white) */
+  --twominal-fish-path: #7c3aed;        /* Rich violet (5.8:1 contrast on white) */
+  --twominal-fish-comment: #64748b;     /* Slate gray */
+  --twominal-fish-autosuggest: #94a3b8; /* Subtle slate ghost text */
+  --twominal-fish-keyword: #c026d3;     /* Rich fuchsia (5.3:1 contrast on white) */
+
+  /* Font & Typography Settings */
+  --twominal-font-family: 'Fira Code', Consolas, Monaco, monospace;
+  --twominal-font-size: 14px;
+  --twominal-font-weight: 400;
+  --twominal-line-height: 1.5;
+  --twominal-letter-spacing: 0px;
+
+  /* ANSI color variables - Light Mode */
+  --ansi-black: #24292f;
+  --ansi-red: #cf222e;
+  --ansi-green: #116329;
+  --ansi-yellow: #9a6700;
+  --ansi-blue: #0969da;
+  --ansi-magenta: #8250df;
+  --ansi-cyan: #1b7c83;
+  --ansi-white: #57606a;
+  --ansi-bright-black: #6e7781;
+  --ansi-bright-red: #a40e26;
+  --ansi-bright-green: #1a7f37;
+  --ansi-bright-yellow: #633c01;
+  --ansi-bright-blue: #218bff;
+  --ansi-bright-magenta: #a475f9;
+  --ansi-bright-cyan: #3192aa;
+  --ansi-bright-white: #24292f;
+}
+
+html.dark {
+  /* Dark mode Fish syntax colors - Dracula/Pastel Glow */
+  --twominal-fish-valid: #50fa7b;
+  --twominal-fish-invalid: #ff5555;
+  --twominal-fish-param: #8be9fd;
+  --twominal-fish-quote: #f1fa8c;
+  --twominal-fish-path: #bd93f9;
+  --twominal-fish-comment: #6272a4;
+  --twominal-fish-autosuggest: #636e7b;
+  --twominal-fish-keyword: #ff79c6;
+
+  /* ANSI color variables - Dark Mode */
+  --ansi-black: #1e1e2e;
+  --ansi-red: #f38ba8;
+  --ansi-green: #a6e3a1;
+  --ansi-yellow: #f9e2af;
+  --ansi-blue: #89b4fa;
+  --ansi-magenta: #cba6f7;
+  --ansi-cyan: #89dceb;
+  --ansi-white: #cdd6f4;
+  --ansi-bright-black: #585b70;
+  --ansi-bright-red: #ff5555;
+  --ansi-bright-green: #50fa7b;
+  --ansi-bright-yellow: #f1fa8c;
+  --ansi-bright-blue: #bd93f9;
+  --ansi-bright-magenta: #ff79c6;
+  --ansi-bright-cyan: #8be9fd;
+  --ansi-bright-white: #ffffff;
+}
+
+/* Comprehensive Font Ligatures Engine */
+.enable-ligatures,
+.enable-ligatures *,
+.enable-ligatures pre,
+.enable-ligatures code,
+.enable-ligatures span {
+  font-variant-ligatures: contextual common-ligatures discretionary-ligatures historical-ligatures !important;
+  -webkit-font-feature-settings: "calt" 1, "liga" 1, "dlig" 1, "clig" 1 !important;
+  font-feature-settings: "calt" 1, "liga" 1, "dlig" 1, "clig" 1 !important;
+  text-rendering: optimizeLegibility !important;
+}
+
+.disable-ligatures,
+.disable-ligatures *,
+.disable-ligatures pre,
+.disable-ligatures code,
+.disable-ligatures span {
+  font-variant-ligatures: none !important;
+  -webkit-font-feature-settings: "calt" 0, "liga" 0, "dlig" 0, "clig" 0 !important;
+  font-feature-settings: "calt" 0, "liga" 0, "dlig" 0, "clig" 0 !important;
+  text-rendering: auto !important;
+}
+
+/* Base resets */
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+  user-select: none;
+}
+
+html, body {
+  width: 100vw;
+  height: 100vh;
+  margin: 0 !important;
+  padding: 0 !important;
+  overflow: hidden;
+  font-family: "Inter", system-ui, -apple-system, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+body {
+  background-color: #0d1117;
+  color: #f1f5f9;
+  display: flex;
+  flex-direction: column;
+}
+
+/* Custom Scrollbars */
+::-webkit-scrollbar {
+  width: 7px;
+  height: 7px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+.dark ::-webkit-scrollbar-thumb {
+  background: #30363d;
+  border-radius: 4px;
+}
+.dark ::-webkit-scrollbar-thumb:hover {
+  background: #484f58;
+}
+::-webkit-scrollbar-thumb {
+  background: #d0d7de;
+  border-radius: 4px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #afb8c1;
+}
+
+/* Selection */
+::selection {
+  background: rgba(99, 102, 241, 0.35);
+  color: inherit;
+}
+
+/* Matrix canvas */
+#matrix-canvas {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+  opacity: 0.15;
+  z-index: 1;
+  display: none;
+}
+
+/* Animations */
+@keyframes blink {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0; }
+}
+
+@keyframes subtlePulse {
+  0%, 100% { transform: scale(1); opacity: 1; }
+  50% { transform: scale(1.02); opacity: 0.85; }
+}
+
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(4px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.animate-cursor-blink {
+  animation: blink 1s step-start infinite;
+}
+
+.animate-pulse-subtle {
+  animation: subtlePulse 3s ease-in-out infinite;
+}
+
+.animate-fade-in {
+  animation: fadeIn 0.25s ease-out forwards;
+}
+
+/* Utility colors */
+.text-twominal-fish-valid {
+  color: var(--twominal-fish-valid);
+}
+.text-twominal-fish-invalid {
+  color: var(--twominal-fish-invalid);
+}
+.text-twominal-fish-param {
+  color: var(--twominal-fish-param);
+}
+.text-twominal-fish-quote {
+  color: var(--twominal-fish-quote);
+}
+.text-twominal-fish-path {
+  color: var(--twominal-fish-path);
+}
+.text-twominal-fish-comment {
+  color: var(--twominal-fish-comment);
+}
+.text-twominal-fish-autosuggest {
+  color: var(--twominal-fish-autosuggest);
+}
+.text-twominal-fish-keyword {
+  color: var(--twominal-fish-keyword);
+}
+
+/* Monospace font */
+.font-mono {
+  font-family: var(--twominal-font-family, "Fira Code", monospace) !important;
+}
+
+/* Terminal Viewport Typography */
+#terminal-viewport {
+  font-family: var(--twominal-font-family, "Fira Code", monospace);
+  font-size: var(--twominal-font-size, 14px);
+  font-weight: var(--twominal-font-weight, 400);
+  line-height: var(--twominal-line-height, 1.5);
+  letter-spacing: var(--twominal-letter-spacing, 0px);
+}
+
+#cli-input,
+#input-rendered,
+#autosuggest-ghost,
+#terminal-output,
+#terminal-output pre,
+#font-preview-box {
+  font-family: var(--twominal-font-family, "Fira Code", monospace);
+  font-size: var(--twominal-font-size, 14px);
+  font-weight: var(--twominal-font-weight, 400);
+  line-height: var(--twominal-line-height, 1.5);
+  letter-spacing: var(--twominal-letter-spacing, 0px);
+}
+
+#terminal-cursor {
+  height: 1.15em;
+  width: 0.55em;
+}
+
+
+/* Light Theme Overrides */
+html:not(.dark) body {
+  background-color: #ffffff;
+  color: #1e293b;
+}
+
+html:not(.dark) #window-container {
+  background-color: #ffffff !important;
+}
+
+html:not(.dark) header {
+  background-color: #f6f8fa !important;
+  border-bottom-color: #d0d7de !important;
+}
+
+html:not(.dark) footer {
+  background-color: #f6f8fa !important;
+  border-top-color: #d0d7de !important;
+  color: #475569 !important;
+}
+
+html:not(.dark) #theme-dropdown {
+  background-color: #ffffff !important;
+  border-color: #d0d7de !important;
+  color: #1e293b !important;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.12);
+}
+
+html:not(.dark) #theme-dropdown button:hover {
+  background-color: #f1f5f9 !important;
+}
+
+html:not(.dark) #completion-menu {
+  background-color: #ffffff !important;
+  border-color: #d0d7de !important;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.12);
+}
+
+html:not(.dark) #mobile-keybar {
+  background-color: #f6f8fa !important;
+  border-top-color: #d0d7de !important;
+}
+
+html:not(.dark) #mobile-keybar button {
+  background-color: #ffffff !important;
+  border-color: #d0d7de !important;
+  color: #334155 !important;
+}
+
+html:not(.dark) #terminal-viewport {
+  color: #0f172a;
+}
+
+#terminal-pty-layer {
+  display: flex;
+  flex: 1 1 auto;
+  width: 100%;
+  min-height: 380px;
+  height: 100%;
+}
+
+#terminal-pty-layer.hidden {
+  display: none !important;
+}
+
+#terminal-pty-layer .xterm {
+  height: 100% !important;
+  width: 100% !important;
+  padding: 4px;
+}
+
+#terminal-pty-layer .xterm-viewport {
+  overflow-y: auto !important;
+}

@@ -1,0 +1,2024 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Twominal - Fish-Inspired Modern Terminal</title>
+  
+  <!-- Tailwind CSS CDN -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      darkMode: 'class',
+      theme: {
+        extend: {
+          fontFamily: {
+            mono: ['"Fira Code"', 'Consolas', 'Monaco', '"Courier New"', 'monospace'],
+            sans: ['"Inter"', 'system-ui', '-apple-system', 'sans-serif'],
+          },
+          colors: {
+            twominal: {
+              bg: {
+                dark: '#0d1117',
+                'dark-surface': '#161b22',
+                'dark-border': '#30363d',
+                light: '#f6f8fa',
+                'light-surface': '#ffffff',
+                'light-border': '#d0d7de',
+              },
+              fish: {
+                valid: 'var(--twominal-fish-valid)',
+                invalid: 'var(--twominal-fish-invalid)',
+                param: 'var(--twominal-fish-param)',
+                quote: 'var(--twominal-fish-quote)',
+                path: 'var(--twominal-fish-path)',
+                comment: 'var(--twominal-fish-comment)',
+                autosuggest: 'var(--twominal-fish-autosuggest)',
+                keyword: 'var(--twominal-fish-keyword)',
+              }
+            }
+          },
+          animation: {
+            'cursor-blink': 'blink 1s step-start infinite',
+            'pulse-subtle': 'subtlePulse 3s ease-in-out infinite',
+            'fade-in': 'fadeIn 0.25s ease-out forwards',
+          },
+          keyframes: {
+            blink: {
+              '0%, 100%': { opacity: '1' },
+              '50%': { opacity: '0' },
+            },
+            subtlePulse: {
+              '0%, 100%': { transform: 'scale(1)', opacity: '1' },
+              '50%': { transform: 'scale(1.02)', opacity: '0.85' },
+            },
+            fadeIn: {
+              from: { opacity: '0', transform: 'translateY(4px)' },
+              to: { opacity: '1', transform: 'translateY(0)' },
+            }
+          }
+        }
+      }
+    }
+  </script>
+
+  <!-- Google Fonts: Developer Monospace Fonts & Inter -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Cascadia+Code:wght@300;400;500;600;700&family=Fira+Code:wght@300;400;500;600;700&family=Inconsolata:wght@300;400;500;600;700;800&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:ital,wght@0,300..800;1,300..800&family=Roboto+Mono:ital,wght@0,300..700;1,300..700&family=Source+Code+Pro:ital,wght@0,300..800;1,300..800&family=Space+Mono:ital,wght@0,400;0,700;1,400;1,700&display=swap" rel="stylesheet">
+
+  <style>
+    :root {
+      --twominal-font-family: 'Fira Code', Consolas, Monaco, monospace;
+      --twominal-font-size: 14px;
+      --twominal-font-weight: 400;
+      --twominal-line-height: 1.5;
+      --twominal-letter-spacing: 0px;
+    }
+
+    .font-mono {
+      font-family: var(--twominal-font-family, "Fira Code", monospace) !important;
+    }
+
+    #terminal-viewport {
+      font-family: var(--twominal-font-family, "Fira Code", monospace);
+      font-size: var(--twominal-font-size, 14px);
+      font-weight: var(--twominal-font-weight, 400);
+      line-height: var(--twominal-line-height, 1.5);
+      letter-spacing: var(--twominal-letter-spacing, 0px);
+    }
+
+    #cli-input,
+    #input-rendered,
+    #autosuggest-ghost,
+    #terminal-output,
+    #terminal-output pre,
+    #font-preview-box {
+      font-family: var(--twominal-font-family, "Fira Code", monospace);
+      font-size: var(--twominal-font-size, 14px);
+      font-weight: var(--twominal-font-weight, 400);
+      line-height: var(--twominal-line-height, 1.5);
+      letter-spacing: var(--twominal-letter-spacing, 0px);
+    }
+
+    #terminal-cursor {
+      height: 1.15em;
+      width: 0.55em;
+    }
+
+    /* Font Ligature enablement */
+    .enable-ligatures {
+      font-variant-ligatures: normal !important;
+      font-feature-settings: "liga" 1, "calt" 1 !important;
+    }
+    .disable-ligatures {
+      font-variant-ligatures: none !important;
+      font-feature-settings: "liga" 0, "calt" 0 !important;
+    }
+
+    /* Custom Scrollbar for Terminal */
+    ::-webkit-scrollbar {
+      width: 8px;
+      height: 8px;
+    }
+    ::-webkit-scrollbar-track {
+      background: transparent;
+    }
+    .dark ::-webkit-scrollbar-thumb {
+      background: #30363d;
+      border-radius: 4px;
+    }
+    .dark ::-webkit-scrollbar-thumb:hover {
+      background: #484f58;
+    }
+    ::-webkit-scrollbar-thumb {
+      background: #d0d7de;
+      border-radius: 4px;
+    }
+    ::-webkit-scrollbar-thumb:hover {
+      background: #afb8c1;
+    }
+
+    /* Selection Colors */
+    ::selection {
+      background: rgba(99, 102, 241, 0.35);
+      color: inherit;
+    }
+
+    /* Matrix canvas */
+    #matrix-canvas {
+      position: absolute;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      pointer-events: none;
+      opacity: 0.15;
+      z-index: 1;
+      display: none;
+    }
+  </style>
+</head>
+<body class="bg-slate-900 text-slate-100 font-sans h-screen w-screen overflow-hidden flex flex-col items-center justify-center p-2 sm:p-4 select-none">
+
+  <!-- ============================================================ -->
+  <!-- SPLASH SCREEN -->
+  <!-- ============================================================ -->
+  <div id="splash-screen" class="fixed inset-0 z-50 bg-[#0b0f17] flex flex-col items-center justify-center transition-all duration-700">
+    <div class="relative flex flex-col items-center">
+      <!-- Glow ring -->
+      <div class="absolute -inset-4 bg-gradient-to-r from-emerald-500 via-cyan-500 to-indigo-500 rounded-full blur-xl opacity-40 animate-pulse"></div>
+      
+      <!-- Icon Logo -->
+      <div class="relative w-24 h-24 rounded-3xl bg-slate-800 border border-slate-700 flex items-center justify-center shadow-2xl mb-6">
+        <svg class="w-14 h-14 text-cyan-400" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="m4 17 6-6-6-6"/>
+          <path d="M12 19h8"/>
+          <path d="M20 5v4"/>
+          <path d="M16 7h4"/>
+        </svg>
+      </div>
+
+      <h1 class="text-3xl font-extrabold tracking-tight text-white mb-2 font-mono">Twominal</h1>
+      <p class="text-slate-400 text-sm mb-6">Terminal + Fish Interactive Shell Reimagined</p>
+
+      <!-- Loading Bar -->
+      <div class="w-64 h-1.5 bg-slate-800 rounded-full overflow-hidden mb-3 border border-slate-700/50">
+        <div id="splash-progress" class="h-full bg-gradient-to-r from-cyan-400 to-emerald-400 w-0 transition-all duration-300"></div>
+      </div>
+      <span id="splash-status" class="text-xs font-mono text-slate-500">Initializing PTY & shell environment...</span>
+    </div>
+  </div>
+
+  <!-- ============================================================ -->
+  <!-- MAIN WINDOW WRAPPER -->
+  <!-- ============================================================ -->
+  <main id="window-container" class="relative w-full max-w-6xl h-[94vh] rounded-2xl shadow-2xl overflow-hidden flex flex-col border border-slate-700/60 bg-[#0d1117] transition-all duration-300">
+    <canvas id="matrix-canvas"></canvas>
+
+    <!-- WINDOW HEADER / TITLEBAR -->
+    <header class="relative z-20 flex items-center justify-between px-4 py-2.5 bg-[#161b22] border-b border-[#30363d] select-none">
+      <!-- Left: macOS Traffic Lights & Title -->
+      <div class="flex items-center gap-3">
+        <div class="flex items-center gap-2">
+          <button id="btn-win-close" title="Close" class="w-3 h-3 rounded-full bg-[#ff5f56] hover:brightness-110 border border-black/20 flex items-center justify-center group">
+            <span class="opacity-0 group-hover:opacity-100 text-[8px] text-black font-bold">×</span>
+          </button>
+          <button id="btn-win-min" title="Minimize" class="w-3 h-3 rounded-full bg-[#ffbd2e] hover:brightness-110 border border-black/20 flex items-center justify-center group">
+            <span class="opacity-0 group-hover:opacity-100 text-[8px] text-black font-bold">−</span>
+          </button>
+          <button id="btn-win-max" title="Maximize / Fullscreen" class="w-3 h-3 rounded-full bg-[#27c93f] hover:brightness-110 border border-black/20 flex items-center justify-center group">
+            <span class="opacity-0 group-hover:opacity-100 text-[7px] text-black font-bold">＋</span>
+          </button>
+        </div>
+
+        <div class="h-4 w-[1px] bg-slate-700 mx-1"></div>
+
+        <!-- TABS CONTAINER -->
+        <div id="tabs-list" class="flex items-center gap-1.5 overflow-x-auto max-w-md sm:max-w-xl py-0.5">
+          <!-- Dynamically populated tabs -->
+        </div>
+
+        <!-- NEW TAB BUTTON -->
+        <button id="btn-new-tab" title="New Tab (Ctrl+T)" class="p-1 rounded hover:bg-slate-700/60 text-slate-400 hover:text-slate-200 transition-colors">
+          <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"/></svg>
+        </button>
+      </div>
+
+      <!-- Right: Control Bar & Shortcuts -->
+      <div class="flex items-center gap-2 text-xs font-mono">
+        <!-- Vim Mode Indicator Pill -->
+        <button id="btn-toggle-vim-mode" title="Toggle Vim Navigation Mode (Esc/i)" class="flex items-center gap-1 px-2.5 py-1 rounded-md bg-amber-500/10 hover:bg-amber-500/20 text-amber-300 border border-amber-500/30 transition-colors">
+          <span class="font-bold text-[10px]" id="vim-mode-badge">VIM: INSERT</span>
+        </button>
+
+        <!-- Theme Mode Selector Dropdown -->
+        <div class="relative">
+          <button id="btn-theme-menu" class="p-1.5 rounded-md hover:bg-slate-700/60 text-slate-300 hover:text-white transition-colors flex items-center gap-1">
+            <span id="theme-icon">🌅</span>
+            <svg class="w-3 h-3 text-slate-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/></svg>
+          </button>
+          
+          <!-- Dropdown Menu -->
+          <div id="theme-dropdown" class="hidden absolute right-0 mt-2 w-48 rounded-xl bg-[#1c2128] border border-[#30363d] shadow-2xl py-1.5 z-50 text-slate-200">
+            <div class="px-3 py-1 text-[11px] font-semibold text-slate-400 uppercase tracking-wider">Appearance</div>
+            <button onclick="setThemeMode('dark')" class="w-full text-left px-3 py-1.5 hover:bg-slate-700/50 flex items-center justify-between text-xs">
+              <span>🌙 Always Dark</span>
+              <span id="check-dark" class="text-cyan-400 hidden">✓</span>
+            </button>
+            <button onclick="setThemeMode('light')" class="w-full text-left px-3 py-1.5 hover:bg-slate-700/50 flex items-center justify-between text-xs">
+              <span>☀️ Always Light</span>
+              <span id="check-light" class="text-cyan-400 hidden">✓</span>
+            </button>
+            <button onclick="setThemeMode('auto')" class="w-full text-left px-3 py-1.5 hover:bg-slate-700/50 flex items-center justify-between text-xs">
+              <span>🌅 Sunset to Sunrise</span>
+              <span id="check-auto" class="text-cyan-400">✓</span>
+            </button>
+            <div class="border-t border-slate-700 my-1"></div>
+            <button onclick="toggleLigatures()" class="w-full text-left px-3 py-1.5 hover:bg-slate-700/50 flex items-center justify-between text-xs">
+              <span>🔤 Font Ligatures</span>
+              <span id="check-ligatures" class="text-emerald-400">ON</span>
+            </button>
+          </div>
+        </div>
+
+        <!-- Help / Quick Settings -->
+        <button id="btn-open-settings" title="Settings & Help" class="p-1.5 rounded-md hover:bg-slate-700/60 text-slate-400 hover:text-slate-200 transition-colors">
+          <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"/><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/></svg>
+        </button>
+      </div>
+    </header>
+
+    <!-- TERMINAL BODY CONTAINER -->
+    <div id="terminal-viewport" class="relative z-10 flex-1 p-4 overflow-y-auto font-mono text-sm sm:text-base leading-relaxed enable-ligatures cursor-text flex flex-col">
+      <!-- Active session output -->
+      <div id="terminal-output" class="flex flex-col gap-1.5 mb-2"></div>
+
+      <!-- ACTIVE PROMPT AND INPUT ROW -->
+      <div id="prompt-row" class="relative flex flex-wrap items-center gap-y-1 mt-1">
+        
+        <!-- FISH PROMPT BADGES -->
+        <div id="prompt-badges" class="flex items-center gap-1.5 select-none mr-2">
+          <!-- Folder Badge -->
+          <span class="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-indigo-500/20 text-indigo-300 font-semibold border border-indigo-500/30 text-xs">
+            <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z"/></svg>
+            <span id="prompt-cwd">~</span>
+          </span>
+
+          <!-- Git Branch Badge -->
+          <span id="prompt-git-badge" class="hidden inline-flex items-center gap-1 px-2 py-0.5 rounded bg-emerald-500/20 text-emerald-300 font-medium border border-emerald-500/30 text-xs">
+            <svg class="w-3.5 h-3.5" fill="currentColor" viewBox="0 0 16 16"><path fill-rule="evenodd" d="M11.75 2.5a.75.75 0 1 0 0 1.5.75.75 0 0 0 0-1.5zm-2.25.75a2.25 2.25 0 1 1 3 2.122V6A2.5 2.5 0 0 1 10 8.5H6a1 1 0 0 0-1 1v1.128a2.251 2.251 0 1 1-1.5 0V5.372a2.25 2.25 0 1 1 1.5 0v1.836A2.492 2.492 0 0 1 6 7h4a1 1 0 0 0 1-1v-.628A2.25 2.25 0 0 1 9.5 3.25zM4.25 12a.75.75 0 1 0 0 1.5.75.75 0 0 0 0-1.5zM3.5 3.25a.75.75 0 1 1 1.5 0 .75.75 0 0 1-1.5 0z"/></svg>
+            <span id="prompt-git"></span>
+          </span>
+
+          <!-- Prompt Arrow Symbol -->
+          <span class="text-cyan-400 font-bold ml-0.5">➜</span>
+        </div>
+
+        <!-- INPUT / AUTOSUGGESTION WRAPPER -->
+        <div class="relative flex-1 min-w-[240px] flex items-center">
+          <!-- Visible syntax highlighted layer & ghost text -->
+          <div id="input-rendered" class="whitespace-pre pointer-events-none z-10 inline-block leading-normal"></div>
+          
+          <!-- Virtual Cursor -->
+          <span id="terminal-cursor" class="inline-block w-2 h-4 bg-cyan-400 animate-cursor-blink ml-px z-10 flex-shrink-0"></span>
+
+          <!-- Ghost Autosuggestion Text (Fish-Style inline suggestion) -->
+          <span id="autosuggest-ghost" class="whitespace-pre text-twominal-fish-autosuggest font-mono pointer-events-none select-none z-0"></span>
+
+          <!-- Hidden Actual Input Box -->
+          <input 
+            type="text" 
+            id="cli-input" 
+            autofocus 
+            autocomplete="off" 
+            autocorrect="off" 
+            autocapitalize="off" 
+            spellcheck="false" 
+            class="absolute inset-0 opacity-0 cursor-text w-full z-20"
+          />
+        </div>
+      </div>
+
+      <!-- TAB COMPLETION DROPDOWN / MENU -->
+      <div id="completion-menu" class="hidden mt-2 p-2 rounded-lg bg-[#161b22] border border-[#30363d] shadow-2xl z-30 max-w-lg">
+        <div class="text-[11px] font-semibold text-slate-400 uppercase tracking-wider mb-1 flex items-center justify-between">
+          <span>Fish Tab Completions</span>
+          <span class="text-[10px] text-slate-500">Use Tab or Arrow Keys to navigate</span>
+        </div>
+        <div id="completion-items" class="grid grid-cols-2 sm:grid-cols-3 gap-1 text-xs"></div>
+      </div>
+    </div>
+
+    <!-- TOUCH / MOBILE HELPER KEYBAR -->
+    <div class="sm:hidden flex items-center justify-between px-3 py-1.5 bg-[#161b22] border-t border-[#30363d] text-xs font-mono">
+      <div class="flex items-center gap-1.5">
+        <button onclick="handleVirtualKey('Tab')" class="px-2 py-1 rounded bg-slate-800 text-slate-300 border border-slate-700">Tab ⇥</button>
+        <button onclick="handleVirtualKey('ArrowRight')" class="px-2 py-1 rounded bg-slate-800 text-slate-300 border border-slate-700">Auto ➔</button>
+        <button onclick="handleVirtualKey('Escape')" class="px-2 py-1 rounded bg-slate-800 text-slate-300 border border-slate-700">Esc</button>
+      </div>
+      <div class="flex items-center gap-1.5">
+        <button onclick="executeCommand('clear')" class="px-2 py-1 rounded bg-slate-800 text-slate-300 border border-slate-700">Clear</button>
+        <button onclick="executeCommand('help')" class="px-2 py-1 rounded bg-cyan-900/40 text-cyan-300 border border-cyan-700/50">Help</button>
+      </div>
+    </div>
+
+    <!-- WINDOW STATUSBAR -->
+    <footer class="relative z-20 flex items-center justify-between px-4 py-1.5 bg-[#161b22] border-t border-[#30363d] text-xs font-mono text-slate-400 select-none">
+      <div class="flex items-center gap-3">
+        <!-- VIM Mode Status -->
+        <span id="sb-vim-status" class="flex items-center gap-1 font-bold text-cyan-400">
+          <span class="w-1.5 h-1.5 rounded-full bg-cyan-400"></span>
+          <span>INSERT</span>
+        </span>
+        <span class="text-slate-600 hidden sm:inline">|</span>
+        <!-- Ligatures Status -->
+        <span id="sb-ligatures-status" class="hidden sm:inline text-emerald-400">
+          liga: on (===, !==, =&gt;)
+        </span>
+      </div>
+
+      <div class="flex items-center gap-3">
+        <!-- Sun/Theme Info -->
+        <span id="sb-theme-info" class="hidden md:flex items-center gap-1 text-slate-400">
+          <span>Mode: Sunset-Sunrise</span>
+        </span>
+        <span class="text-slate-600 hidden md:inline">|</span>
+        <!-- Time -->
+        <span id="sb-clock" class="text-slate-300">12:00:00 PM</span>
+      </div>
+    </footer>
+  </main>
+
+  <!-- ============================================================ -->
+  <!-- MODAL: SETTINGS & HELP -->
+  <!-- ============================================================ -->
+  <div id="modal-settings" class="fixed inset-0 z-50 bg-black/70 backdrop-blur-sm flex items-center justify-center p-4 hidden">
+    <div class="bg-[#161b22] border border-[#30363d] rounded-2xl max-w-2xl w-full p-6 shadow-2xl flex flex-col gap-4 animate-fade-in text-slate-200 max-h-[90vh] overflow-y-auto">
+      <div class="flex items-center justify-between border-b border-[#30363d] pb-3">
+        <div class="flex items-center gap-2 font-mono font-bold text-white text-lg">
+          <span class="text-cyan-400">✦</span> Twominal Guide & Settings
+        </div>
+        <button onclick="closeSettingsModal()" class="text-slate-400 hover:text-white text-lg">✕</button>
+      </div>
+
+      <!-- Quick Cheatsheet -->
+      <div class="grid grid-cols-1 sm:grid-cols-2 gap-4 text-xs font-mono">
+        <div class="p-3 rounded-xl bg-slate-800/60 border border-slate-700">
+          <h3 class="font-bold text-cyan-300 mb-2 text-sm flex items-center gap-1.5">
+            <span>🐟</span> Fish Shell Features
+          </h3>
+          <ul class="space-y-1.5 text-slate-300">
+            <li><b class="text-emerald-400">Green syntax:</b> Valid commands</li>
+            <li><b class="text-red-400">Red syntax:</b> Invalid / typo commands</li>
+            <li><b class="text-slate-400">Right Arrow (→):</b> Accept autosuggestion</li>
+            <li><b class="text-slate-400">Tab:</b> Trigger smart completion menu</li>
+            <li><b class="text-slate-400">Ctrl + L:</b> Clear current screen</li>
+            <li><b class="text-slate-400">Ctrl + T:</b> Create new terminal tab</li>
+          </ul>
+        </div>
+
+        <div class="p-3 rounded-xl bg-slate-800/60 border border-slate-700">
+          <h3 class="font-bold text-amber-300 mb-2 text-sm flex items-center gap-1.5">
+            <span>⚡</span> Vim Mode Keybindings
+          </h3>
+          <ul class="space-y-1.5 text-slate-300">
+            <li><b class="text-amber-400">Esc:</b> Enter NORMAL mode</li>
+            <li><b class="text-amber-400">i / a:</b> Enter INSERT mode</li>
+            <li><b class="text-slate-400">h / l:</b> Move cursor Left / Right</li>
+            <li><b class="text-slate-400">w / b:</b> Jump word forward / back</li>
+            <li><b class="text-slate-400">0 / $:</b> Jump line start / end</li>
+            <li><b class="text-slate-400">x:</b> Delete single character</li>
+            <li><b class="text-slate-400">dd:</b> Clear entire input line</li>
+          </ul>
+        </div>
+      </div>
+
+      <!-- Font & Typography Settings Section -->
+      <div class="p-3.5 rounded-xl bg-slate-800/40 border border-slate-700 font-mono text-xs space-y-3">
+        <div class="flex items-center justify-between flex-wrap gap-2 border-b border-slate-700/50 pb-2">
+          <div>
+            <div class="font-bold text-cyan-300 text-sm flex items-center gap-1.5">
+              <span>🔤</span> Font &amp; Typography Settings
+            </div>
+            <div class="text-slate-400 text-[11px] mt-0.5">
+              Customize monospace typeface, size, line height, letter spacing, and ligatures.
+            </div>
+          </div>
+          <button onclick="resetDemoFontSettings()" class="text-[11px] px-2.5 py-1 rounded bg-slate-700 hover:bg-slate-600 text-slate-200 transition-colors">
+            Reset Defaults
+          </button>
+        </div>
+
+        <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+          <!-- Font Family -->
+          <div class="space-y-1">
+            <label for="demo-select-font-family" class="block font-semibold text-slate-300">Font Family</label>
+            <select id="demo-select-font-family" onchange="setDemoFontFamily(this.value)" class="w-full px-2.5 py-1.5 rounded-lg bg-slate-900 border border-slate-700 text-xs font-mono text-slate-200 outline-none focus:border-cyan-500">
+              <optgroup label="✦ Programming Fonts (Ligatures Supported)">
+                <option value="Fira Code">Fira Code (Ligatures)</option>
+                <option value="JetBrains Mono">JetBrains Mono (Ligatures)</option>
+                <option value="Cascadia Code">Cascadia Code (Ligatures)</option>
+                <option value="Victor Mono">Victor Mono (Ligatures & Cursive)</option>
+              </optgroup>
+              <optgroup label="Standard Monospace (No Ligatures)">
+                <option value="Source Code Pro">Source Code Pro</option>
+                <option value="Roboto Mono">Roboto Mono</option>
+                <option value="Inconsolata">Inconsolata</option>
+                <option value="Space Mono">Space Mono</option>
+                <option value="Menlo, Monaco, Consolas, monospace">System Monospace (Menlo/Consolas)</option>
+              </optgroup>
+            </select>
+          </div>
+
+          <!-- Font Size -->
+          <div class="space-y-1">
+            <div class="flex items-center justify-between">
+              <label for="demo-input-font-size" class="font-semibold text-slate-300">Font Size (Cmd +/-)</label>
+              <span id="demo-label-font-size-val" class="text-cyan-400 font-bold">14px</span>
+            </div>
+            <div class="flex items-center gap-2">
+              <button onclick="adjustDemoFontSize(-1)" class="w-7 h-7 flex items-center justify-center rounded bg-slate-700 hover:bg-slate-600 font-bold text-sm select-none">−</button>
+              <input type="range" id="demo-input-font-size" min="9" max="32" step="1" value="14" oninput="setDemoFontSize(this.value)" class="flex-1 accent-cyan-500 cursor-pointer" />
+              <button onclick="adjustDemoFontSize(1)" class="w-7 h-7 flex items-center justify-center rounded bg-slate-700 hover:bg-slate-600 font-bold text-sm select-none">+</button>
+            </div>
+          </div>
+
+          <!-- Font Weight -->
+          <div class="space-y-1">
+            <label for="demo-select-font-weight" class="block font-semibold text-slate-300">Font Weight</label>
+            <select id="demo-select-font-weight" onchange="setDemoFontWeight(this.value)" class="w-full px-2.5 py-1.5 rounded-lg bg-slate-900 border border-slate-700 text-xs font-mono text-slate-200 outline-none focus:border-cyan-500">
+              <option value="300">Light (300)</option>
+              <option value="400" selected>Regular (400)</option>
+              <option value="500">Medium (500)</option>
+              <option value="600">Semi-Bold (600)</option>
+              <option value="700">Bold (700)</option>
+            </select>
+          </div>
+
+          <!-- Line Height -->
+          <div class="space-y-1">
+            <div class="flex items-center justify-between">
+              <label for="demo-input-line-height" class="font-semibold text-slate-300">Line Height</label>
+              <span id="demo-label-line-height-val" class="text-cyan-400 font-bold">1.5</span>
+            </div>
+            <input type="range" id="demo-input-line-height" min="1.0" max="2.4" step="0.1" value="1.5" oninput="setDemoLineHeight(this.value)" class="w-full accent-cyan-500 cursor-pointer" />
+          </div>
+
+          <!-- Letter Spacing -->
+          <div class="space-y-1">
+            <div class="flex items-center justify-between">
+              <label for="demo-input-letter-spacing" class="font-semibold text-slate-300">Letter Spacing</label>
+              <span id="demo-label-letter-spacing-val" class="text-cyan-400 font-bold">0px</span>
+            </div>
+            <input type="range" id="demo-input-letter-spacing" min="-1.5" max="3" step="0.5" value="0" oninput="setDemoLetterSpacing(this.value)" class="w-full accent-cyan-500 cursor-pointer" />
+          </div>
+
+          <!-- Ligatures Toggle Switch -->
+          <div class="flex items-center justify-between p-2 rounded-lg bg-slate-900/60 border border-slate-700/60">
+            <div>
+              <div class="font-semibold text-slate-200">Programming Ligatures</div>
+              <div class="text-[10px] text-slate-400">Render ===, !==, =&gt;, &lt;= as connected symbols</div>
+            </div>
+            <button onclick="toggleLigatures()" id="demo-btn-toggle-ligatures" class="px-3 py-1 rounded-md text-xs font-bold transition-colors bg-emerald-500/20 text-emerald-400 border border-emerald-500/30">
+              <span id="demo-label-ligatures-status">ON</span>
+            </button>
+          </div>
+        </div>
+
+        <!-- Live Typography Preview Box -->
+        <div class="space-y-1 pt-1">
+          <div class="text-[11px] font-semibold text-slate-400 uppercase tracking-wider">Live Typography Preview</div>
+          <div id="font-preview-box" class="p-3 rounded-lg bg-[#0d1117] text-slate-100 border border-slate-700 font-mono overflow-x-auto whitespace-pre leading-relaxed select-text enable-ligatures">
+<span class="text-twominal-fish-keyword">const</span> <span class="text-twominal-fish-valid">connect</span> = <span class="text-twominal-fish-param">async</span> (<span class="text-twominal-fish-param">host</span>: <span class="text-twominal-fish-quote">string</span>, <span class="text-twominal-fish-param">port</span>: <span class="text-twominal-fish-quote">number</span> = <span class="text-amber-400">8080</span>) =&gt; {
+  <span class="text-twominal-fish-keyword">if</span> (host !== <span class="text-twominal-fish-quote">"localhost"</span> &amp;&amp; port &gt;= <span class="text-amber-400">1024</span>) {
+    <span class="text-twominal-fish-keyword">return</span> <span class="text-twominal-fish-param">await</span> socket.open(<span class="text-twominal-fish-quote">`https://\${host}:\${port}`</span>); <span class="text-twominal-fish-comment">// Ligatures: === !== =&gt; &lt;= &gt;= !=</span>
+  }
+};</div>
+        </div>
+      </div>
+
+      <div class="flex justify-end pt-2">
+        <button onclick="closeSettingsModal()" class="px-5 py-2 rounded-lg bg-slate-700 hover:bg-slate-600 font-semibold text-xs">Got it</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ============================================================ -->
+  <!-- JAVASCRIPT CORE ENGINE -->
+  <!-- ============================================================ -->
+  <script>
+    /* ==========================================================
+       1. GLOBAL STATE & CONFIGURATION
+       ========================================================== */
+    const CONFIG = {
+      name: "Twominal",
+      version: "1.0.4-hybrid",
+      activeStack: "Rust + Tauri / GPUI",
+      themeMode: "auto", // 'dark', 'light', 'auto' (sunset-to-sunrise)
+      ligatures: true,
+      vimMode: true,
+      vimState: "INSERT", // 'INSERT' or 'NORMAL'
+      vimCursorPos: 0,
+    };
+
+    // Virtual File System Structure
+    const VFS = {
+      "/": ["home", "etc", "var", "bin"],
+      "/home": ["user"],
+      "/home/user": ["projects", "documents", "downloads", "twominal.config.fish", "readme.md"],
+      "/home/user/projects": ["twominal", "rust-pty-core", "fish-autosuggest", "matrix-sim"],
+      "/home/user/projects/twominal": ["src", "Cargo.toml", "README.md", "tauri.conf.json"],
+      "/home/user/documents": ["todo.txt", "notes.md", "architecture.pdf"],
+    };
+
+    const VFS_FILES = {
+      "/home/user/readme.md": "# Twominal\nA blazing fast cross-platform terminal emulator inspired by the Fish interactive shell experience.\nFeatures: Autosuggestions, live syntax highlighting, vim mode, font ligatures.",
+      "/home/user/twominal.config.fish": "# Twominal User Configuration\nset -g fish_greeting ''\nset -g twominal_theme 'tokyo_night'\nset -g twominal_vim_mode true\nset -g twominal_sunset_sunrise true\nset -g font_ligatures true",
+      "/home/user/documents/todo.txt": "1. Test Rust GPUI backend bindings\n2. Fine-tune Fish live syntax parser\n3. Enjoy zero-lag terminal editing!",
+      "/home/user/projects/twominal/Cargo.toml": '[package]\nname = "twominal-core"\nversion = "0.1.0"\nedition = "2024"\n\n[dependencies]\ntauri = "2.0"\nalacritty_terminal = "0.24"',
+    };
+
+    // List of known commands for Fish syntax highlighting & autosuggestions
+    const KNOWN_COMMANDS = [
+      "/help", "/theme", "/font", "/vim", "/matrix", "/settings", "/clear", "/neofetch",
+      "/ligatures", "/stack", "/history", "/date", "/tabs", "/exit",
+      "help", "clear", "ls", "cd", "pwd", "cat", "echo", "touch", "mkdir", "rm", 
+      "tree", "neofetch", "theme", "font", "vim", "stack", "ligatures", "matrix", "date", 
+      "history", "settings", "tabs", "whoami", "uname", "top", "curl", "fish_config", "exit"
+    ];
+
+    const BUILTIN_COMMANDS = [
+      { label: "/help", value: "/help", description: "Twominal builtin & slash commands guide" },
+      { label: "/theme", value: "/theme", description: "Switch theme mode (dark | light | auto)" },
+      { label: "/font", value: "/font", description: "Configure typography, size, weight & ligatures" },
+      { label: "/vim", value: "/vim", description: "Toggle Vim modal navigation mode (NORMAL/INSERT)" },
+      { label: "/matrix", value: "/matrix", description: "Toggle background matrix digital rain effect" },
+      { label: "/clear", value: "/clear", description: "Clear terminal scrollback buffer" },
+      { label: "/neofetch", value: "/neofetch", description: "Twominal system & environment info banner" },
+      { label: "/settings", value: "/settings", description: "Open settings & typography modal" },
+      { label: "/stack", value: "/stack", description: "Twominal engine architecture & compilation info" },
+      { label: "/ligatures", value: "/ligatures", description: "Test or toggle font programming ligatures" },
+      { label: "/history", value: "/history", description: "Display persistent command execution history" },
+      { label: "/date", value: "/date", description: "Display current system timestamp" },
+      { label: "/tabs", value: "/tabs", description: "Multi-tab management (new, close, next, prev)" },
+      { label: "/exit", value: "/exit", description: "Close active shell tab session" },
+    ];
+
+    // Multi-tab Management
+    let tabs = [];
+    let activeTabId = null;
+    let tabCounter = 1;
+
+    /* Tab Session Object */
+    class TabSession {
+      constructor(id, title = "fish") {
+        this.id = id;
+        this.title = title;
+        this.cwd = "~";
+        this.gitBranch = "";
+        this.history = [
+          "echo 'Welcome to Twominal!'",
+          "neofetch",
+          "ls -la"
+        ];
+        this.historyIndex = -1;
+        this.outputHistory = [];
+        this.currentInput = "";
+        this.vimMode = true;
+        this.vimState = "INSERT";
+        this.vimCursorPos = 0;
+      }
+    }
+
+    /* ==========================================================
+       2. INITIALIZATION & SPLASH SCREEN
+       ========================================================== */
+    window.addEventListener("DOMContentLoaded", () => {
+      // Simulate splash progress
+      const splashProgress = document.getElementById("splash-progress");
+      const splashStatus = document.getElementById("splash-status");
+      const splashScreen = document.getElementById("splash-screen");
+
+      const steps = [
+        { progress: "30%", text: "Mounting Virtual POSIX PTY..." },
+        { progress: "65%", text: "Initializing Fish autosuggestion parser..." },
+        { progress: "90%", text: "Loading Fira Code font ligatures..." },
+        { progress: "100%", text: "Twominal ready." },
+      ];
+
+      let stepIndex = 0;
+      const stepInterval = setInterval(() => {
+        if (stepIndex < steps.length) {
+          splashProgress.style.width = steps[stepIndex].progress;
+          splashStatus.textContent = steps[stepIndex].text;
+          stepIndex++;
+        } else {
+          clearInterval(stepInterval);
+          setTimeout(() => {
+            splashScreen.classList.add("opacity-0", "pointer-events-none");
+            setTimeout(() => {
+              splashScreen.style.display = "none";
+              focusInput();
+            }, 700);
+          }, 400);
+        }
+      }, 250);
+
+      // Create initial tab with macOS format
+      createNewTab();
+
+      // Init clock & theme timer
+      initClock();
+      checkSunsetSunriseTheme();
+      setInterval(checkSunsetSunriseTheme, 60000); // check theme mode every minute
+
+      // Global event listeners
+      setupEventListeners();
+    });
+
+    /* ==========================================================
+       3. TAB MANAGEMENT (NATIVE MACOS TERMINAL FORMAT)
+       ========================================================== */
+    function getDirectoryBasename(cwd) {
+      const p = (cwd || "").trim();
+      if (!p || p === "~" || p === "." || p === "/") return p || "~";
+      const cleaned = p.replace(/[/\\]+$/, "");
+      if (!cleaned || cleaned === "~") return "~";
+      const parts = cleaned.split(/[/\\]/);
+      return parts[parts.length - 1] || cleaned;
+    }
+
+    function computeTabTitle(tab) {
+      if (tab.customTitle && tab.customTitle.trim().length > 0) {
+        return tab.customTitle.trim();
+      }
+      const folder = getDirectoryBasename(tab.cwd);
+      const proc = tab.activeProcess || "fish";
+      return `${folder} — ${proc}`;
+    }
+
+    function createNewTab(title = null) {
+      const id = "tab-" + Date.now();
+      const activeTab = getActiveTab();
+      const initialCwd = activeTab ? activeTab.cwd : "~";
+      const newTab = new TabSession(id, title);
+      newTab.cwd = initialCwd;
+      newTab.activeProcess = "fish";
+      newTab.title = computeTabTitle(newTab);
+      tabs.push(newTab);
+      renderTabs();
+      switchTab(id);
+    }
+
+    function updateDemoPrompt(tab) {
+      if (!tab) return;
+      document.getElementById("prompt-cwd").textContent = tab.cwd;
+      const gitBadge = document.getElementById("prompt-git-badge");
+      const gitText = document.getElementById("prompt-git");
+      if (gitBadge && gitText) {
+        if (tab.gitBranch && tab.gitBranch.trim().length > 0) {
+          gitText.textContent = tab.gitBranch.trim();
+          gitBadge.classList.remove("hidden");
+        } else {
+          gitText.textContent = "";
+          gitBadge.classList.add("hidden");
+        }
+      }
+    }
+
+    function switchTab(id) {
+      activeTabId = id;
+      const tab = getActiveTab();
+      if (!tab) return;
+
+      // Update Prompt Indicators
+      updateDemoPrompt(tab);
+      
+      // Update Window Document Title (Native macOS style)
+      document.title = `${tab.title} — Twominal`;
+
+      // Update Vim state for this tab
+      CONFIG.vimMode = tab.vimMode;
+      CONFIG.vimState = tab.vimState;
+      CONFIG.vimCursorPos = tab.currentInput.length;
+      updateVimUI();
+
+      renderTabs();
+      renderTerminalOutput();
+      
+      // Reset input
+      const cliInput = document.getElementById("cli-input");
+      cliInput.value = tab.currentInput;
+      updateSyntaxAndAutosuggest();
+      focusInput();
+    }
+
+    function closeTab(id, e) {
+      if (e) e.stopPropagation();
+      if (tabs.length === 1) {
+        // Reset single tab instead of closing window completely
+        const tab = tabs[0];
+        tab.outputHistory = [];
+        tab.currentInput = "";
+        renderTerminalOutput();
+        return;
+      }
+      tabs = tabs.filter(t => t.id !== id);
+      if (activeTabId === id) {
+        activeTabId = tabs[tabs.length - 1].id;
+      }
+      switchTab(activeTabId);
+    }
+
+    function getActiveTab() {
+      return tabs.find(t => t.id === activeTabId) || tabs[0];
+    }
+
+    function renderTabs() {
+      const container = document.getElementById("tabs-list");
+      container.innerHTML = "";
+
+      tabs.forEach((tab, index) => {
+        const isActive = tab.id === activeTabId;
+        const tabEl = document.createElement("div");
+        tabEl.className = `group relative flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs font-mono cursor-pointer transition-all duration-150 border select-none ${
+          isActive 
+            ? "bg-[#1c2128] text-slate-100 border-[#30363d] shadow-sm font-semibold" 
+            : "bg-slate-800/30 text-slate-400 hover:text-slate-200 border-transparent hover:bg-slate-800/60 font-normal"
+        }`;
+        tabEl.setAttribute("title", `${tab.cwd} (${tab.activeProcess || "fish"}) • Cmd+${index + 1} (Double click to rename)`);
+        tabEl.onclick = () => switchTab(tab.id);
+
+        tabEl.ondblclick = (e) => {
+          e.stopPropagation();
+          const newName = prompt("Rename Tab (or leave empty to reset to macOS default):", tab.customTitle || tab.title);
+          if (newName !== null) {
+            tab.customTitle = newName.trim().length > 0 ? newName.trim() : null;
+            tab.title = computeTabTitle(tab);
+            renderTabs();
+            document.title = `${tab.title} — Twominal`;
+          }
+        };
+
+        tabEl.innerHTML = `
+          <span class="text-[11px] opacity-75 flex items-center flex-shrink-0">
+            <svg class="w-3.5 h-3.5 ${isActive ? "text-cyan-400" : "text-slate-500"}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="m4 17 6-6-6-6M12 19h8"/>
+            </svg>
+          </span>
+          <span class="truncate max-w-[140px] sm:max-w-[200px]">${escapeHtml(tab.title)}</span>
+          <button title="Close Tab" class="w-4 h-4 rounded-full flex items-center justify-center text-[10px] text-slate-400 hover:bg-slate-700/80 hover:text-red-400 p-0.5 rounded transition-colors flex-shrink-0 opacity-70 group-hover:opacity-100" onclick="closeTab('${tab.id}', event)">✕</button>
+        `;
+        container.appendChild(tabEl);
+      });
+    }
+
+    /* ==========================================================
+       4. FISH SHELL ENGINE: SYNTAX HIGHLIGHTING & AUTOSUGGESTIONS
+       ========================================================== */
+    function updateSyntaxAndAutosuggest() {
+      const cliInput = document.getElementById("cli-input");
+      const renderedContainer = document.getElementById("input-rendered");
+      const ghostContainer = document.getElementById("autosuggest-ghost");
+      const text = cliInput.value;
+      const tab = getActiveTab();
+      if (tab) tab.currentInput = text;
+
+      // 1. Highlight tokens
+      renderedContainer.innerHTML = highlightFishSyntax(text);
+
+      // 2. Autosuggestion Engine (Fish faint ghost text)
+      if (text.trim().length > 0) {
+        const suggestion = getAutosuggestion(text);
+        if (suggestion && suggestion.toLowerCase().startsWith(text.toLowerCase())) {
+          ghostContainer.textContent = suggestion.slice(text.length);
+        } else {
+          ghostContainer.textContent = "";
+        }
+      } else {
+        ghostContainer.textContent = "";
+      }
+
+      // 3. Live Slash Builtin Command Palette
+      if (text.startsWith("/") && !text.includes(" ")) {
+        completionCandidates = BUILTIN_COMMANDS.filter(cmd => cmd.label.toLowerCase().startsWith(text.toLowerCase()));
+        if (completionCandidates.length > 0) {
+          selectedCompletionIndex = 0;
+          renderCompletionMenu();
+          document.getElementById("completion-menu").classList.remove("hidden");
+        } else {
+          document.getElementById("completion-menu").classList.add("hidden");
+        }
+      } else if (!text.startsWith("/") && completionCandidates.some(c => c.label && c.label.startsWith("/"))) {
+        document.getElementById("completion-menu").classList.add("hidden");
+      }
+
+      // 4. Vim Normal Mode Cursor positioning
+      if (CONFIG.vimMode && CONFIG.vimState === "NORMAL") {
+        renderNormalModeCursor(text);
+      } else {
+        document.getElementById("terminal-cursor").classList.remove("hidden");
+      }
+    }
+
+    function highlightFishSyntax(raw) {
+      if (!raw) return "";
+
+      const tokens = raw.split(/(\s+|"[^"]*"|'[^']*')/g).filter(Boolean);
+      let isFirstWord = true;
+      let html = "";
+
+      for (let i = 0; i < tokens.length; i++) {
+        const token = tokens[i];
+        
+        if (/^\s+$/.test(token)) {
+          html += `<span class="whitespace-pre">${escapeHtml(token)}</span>`;
+          continue;
+        }
+
+        if (isFirstWord) {
+          isFirstWord = false;
+          // Check if valid command
+          const isValid = KNOWN_COMMANDS.includes(token.toLowerCase()) || token === "/" || token.startsWith("./") || token.startsWith("/");
+          if (isValid) {
+            html += `<span class="text-twominal-fish-valid font-bold">${escapeHtml(token)}</span>`;
+          } else {
+            // Invalid command turns RED (Fish signature syntax highlighting)
+            html += `<span class="text-twominal-fish-invalid underline decoration-wavy decoration-red-500 font-bold">${escapeHtml(token)}</span>`;
+          }
+        } else {
+          // Arguments & Options
+          if (token.startsWith("--") || token.startsWith("-")) {
+            html += `<span class="text-twominal-fish-param">${escapeHtml(token)}</span>`;
+          } else if (token.startsWith('"') || token.startsWith("'")) {
+            html += `<span class="text-twominal-fish-quote">${escapeHtml(token)}</span>`;
+          } else if (token.includes("/") || token.startsWith("~")) {
+            html += `<span class="text-twominal-fish-path underline decoration-slate-600">${escapeHtml(token)}</span>`;
+          } else if (token === "&&" || token === "||" || token === "|" || token === ";") {
+            html += `<span class="text-twominal-fish-keyword font-bold">${escapeHtml(token)}</span>`;
+          } else {
+            html += `<span class="text-slate-200">${escapeHtml(token)}</span>`;
+          }
+        }
+      }
+      return html;
+    }
+
+    function getAutosuggestion(input) {
+      const tab = getActiveTab();
+      const lower = input.toLowerCase();
+
+      // Check tab history first (most recent)
+      for (let i = tab.history.length - 1; i >= 0; i--) {
+        const histCmd = tab.history[i];
+        if (histCmd.toLowerCase().startsWith(lower) && histCmd.length > input.length) {
+          return histCmd;
+        }
+      }
+
+      // Check command builtins
+      for (const cmd of KNOWN_COMMANDS) {
+        if (cmd.startsWith(lower) && cmd.length > input.length) {
+          return cmd;
+        }
+      }
+
+      // Check VFS directory completions for 'cd' or 'cat'
+      if (lower.startsWith("cd ") || lower.startsWith("cat ") || lower.startsWith("ls ")) {
+        const parts = input.split(" ");
+        const prefix = parts.slice(0, -1).join(" ") + " ";
+        const target = parts[parts.length - 1];
+        const files = getFilesForCurrentDir();
+        for (const file of files) {
+          if (file.toLowerCase().startsWith(target.toLowerCase())) {
+            return prefix + file;
+          }
+        }
+      }
+
+      return "";
+    }
+
+    function getFilesForCurrentDir() {
+      const tab = getActiveTab();
+      const realPath = resolvePath(tab.cwd);
+      return VFS[realPath] || [];
+    }
+
+    function resolvePath(displayPath) {
+      if (displayPath === "~") return "/home/user";
+      if (displayPath === "~/projects") return "/home/user/projects";
+      if (displayPath === "~/documents") return "/home/user/documents";
+      return "/home/user";
+    }
+
+    /* ==========================================================
+       5. TAB COMPLETIONS POPUP MENU
+       ========================================================== */
+    let completionCandidates = [];
+    let selectedCompletionIndex = 0;
+
+    function triggerTabCompletion() {
+      const cliInput = document.getElementById("cli-input");
+      const text = cliInput.value;
+      const menu = document.getElementById("completion-menu");
+
+      // Auto-accept full ghost suggestion if right at end
+      const ghost = document.getElementById("autosuggest-ghost").textContent;
+      if (ghost) {
+        cliInput.value += ghost;
+        updateSyntaxAndAutosuggest();
+        return;
+      }
+
+      const parts = text.split(" ");
+      const currentWord = parts[parts.length - 1].toLowerCase();
+
+      if (currentWord.startsWith("/") && !currentWord.slice(1).includes("/")) {
+        completionCandidates = BUILTIN_COMMANDS.filter(cmd => cmd.label.toLowerCase().startsWith(currentWord));
+      } else if (parts.length <= 1) {
+        // Command completion
+        completionCandidates = KNOWN_COMMANDS.filter(cmd => cmd.startsWith(currentWord));
+      } else {
+        // File/Directory completion
+        const files = getFilesForCurrentDir();
+        completionCandidates = files.filter(f => f.toLowerCase().startsWith(currentWord));
+      }
+
+      if (completionCandidates.length === 0) {
+        menu.classList.add("hidden");
+        return;
+      }
+
+      if (completionCandidates.length === 1) {
+        // Single match, auto-fill
+        const val = typeof completionCandidates[0] === "object" ? completionCandidates[0].value : completionCandidates[0];
+        parts[parts.length - 1] = val;
+        cliInput.value = parts.join(" ") + " ";
+        updateSyntaxAndAutosuggest();
+        menu.classList.add("hidden");
+        return;
+      }
+
+      // Show interactive completion menu
+      selectedCompletionIndex = 0;
+      renderCompletionMenu();
+      menu.classList.remove("hidden");
+    }
+
+    function renderCompletionMenu() {
+      const itemsContainer = document.getElementById("completion-items");
+      itemsContainer.innerHTML = "";
+
+      const isSlashPalette = completionCandidates.length > 0 && typeof completionCandidates[0] === "object";
+
+      if (isSlashPalette) {
+        itemsContainer.className = "flex flex-col gap-1 text-xs max-h-64 overflow-y-auto";
+      } else {
+        itemsContainer.className = "grid grid-cols-2 sm:grid-cols-3 gap-1 text-xs";
+      }
+
+      completionCandidates.forEach((cand, idx) => {
+        const isSelected = idx === selectedCompletionIndex;
+        const div = document.createElement("div");
+
+        if (isSlashPalette) {
+          div.className = `px-2.5 py-1.5 rounded-md cursor-pointer font-mono transition-colors text-xs flex items-center justify-between gap-3 ${
+            isSelected 
+              ? "bg-cyan-500/20 text-cyan-300 border border-cyan-500/40 font-bold" 
+              : "hover:bg-slate-700/50 text-slate-300 border border-transparent"
+          }`;
+          div.innerHTML = `
+            <div class="flex items-center gap-2 min-w-0">
+              <span class="px-1.5 py-0.5 rounded text-[10px] font-bold bg-cyan-900/60 text-cyan-300 border border-cyan-700/50 flex-shrink-0">/</span>
+              <span class="font-bold text-white truncate">${escapeHtml(cand.label)}</span>
+            </div>
+            ${cand.description ? `<span class="text-[11px] text-slate-400 truncate font-sans text-right">${escapeHtml(cand.description)}</span>` : ""}
+          `;
+          div.onclick = () => {
+            applyCompletionCandidate(cand.value);
+          };
+        } else {
+          div.className = `px-2 py-1 rounded cursor-pointer font-mono truncate transition-colors ${
+            isSelected 
+              ? "bg-cyan-500/20 text-cyan-300 border border-cyan-500/40 font-bold" 
+              : "hover:bg-slate-700/50 text-slate-300 border border-transparent"
+          }`;
+          const label = typeof cand === "string" ? cand : cand.label;
+          div.innerHTML = `<span>${label.endsWith(".md") || label.endsWith(".txt") ? "📄" : "📁"} ${escapeHtml(label)}</span>`;
+          div.onclick = () => {
+            applyCompletionCandidate(typeof cand === "string" ? cand : cand.value);
+          };
+        }
+
+        itemsContainer.appendChild(div);
+        if (isSelected) {
+          div.scrollIntoView({ block: "nearest" });
+        }
+      });
+    }
+
+    function applyCompletionCandidate(candidate) {
+      const cliInput = document.getElementById("cli-input");
+      const parts = cliInput.value.split(" ");
+      parts[parts.length - 1] = candidate;
+      cliInput.value = parts.join(" ") + " ";
+      document.getElementById("completion-menu").classList.add("hidden");
+      updateSyntaxAndAutosuggest();
+      focusInput();
+    }
+
+    /* ==========================================================
+       6. VIM NAVIGATION MODE
+       ========================================================== */
+    function toggleVimMode() {
+      CONFIG.vimMode = !CONFIG.vimMode;
+      const tab = getActiveTab();
+      if (tab) tab.vimMode = CONFIG.vimMode;
+      CONFIG.vimState = "INSERT";
+      updateVimUI();
+      focusInput();
+    }
+
+    function updateVimUI() {
+      const badge = document.getElementById("vim-mode-badge");
+      const sbStatus = document.getElementById("sb-vim-status");
+
+      if (CONFIG.vimMode) {
+        badge.textContent = `VIM: ${CONFIG.vimState}`;
+        
+        if (CONFIG.vimState === "NORMAL") {
+          sbStatus.innerHTML = `<span class="w-1.5 h-1.5 rounded-full bg-amber-400"></span><span class="text-amber-400">NORMAL</span>`;
+        } else {
+          sbStatus.innerHTML = `<span class="w-1.5 h-1.5 rounded-full bg-cyan-400"></span><span class="text-cyan-400">INSERT</span>`;
+        }
+      } else {
+        badge.textContent = "VIM: OFF";
+        sbStatus.innerHTML = `<span class="w-1.5 h-1.5 rounded-full bg-slate-500"></span><span class="text-slate-400">SHELL</span>`;
+      }
+    }
+
+    function handleVimNormalKey(e) {
+      const cliInput = document.getElementById("cli-input");
+      let val = cliInput.value;
+      let pos = CONFIG.vimCursorPos;
+
+      switch (e.key) {
+        case "i": // Enter Insert mode
+          CONFIG.vimState = "INSERT";
+          updateVimUI();
+          updateSyntaxAndAutosuggest();
+          return true;
+        case "a": // Append after cursor
+          CONFIG.vimState = "INSERT";
+          CONFIG.vimCursorPos = Math.min(val.length, pos + 1);
+          updateVimUI();
+          updateSyntaxAndAutosuggest();
+          return true;
+        case "h": // Move Left
+          CONFIG.vimCursorPos = Math.max(0, pos - 1);
+          updateSyntaxAndAutosuggest();
+          return true;
+        case "l": // Move Right
+          CONFIG.vimCursorPos = Math.min(Math.max(0, val.length - 1), pos + 1);
+          updateSyntaxAndAutosuggest();
+          return true;
+        case "0": // Start of line
+          CONFIG.vimCursorPos = 0;
+          updateSyntaxAndAutosuggest();
+          return true;
+        case "$": // End of line
+          CONFIG.vimCursorPos = Math.max(0, val.length - 1);
+          updateSyntaxAndAutosuggest();
+          return true;
+        case "w": // Word forward
+          {
+            const rest = val.slice(pos);
+            const match = rest.match(/\s+\S/);
+            if (match) {
+              CONFIG.vimCursorPos = pos + match.index + match[0].length - 1;
+            } else {
+              CONFIG.vimCursorPos = Math.max(0, val.length - 1);
+            }
+            updateSyntaxAndAutosuggest();
+            return true;
+          }
+        case "b": // Word back
+          {
+            const prev = val.slice(0, pos);
+            const match = prev.match(/\S+\s*$/);
+            if (match) {
+              CONFIG.vimCursorPos = Math.max(0, pos - match[0].length);
+            } else {
+              CONFIG.vimCursorPos = 0;
+            }
+            updateSyntaxAndAutosuggest();
+            return true;
+          }
+        case "x": // Delete char
+          if (val.length > 0) {
+            val = val.slice(0, pos) + val.slice(pos + 1);
+            cliInput.value = val;
+            CONFIG.vimCursorPos = Math.min(pos, Math.max(0, val.length - 1));
+            updateSyntaxAndAutosuggest();
+          }
+          return true;
+        case "d": // 'dd' clear line simulation
+          cliInput.value = "";
+          CONFIG.vimCursorPos = 0;
+          updateSyntaxAndAutosuggest();
+          return true;
+        default:
+          return true;
+      }
+    }
+
+    function renderNormalModeCursor(text) {
+      // In Vim Normal mode, show a solid highlight block over the active character
+      const cursor = document.getElementById("terminal-cursor");
+      cursor.classList.add("hidden"); // Hide standard blinking beam
+    }
+
+    /* ==========================================================
+       7. TERMINAL COMMAND EXECUTION & BUILTINS
+       ========================================================== */
+    function executeCommand(rawCommand) {
+      const tab = getActiveTab();
+      const cmd = (rawCommand || "").trim();
+      
+      // Close completion menu if open
+      document.getElementById("completion-menu").classList.add("hidden");
+
+      if (!cmd) {
+        // Just enter newline
+        tab.outputHistory.push({ type: "prompt", cwd: tab.cwd, git: tab.gitBranch, cmd: "" });
+        renderTerminalOutput();
+        resetInputLine();
+        return;
+      }
+
+      // Save to history
+      if (tab.history[tab.history.length - 1] !== cmd) {
+        tab.history.push(cmd);
+      }
+      tab.historyIndex = tab.history.length;
+
+      // Add to output buffer
+      tab.outputHistory.push({ type: "prompt", cwd: tab.cwd, git: tab.gitBranch, cmd: cmd });
+
+      // Parse command and args
+      const parts = cmd.split(" ").filter(Boolean);
+      let mainCmd = parts[0].toLowerCase();
+      const args = parts.slice(1);
+
+      if (mainCmd === "/") {
+        mainCmd = "help";
+      } else if (mainCmd.startsWith("/")) {
+        mainCmd = mainCmd.slice(1);
+      }
+
+      let responseHTML = "";
+
+      switch (mainCmd) {
+        case "help":
+          responseHTML = `
+            <div class="text-xs space-y-1.5 my-1 font-mono">
+              <div class="font-bold text-cyan-300 flex items-center justify-between">
+                <span>Twominal Builtin &amp; Slash Commands:</span>
+                <span class="text-[11px] font-normal text-slate-400">Type <code class="text-cyan-300 font-bold">/</code> for command palette</span>
+              </div>
+              <div class="grid grid-cols-1 sm:grid-cols-2 gap-2 text-slate-300">
+                <div><span class="text-emerald-400 font-bold">/help</span> or <span class="text-emerald-400 font-bold">help</span> : List all built-in commands &amp; shortcuts</div>
+                <div><span class="text-emerald-400 font-bold">/theme [dark|light|auto]</span> : Configure appearance mode</div>
+                <div><span class="text-emerald-400 font-bold">/font [family|size|reset]</span> : Configure typography &amp; ligatures</div>
+                <div><span class="text-emerald-400 font-bold">/vim</span> : Toggle Vim modal navigation mode</div>
+                <div><span class="text-emerald-400 font-bold">/matrix</span> : Toggle background matrix digital rain</div>
+                <div><span class="text-emerald-400 font-bold">/settings</span> : Open settings &amp; typography modal</div>
+                <div><span class="text-emerald-400 font-bold">/neofetch</span> : Twominal system information banner</div>
+                <div><span class="text-emerald-400 font-bold">/clear</span> : Clear terminal scrollback buffer</div>
+                <div><span class="text-emerald-400 font-bold">/ligatures</span> : Test or toggle font ligatures</div>
+                <div><span class="text-emerald-400 font-bold">/stack</span> : Architecture &amp; engine info</div>
+                <div><span class="text-emerald-400 font-bold">/history</span> : View persistent command history</div>
+                <div><span class="text-emerald-400 font-bold">/date</span> : Display current system timestamp</div>
+                <div><span class="text-emerald-400 font-bold">/tabs [new|close|next|prev]</span> : Multi-tab window management</div>
+                <div><span class="text-emerald-400 font-bold">/exit</span> : Close active shell tab session</div>
+              </div>
+              <div class="text-slate-400 text-[11px] mt-1">Tip: Built-in commands can be run with or without <code class="text-cyan-300 font-bold">/</code> prefix (e.g. <code class="text-cyan-300">/theme dark</code>, <code class="text-cyan-300">/matrix</code>). Press <kbd class="px-1 py-0.5 rounded bg-slate-800 border border-slate-700">Right Arrow →</kbd> to accept Fish ghost suggestions.</div>
+            </div>
+          `;
+          break;
+
+        case "clear":
+          tab.outputHistory = [];
+          renderTerminalOutput();
+          resetInputLine();
+          return;
+
+        case "pwd":
+          responseHTML = `<div class="text-slate-300">${escapeHtml(resolvePath(tab.cwd))}</div>`;
+          break;
+
+        case "ls":
+          {
+            const files = getFilesForCurrentDir();
+            const isDetailed = args.includes("-la") || args.includes("-l");
+            if (isDetailed) {
+              responseHTML = `
+                <div class="text-xs text-slate-300 space-y-0.5 my-1">
+                  <div class="text-slate-500">total ${files.length * 4}</div>
+                  ${files.map(f => {
+                    const isDir = !f.includes(".");
+                    const size = isDir ? "4096" : (Math.floor(Math.random() * 800) + 120);
+                    const perm = isDir ? "drwxr-xr-x" : "-rw-r--r--";
+                    const color = isDir ? "text-cyan-400 font-bold" : "text-slate-200";
+                    return `<div><span class="text-slate-500">${perm} 1 user staff ${size} Aug 31 19:20</span> <span class="${color}">${f}</span></div>`;
+                  }).join("")}
+                </div>
+              `;
+            } else {
+              responseHTML = `
+                <div class="flex flex-wrap gap-x-6 gap-y-1 text-xs my-1">
+                  ${files.map(f => {
+                    const isDir = !f.includes(".");
+                    const color = isDir ? "text-cyan-400 font-semibold" : "text-slate-200";
+                    const icon = isDir ? "📁" : "📄";
+                    return `<span class="${color}">${icon} ${f}</span>`;
+                  }).join("")}
+                </div>
+              `;
+            }
+          }
+          break;
+
+        case "cd":
+          {
+            const target = args[0] || "~";
+            if (target === ".." || target === "../") {
+              tab.cwd = "~";
+              tab.gitBranch = "";
+            } else if (target === "projects" || target === "~/projects" || target === "./projects") {
+              tab.cwd = "~/projects";
+              tab.gitBranch = "main";
+            } else if (target === "documents" || target === "~/documents") {
+              tab.cwd = "~/documents";
+              tab.gitBranch = "";
+            } else if (target === "~" || target === "/") {
+              tab.cwd = "~";
+              tab.gitBranch = "";
+            } else {
+              responseHTML = `<div class="text-red-400 text-xs">cd: no such file or directory: ${escapeHtml(target)}</div>`;
+            }
+            updateDemoPrompt(tab);
+            tab.title = computeTabTitle(tab);
+            renderTabs();
+            document.title = `${tab.title} — Twominal`;
+          }
+          break;
+
+        case "cat":
+          {
+            const target = args[0];
+            if (!target) {
+              responseHTML = `<div class="text-amber-400 text-xs">usage: cat &lt;filename&gt;</div>`;
+            } else {
+              const fullKey = `/home/user/${target}` in VFS_FILES 
+                ? `/home/user/${target}` 
+                : `/home/user/projects/twominal/${target}` in VFS_FILES 
+                  ? `/home/user/projects/twominal/${target}`
+                  : null;
+
+              if (fullKey && VFS_FILES[fullKey]) {
+                responseHTML = `<pre class="text-xs text-slate-300 whitespace-pre-wrap p-2 rounded bg-black/30 border border-slate-800 my-1">${escapeHtml(VFS_FILES[fullKey])}</pre>`;
+              } else {
+                responseHTML = `<div class="text-red-400 text-xs">cat: ${escapeHtml(target)}: No such file</div>`;
+              }
+            }
+          }
+          break;
+
+        case "tree":
+          responseHTML = `
+            <div class="text-xs text-slate-300 font-mono my-1 leading-tight">
+              <span class="text-cyan-400 font-bold">.</span><br>
+              ├── <span class="text-cyan-400 font-semibold">projects/</span><br>
+              │   ├── <span class="text-cyan-400 font-semibold">twominal/</span><br>
+              │   │   ├── <span class="text-emerald-300">src/</span><br>
+              │   │   ├── Cargo.toml<br>
+              │   │   └── tauri.conf.json<br>
+              │   ├── <span class="text-slate-400">rust-pty-core</span><br>
+              │   └── <span class="text-slate-400">fish-autosuggest</span><br>
+              ├── <span class="text-cyan-400 font-semibold">documents/</span><br>
+              │   ├── todo.txt<br>
+              │   └── notes.md<br>
+              ├── readme.md<br>
+              └── twominal.config.fish<br>
+              <span class="text-slate-500 mt-1 block">4 directories, 7 files</span>
+            </div>
+          `;
+          break;
+
+        case "neofetch":
+        case "twominalfetch":
+          responseHTML = `
+            <div class="flex flex-col sm:flex-row items-start gap-4 text-xs font-mono my-2 p-3 rounded-xl bg-slate-800/30 border border-slate-700/60">
+              <!-- ASCII Logo -->
+              <div class="text-cyan-400 font-bold leading-none select-none text-[11px]">
+                <pre>
+   ______                           
+  /_  __/      ______  ____ ___  _  __
+   / / | | /| / / __ \\/ __ \`__ \\/ / / /
+  / /  | |/ |/ / /_/ / / / / / / /_/ / 
+ /_/   |__/|__/\\____/_/ /_/ /_/\\__,_/  
+                </pre>
+              </div>
+              <!-- Specs -->
+              <div class="space-y-1 text-slate-300">
+                <div><span class="text-cyan-300 font-bold">user</span>@<span class="text-indigo-400 font-bold">twominal-host</span></div>
+                <div class="text-slate-600">--------------------------</div>
+                <div><b class="text-slate-400">OS:</b> Cross-Platform (macOS / Linux / Windows)</div>
+                <div><b class="text-slate-400">Host:</b> WebGPU High-Performance Canvas</div>
+                <div><b class="text-slate-400">Kernel:</b> PTY Alacritty/VTE 0.24-compatible</div>
+                <div><b class="text-slate-400">Shell:</b> Twominal Fish Shell 3.8.0</div>
+                <div><b class="text-slate-400">Stack:</b> <span class="text-cyan-300 font-semibold">${CONFIG.activeStack}</span></div>
+                <div><b class="text-slate-400">Vim Mode:</b> ${CONFIG.vimMode ? '<span class="text-amber-400">Enabled</span>' : '<span class="text-slate-500">Disabled</span>'}</div>
+                <div><b class="text-slate-400">Ligatures:</b> ${CONFIG.ligatures ? '<span class="text-emerald-400">Fira Code Active</span>' : '<span class="text-slate-500">Off</span>'}</div>
+                <div class="flex items-center gap-1.5 pt-1">
+                  <span class="w-3 h-3 rounded-full bg-red-400 inline-block"></span>
+                  <span class="w-3 h-3 rounded-full bg-amber-400 inline-block"></span>
+                  <span class="w-3 h-3 rounded-full bg-emerald-400 inline-block"></span>
+                  <span class="w-3 h-3 rounded-full bg-cyan-400 inline-block"></span>
+                  <span class="w-3 h-3 rounded-full bg-indigo-400 inline-block"></span>
+                  <span class="w-3 h-3 rounded-full bg-pink-400 inline-block"></span>
+                </div>
+              </div>
+            </div>
+          `;
+          break;
+
+        case "theme":
+          {
+            const mode = args[0];
+            if (mode === "dark" || mode === "light" || mode === "auto") {
+              setThemeMode(mode);
+              responseHTML = `<div class="text-emerald-400 text-xs">Theme switched to: <b>${mode}</b></div>`;
+            } else {
+              responseHTML = `<div class="text-slate-300 text-xs">Current theme mode: <b class="text-cyan-400">${CONFIG.themeMode}</b>. Usage: <code class="text-emerald-300">theme [dark|light|auto]</code></div>`;
+            }
+          }
+          break;
+
+        case "font":
+          responseHTML = `<div class="text-xs text-slate-300 font-mono">Font settings can be configured via <code class="text-cyan-300">/settings</code> or Cmd+,</div>`;
+          break;
+
+        case "settings":
+        case "config":
+          openSettingsModal();
+          responseHTML = `<div class="text-cyan-300 text-xs">Opened Settings &amp; Typography modal.</div>`;
+          break;
+
+        case "tabs":
+        case "tab":
+          {
+            const sub = (args[0] || "").toLowerCase();
+            if (sub === "new" || sub === "create") {
+              createNewTab();
+              responseHTML = `<div class="text-emerald-400 text-xs">New tab opened.</div>`;
+            } else if (sub === "close") {
+              closeTab(activeTabId);
+              return;
+            } else {
+              responseHTML = `<div class="text-xs font-mono text-slate-300">Open Tabs: ${tabs.map((t, idx) => `[${idx + 1}] ${t.title}`).join(", ")}</div>`;
+            }
+          }
+          break;
+
+        case "exit":
+          closeTab(activeTabId);
+          return;
+
+        case "vim":
+          toggleVimMode();
+          responseHTML = `<div class="text-amber-300 text-xs">Vim navigation mode: <b>${CONFIG.vimMode ? 'ENABLED (Press Esc for Normal mode)' : 'DISABLED'}</b></div>`;
+          break;
+
+        case "stack":
+          responseHTML = `<div class="text-xs space-y-1 my-1 font-mono">
+            <div class="text-cyan-300 font-bold">Twominal Engine Architecture:</div>
+            <div class="text-slate-300">🦀 Rust + Tauri backend with hardware-accelerated WebGPU/Canvas rendering.</div>
+          </div>`;
+          break;
+
+        case "ligatures":
+          toggleLigatures();
+          responseHTML = `
+            <div class="text-xs my-1">
+              <span class="text-emerald-400">Font Ligatures: <b>${CONFIG.ligatures ? 'ENABLED' : 'DISABLED'}</b></span>
+              <div class="mt-1 text-slate-300">Sample glyph test: <span class="text-cyan-300 font-bold">=== !== &lt;= &gt;= =&gt; -&gt; &lt;!-- &amp;&amp; ||</span></div>
+            </div>
+          `;
+          break;
+
+        case "matrix":
+          toggleMatrixDigitalRain();
+          responseHTML = `<div class="text-emerald-400 text-xs">Matrix Digital Rain background toggled.</div>`;
+          break;
+
+        case "date":
+          responseHTML = `<div class="text-slate-300 text-xs">${new Date().toString()}</div>`;
+          break;
+
+        case "history":
+          responseHTML = `
+            <div class="text-xs text-slate-300 space-y-0.5 my-1">
+              ${tab.history.map((h, i) => `<div><span class="text-slate-500 w-6 inline-block">${i + 1}</span> ${escapeHtml(h)}</div>`).join("")}
+            </div>
+          `;
+          break;
+
+        case "echo":
+          responseHTML = `<div class="text-slate-200 text-xs">${escapeHtml(args.join(" "))}</div>`;
+          break;
+
+        case "whoami":
+          responseHTML = `<div class="text-cyan-300 text-xs">user</div>`;
+          break;
+
+        case "uname":
+          responseHTML = `<div class="text-slate-300 text-xs">Darwin twominal-kernel 24.1.0 x86_64 / arm64</div>`;
+          break;
+
+        default:
+          responseHTML = `
+            <div class="text-xs my-0.5">
+              <span class="text-twominal-fish-invalid font-bold font-mono">fish: Unknown command '${escapeHtml(mainCmd)}'</span>
+              <span class="text-slate-500 block">Type <code class="text-cyan-400">/help</code> or <code class="text-cyan-400">/</code> for built-in commands or press Tab for completions.</span>
+            </div>
+          `;
+          break;
+      }
+      }
+
+      if (responseHTML) {
+        tab.outputHistory.push({ type: "response", html: responseHTML });
+      }
+
+      renderTerminalOutput();
+      resetInputLine();
+    }
+
+    function renderTerminalOutput() {
+      const outputContainer = document.getElementById("terminal-output");
+      const tab = getActiveTab();
+      outputContainer.innerHTML = "";
+
+      tab.outputHistory.forEach(item => {
+        const row = document.createElement("div");
+        if (item.type === "prompt") {
+          row.className = "flex items-center gap-2 text-xs sm:text-sm font-mono my-0.5";
+          const gitBadgeHtml = item.git && item.git.trim().length > 0
+            ? `<span class="text-emerald-400">(${escapeHtml(item.git)})</span>`
+            : "";
+          row.innerHTML = `
+            <span class="text-indigo-400 font-semibold">${escapeHtml(item.cwd)}</span>
+            ${gitBadgeHtml}
+            <span class="text-cyan-400 font-bold">➜</span>
+            <span class="text-slate-100 font-mono whitespace-pre">${highlightFishSyntax(item.cmd)}</span>
+          `;
+        } else if (item.type === "response") {
+          row.innerHTML = item.html;
+        }
+        outputContainer.appendChild(row);
+      });
+
+      // Scroll to bottom smoothly
+      const viewport = document.getElementById("terminal-viewport");
+      viewport.scrollTop = viewport.scrollHeight;
+    }
+
+    function resetInputLine() {
+      const cliInput = document.getElementById("cli-input");
+      cliInput.value = "";
+      const tab = getActiveTab();
+      if (tab) {
+        tab.currentInput = "";
+        if (CONFIG.vimMode) {
+          CONFIG.vimState = "INSERT";
+          tab.vimState = "INSERT";
+          updateVimUI();
+        }
+      }
+      CONFIG.vimCursorPos = 0;
+      updateSyntaxAndAutosuggest();
+      focusInput();
+    }
+
+    function focusInput() {
+      document.getElementById("cli-input").focus();
+    }
+
+    /* ==========================================================
+       8. THEME & SUNSET-TO-SUNRISE AUTOMATION
+       ========================================================== */
+    function setThemeMode(mode) {
+      CONFIG.themeMode = mode;
+      
+      // Update UI checks
+      document.getElementById("check-dark").classList.toggle("hidden", mode !== "dark");
+      document.getElementById("check-light").classList.toggle("hidden", mode !== "light");
+      document.getElementById("check-auto").classList.toggle("hidden", mode !== "auto");
+      
+      const themeIcon = document.getElementById("theme-icon");
+      const sbThemeInfo = document.getElementById("sb-theme-info");
+
+      if (mode === "dark") {
+        applyDarkTheme();
+        themeIcon.textContent = "🌙";
+        sbThemeInfo.textContent = "Mode: Always Dark";
+      } else if (mode === "light") {
+        applyLightTheme();
+        themeIcon.textContent = "☀️";
+        sbThemeInfo.textContent = "Mode: Always Light";
+      } else if (mode === "auto") {
+        themeIcon.textContent = "🌅";
+        sbThemeInfo.textContent = "Mode: Sunset-Sunrise";
+        checkSunsetSunriseTheme();
+      }
+
+      // Close dropdown
+      document.getElementById("theme-dropdown").classList.add("hidden");
+    }
+
+    function applyDarkTheme() {
+      document.documentElement.classList.add("dark");
+      const win = document.getElementById("window-container");
+      win.style.backgroundColor = "#0d1117";
+      win.style.borderColor = "rgba(48, 54, 61, 0.8)";
+    }
+
+    function applyLightTheme() {
+      document.documentElement.classList.remove("dark");
+      const win = document.getElementById("window-container");
+      win.style.backgroundColor = "#ffffff";
+      win.style.borderColor = "#d0d7de";
+    }
+
+    function checkSunsetSunriseTheme() {
+      if (CONFIG.themeMode !== "auto") return;
+
+      const now = new Date();
+      const currentMinutes = now.getHours() * 60 + now.getMinutes();
+      // Sunrise at 06:30 (390m), Sunset at 18:30 (1110m)
+      const isDaytime = currentMinutes >= (6 * 60 + 30) && currentMinutes < (18 * 60 + 30);
+
+      if (isDaytime) {
+        applyLightTheme();
+        document.getElementById("sb-theme-info").innerHTML = `<span>🌅 Auto: Day (Light)</span>`;
+      } else {
+        applyDarkTheme();
+        document.getElementById("sb-theme-info").innerHTML = `<span>🌙 Auto: Night (Dark)</span>`;
+      }
+    }
+
+    function toggleLigatures() {
+      CONFIG.ligatures = !CONFIG.ligatures;
+      const viewport = document.getElementById("terminal-viewport");
+      const preview = document.getElementById("font-preview-box");
+      const checkEl = document.getElementById("check-ligatures");
+      const sbStatus = document.getElementById("sb-ligatures-status");
+      const demoLabelLig = document.getElementById("demo-label-ligatures-status");
+      const demoBtnLig = document.getElementById("demo-btn-toggle-ligatures");
+
+      if (CONFIG.ligatures) {
+        viewport.classList.remove("disable-ligatures");
+        viewport.classList.add("enable-ligatures");
+        if (preview) {
+          preview.classList.remove("disable-ligatures");
+          preview.classList.add("enable-ligatures");
+        }
+        if (checkEl) {
+          checkEl.textContent = "ON";
+          checkEl.className = "text-emerald-400 font-bold";
+        }
+        if (sbStatus) sbStatus.textContent = "liga: on (===, !==, =>)";
+        if (demoLabelLig) demoLabelLig.textContent = "ON";
+        if (demoBtnLig) demoBtnLig.className = "px-3 py-1 rounded-md text-xs font-bold transition-colors bg-emerald-500/20 text-emerald-400 border border-emerald-500/30";
+      } else {
+        viewport.classList.remove("enable-ligatures");
+        viewport.classList.add("disable-ligatures");
+        if (preview) {
+          preview.classList.remove("enable-ligatures");
+          preview.classList.add("disable-ligatures");
+        }
+        if (checkEl) {
+          checkEl.textContent = "OFF";
+          checkEl.className = "text-slate-500 font-bold";
+        }
+        if (sbStatus) sbStatus.textContent = "liga: off";
+        if (demoLabelLig) demoLabelLig.textContent = "OFF";
+        if (demoBtnLig) demoBtnLig.className = "px-3 py-1 rounded-md text-xs font-bold transition-colors bg-slate-800 text-slate-500 border border-slate-600/30";
+      }
+    }
+
+    function setDemoFontSize(val) {
+      const size = parseInt(val, 10);
+      if (isNaN(size)) return;
+      document.documentElement.style.setProperty("--twominal-font-size", `${size}px`);
+      const label = document.getElementById("demo-label-font-size-val");
+      const input = document.getElementById("demo-input-font-size");
+      if (label) label.textContent = `${size}px`;
+      if (input && Number(input.value) !== size) input.value = String(size);
+    }
+
+    function adjustDemoFontSize(delta) {
+      const input = document.getElementById("demo-input-font-size");
+      const cur = input ? parseInt(input.value, 10) : 14;
+      const next = Math.min(Math.max(cur + delta, 9), 32);
+      setDemoFontSize(next);
+    }
+
+    function setDemoFontFamily(val) {
+      const fam = val === "Menlo, Monaco, Consolas, monospace" ? val : `"${val}", monospace`;
+      document.documentElement.style.setProperty("--twominal-font-family", fam);
+    }
+
+    function setDemoFontWeight(val) {
+      document.documentElement.style.setProperty("--twominal-font-weight", String(val));
+    }
+
+    function setDemoLineHeight(val) {
+      document.documentElement.style.setProperty("--twominal-line-height", String(val));
+      const label = document.getElementById("demo-label-line-height-val");
+      if (label) label.textContent = String(val);
+    }
+
+    function setDemoLetterSpacing(val) {
+      document.documentElement.style.setProperty("--twominal-letter-spacing", `${val}px`);
+      const label = document.getElementById("demo-label-letter-spacing-val");
+      if (label) label.textContent = `${val}px`;
+    }
+
+    function resetDemoFontSettings() {
+      setDemoFontSize(14);
+      setDemoFontFamily("Fira Code");
+      setDemoFontWeight(400);
+      setDemoLineHeight(1.5);
+      setDemoLetterSpacing(0);
+      if (!CONFIG.ligatures) toggleLigatures();
+
+      const selectFam = document.getElementById("demo-select-font-family");
+      if (selectFam) selectFam.value = "Fira Code";
+      const selectWeight = document.getElementById("demo-select-font-weight");
+      if (selectWeight) selectWeight.value = "400";
+      const inputLh = document.getElementById("demo-input-line-height");
+      if (inputLh) inputLh.value = "1.5";
+      const inputLs = document.getElementById("demo-input-letter-spacing");
+      if (inputLs) inputLs.value = "0";
+    }
+
+    function openSettingsModal() {
+      document.getElementById("modal-settings").classList.remove("hidden");
+    }
+
+    function closeSettingsModal() {
+      document.getElementById("modal-settings").classList.add("hidden");
+      focusInput();
+    }
+
+    /* ==========================================================
+       10. EVENT LISTENERS & KEYBOARD HANDLER
+       ========================================================== */
+    function setupEventListeners() {
+      const cliInput = document.getElementById("cli-input");
+      const terminalViewport = document.getElementById("terminal-viewport");
+
+      // Keep CLI input focused when clicking anywhere in window or when window regains focus
+      window.addEventListener("click", (e) => {
+        const isModalOpen =
+          document.getElementById("modal-settings")?.classList.contains("hidden") === false;
+        if (isModalOpen) return;
+
+        const selection = window.getSelection();
+        if (selection && selection.toString().length > 0) return;
+
+        const target = e.target;
+        if (
+          target &&
+          target !== cliInput &&
+          (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.isContentEditable)
+        ) {
+          return;
+        }
+
+        focusInput();
+      });
+
+      window.addEventListener("focus", () => {
+        const isModalOpen =
+          document.getElementById("modal-settings")?.classList.contains("hidden") === false;
+        if (!isModalOpen) {
+          focusInput();
+        }
+      });
+
+      // Redirect keypresses to input if focus was lost and no modal is active
+      window.addEventListener("keydown", (e) => {
+        const isModalOpen =
+          document.getElementById("modal-settings")?.classList.contains("hidden") === false;
+        if (isModalOpen) return;
+
+        const activeEl = document.activeElement;
+        if (
+          activeEl &&
+          activeEl !== cliInput &&
+          (activeEl.tagName === "INPUT" || activeEl.tagName === "TEXTAREA" || activeEl.isContentEditable)
+        ) {
+          return;
+        }
+
+        if (document.activeElement !== cliInput && !e.ctrlKey && !e.metaKey && !e.altKey) {
+          cliInput.focus();
+        }
+      });
+
+      // Live Input keystrokes
+      cliInput.addEventListener("input", () => {
+        if (CONFIG.vimMode && CONFIG.vimState === "NORMAL") return;
+        updateSyntaxAndAutosuggest();
+      });
+
+      // Keydown events for Fish & Vim navigation
+      cliInput.addEventListener("keydown", (e) => {
+        const tab = getActiveTab();
+        const menu = document.getElementById("completion-menu");
+
+        // 1. Vim Mode Normal handling
+        if (CONFIG.vimMode && CONFIG.vimState === "NORMAL") {
+          if (e.key === "Enter") {
+            executeCommand(cliInput.value);
+            return;
+          }
+          if (handleVimNormalKey(e)) {
+            e.preventDefault();
+            return;
+          }
+        }
+
+        // 2. Escape key handling
+        if (e.key === "Escape") {
+          if (!menu.classList.contains("hidden")) {
+            menu.classList.add("hidden");
+            return;
+          }
+          if (CONFIG.vimMode) {
+            CONFIG.vimState = "NORMAL";
+            CONFIG.vimCursorPos = Math.max(0, cliInput.value.length - 1);
+            updateVimUI();
+            updateSyntaxAndAutosuggest();
+            e.preventDefault();
+            return;
+          }
+        }
+
+        // 3. Tab completion popup navigation
+        if (!menu.classList.contains("hidden")) {
+          if (e.key === "ArrowDown" || e.key === "Tab") {
+            e.preventDefault();
+            selectedCompletionIndex = (selectedCompletionIndex + 1) % completionCandidates.length;
+            renderCompletionMenu();
+            return;
+          }
+          if (e.key === "ArrowUp") {
+            e.preventDefault();
+            selectedCompletionIndex = (selectedCompletionIndex - 1 + completionCandidates.length) % completionCandidates.length;
+            renderCompletionMenu();
+            return;
+          }
+          if (e.key === "Enter") {
+            e.preventDefault();
+            applyCompletionCandidate(completionCandidates[selectedCompletionIndex]);
+            return;
+          }
+        }
+
+        // 4. Tab Key (Trigger Fish Tab Completion)
+        if (e.key === "Tab") {
+          e.preventDefault();
+          triggerTabCompletion();
+          return;
+        }
+
+        // 5. Right Arrow Key: Accept autosuggestion (Fish core signature behavior)
+        if (e.key === "ArrowRight") {
+          const ghost = document.getElementById("autosuggest-ghost").textContent;
+          if (ghost && cliInput.selectionStart === cliInput.value.length) {
+            cliInput.value += ghost;
+            updateSyntaxAndAutosuggest();
+            e.preventDefault();
+            return;
+          }
+        }
+
+        // 6. Enter Key: Run command
+        if (e.key === "Enter") {
+          e.preventDefault();
+          executeCommand(cliInput.value);
+          return;
+        }
+
+        // 7. Up / Down Arrow: Command History
+        if (e.key === "ArrowUp") {
+          e.preventDefault();
+          if (tab.history.length > 0 && tab.historyIndex > 0) {
+            tab.historyIndex--;
+            cliInput.value = tab.history[tab.historyIndex];
+            updateSyntaxAndAutosuggest();
+          }
+          return;
+        }
+
+        if (e.key === "ArrowDown") {
+          e.preventDefault();
+          if (tab.historyIndex < tab.history.length - 1) {
+            tab.historyIndex++;
+            cliInput.value = tab.history[tab.historyIndex];
+            updateSyntaxAndAutosuggest();
+          } else {
+            tab.historyIndex = tab.history.length;
+            cliInput.value = "";
+            updateSyntaxAndAutosuggest();
+          }
+          return;
+        }
+
+        // 8. Shortcuts: Ctrl+C / Ctrl+L / Ctrl+T / Ctrl+W
+        if (e.ctrlKey || e.metaKey) {
+          if (e.key === "c" || e.key === "C") {
+            // Cancel current line
+            tab.outputHistory.push({ type: "prompt", cwd: tab.cwd, git: tab.gitBranch, cmd: cliInput.value + "^C" });
+            renderTerminalOutput();
+            resetInputLine();
+            e.preventDefault();
+          } else if (e.key === "l" || e.key === "L") {
+            // Clear screen
+            tab.outputHistory = [];
+            renderTerminalOutput();
+            resetInputLine();
+            e.preventDefault();
+          } else if (e.key === "t" || e.key === "T") {
+            // New Tab
+            e.preventDefault();
+            createNewTab();
+          } else if (e.key === "w" || e.key === "W") {
+            // Close Tab
+            e.preventDefault();
+            closeTab(activeTabId);
+          }
+        }
+      });
+
+      // Window Header buttons
+      document.getElementById("btn-new-tab").onclick = () => createNewTab();
+      document.getElementById("btn-toggle-vim-mode").onclick = toggleVimMode;
+      document.getElementById("btn-open-settings").onclick = openSettingsModal;
+      
+      // Theme Dropdown toggle
+      const btnThemeMenu = document.getElementById("btn-theme-menu");
+      const themeDropdown = document.getElementById("theme-dropdown");
+      btnThemeMenu.onclick = (e) => {
+        e.stopPropagation();
+        themeDropdown.classList.toggle("hidden");
+      };
+      window.addEventListener("click", () => {
+        themeDropdown.classList.add("hidden");
+      });
+
+      // Window controls mock
+      document.getElementById("btn-win-close").onclick = () => {
+        const tab = getActiveTab();
+        tab.outputHistory = [];
+        renderTerminalOutput();
+      };
+      document.getElementById("btn-win-min").onclick = () => {
+        const win = document.getElementById("window-container");
+        win.classList.toggle("scale-95");
+        win.classList.toggle("opacity-60");
+      };
+      document.getElementById("btn-win-max").onclick = () => {
+        if (!document.fullscreenElement) {
+          document.documentElement.requestFullscreen().catch(() => {});
+        } else {
+          document.exitFullscreen().catch(() => {});
+        }
+      };
+    }
+
+    function handleVirtualKey(key) {
+      const cliInput = document.getElementById("cli-input");
+      if (key === "Tab") {
+        triggerTabCompletion();
+      } else if (key === "ArrowRight") {
+        const ghost = document.getElementById("autosuggest-ghost").textContent;
+        if (ghost) {
+          cliInput.value += ghost;
+          updateSyntaxAndAutosuggest();
+        }
+      } else if (key === "Escape") {
+        if (CONFIG.vimMode) {
+          CONFIG.vimState = "NORMAL";
+          updateVimUI();
+        }
+      }
+      focusInput();
+    }
+
+    function initClock() {
+      const clockEl = document.getElementById("sb-clock");
+      const update = () => {
+        const d = new Date();
+        clockEl.textContent = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+      };
+      update();
+      setInterval(update, 1000);
+    }
+
+    function escapeHtml(str) {
+      if (!str) return "";
+      return str
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;")
+        .replace(/'/g, "&#039;");
+    }
+
+    /* ==========================================================
+       11. MATRIX DIGITAL RAIN EASTER EGG (CANVAS)
+       ========================================================== */
+    let matrixActive = false;
+    let matrixInterval = null;
+
+    function toggleMatrixDigitalRain() {
+      const canvas = document.getElementById("matrix-canvas");
+      matrixActive = !matrixActive;
+
+      if (!matrixActive) {
+        canvas.style.display = "none";
+        clearInterval(matrixInterval);
+        return;
+      }
+
+      canvas.style.display = "block";
+      const ctx = canvas.getContext("2d");
+      canvas.width = canvas.parentElement.offsetWidth;
+      canvas.height = canvas.parentElement.offsetHeight;
+
+      const letters = "01TWOMINALFISHPTY{}[]<>/\\$#@!*+-=~";
+      const fontSize = 14;
+      const columns = Math.floor(canvas.width / fontSize);
+      const drops = Array(columns).fill(1);
+
+      function drawMatrix() {
+        ctx.fillStyle = "rgba(13, 17, 23, 0.1)";
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+        ctx.fillStyle = "#50fa7b";
+        ctx.font = `${fontSize}px monospace`;
+
+        for (let i = 0; i < drops.length; i++) {
+          const char = letters[Math.floor(Math.random() * letters.length)];
+          ctx.fillText(char, i * fontSize, drops[i] * fontSize);
+
+          if (drops[i] * fontSize > canvas.height && Math.random() > 0.975) {
+            drops[i] = 0;
+          }
+          drops[i]++;
+        }
+      }
+
+      clearInterval(matrixInterval);
+      matrixInterval = setInterval(drawMatrix, 45);
+    }
+  </script>
+</body>
+</html>
