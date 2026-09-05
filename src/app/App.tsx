@@ -646,20 +646,21 @@ export function App() {
         return;
       }
 
+      const currentWorkspace = workspaceRef.current;
       let handled = true;
       switch (shortcut.type) {
         case "new":
           newTab();
           break;
         case "close":
-          if (workspace.activeId) {
-            closeTab(workspace.activeId);
+          if (currentWorkspace.activeId) {
+            closeTab(currentWorkspace.activeId);
           } else {
             handled = false;
           }
           break;
         case "activateIndex": {
-          const tab = workspace.tabs[shortcut.index];
+          const tab = currentWorkspace.tabs[shortcut.index];
           if (tab) {
             dispatch({ type: "activate", tabId: tab.id });
           } else {
@@ -669,19 +670,21 @@ export function App() {
         }
         case "previous":
         case "next": {
-          if (workspace.tabs.length === 0) {
+          if (currentWorkspace.tabs.length === 0) {
             handled = false;
             break;
           }
           const currentIndex = Math.max(
-            workspace.tabs.findIndex((tab) => tab.id === workspace.activeId),
+            currentWorkspace.tabs.findIndex(
+              (tab) => tab.id === currentWorkspace.activeId,
+            ),
             0,
           );
           const direction = shortcut.type === "previous" ? -1 : 1;
           const targetIndex =
-            (currentIndex + direction + workspace.tabs.length) %
-            workspace.tabs.length;
-          const target = workspace.tabs[targetIndex];
+            (currentIndex + direction + currentWorkspace.tabs.length) %
+            currentWorkspace.tabs.length;
+          const target = currentWorkspace.tabs[targetIndex];
           if (target) {
             dispatch({ type: "activate", tabId: target.id });
           }
@@ -698,7 +701,7 @@ export function App() {
     window.addEventListener("keydown", handleKeyDown, { capture: true });
     return () =>
       window.removeEventListener("keydown", handleKeyDown, { capture: true });
-  }, [closeTab, newTab, settingsOpen, workspace.activeId, workspace.tabs]);
+  }, [closeTab, newTab, settingsOpen]);
 
   const activeShellExperience = activeTab
     ? shellExperienceByTab[activeTab.id]
