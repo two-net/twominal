@@ -328,7 +328,7 @@ tar archive so its executable bit survives artifact download. Artifact names
 include the commit SHA, retention is 14 days, updater artifacts are disabled,
 and the packaging jobs have read-only repository permission.
 
-Pushing a tag such as `v0.1.0` runs the `Release` workflow. The tag must be `v`
+Pushing a tag such as `v0.1.1` runs the `Release` workflow. The tag must be `v`
 followed by the exact version shared by `package.json`, `Cargo.toml`, and
 `tauri.conf.json`. After every platform package succeeds, one least-privileged
 job collects the five installers, adds `SHA256SUMS.txt`, and creates a draft
