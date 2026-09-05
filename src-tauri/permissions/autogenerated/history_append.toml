@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-history-append"
+description = "Enables the history_append command without any pre-configured scope."
+commands.allow = ["history_append"]
+
+[[permission]]
+identifier = "deny-history-append"
+description = "Denies the history_append command without any pre-configured scope."
+commands.deny = ["history_append"]

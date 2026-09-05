@@ -1,0 +1,13 @@
+[[permission]]
+identifier = "terminal-session"
+description = "Allows a Twominal window to manage and transfer its own PTY-backed terminal sessions."
+commands.allow = [
+  "terminal_start",
+  "terminal_prepare_transfer",
+  "terminal_cancel_transfer",
+  "terminal_attach_transfer",
+  "terminal_write",
+  "terminal_resize",
+  "terminal_ack_output",
+  "terminal_close",
+]

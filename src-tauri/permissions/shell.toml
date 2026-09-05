@@ -1,0 +1,9 @@
+[[permission]]
+identifier = "shell-experience"
+description = "Allows the main Twominal window to use bounded command history and completion discovery."
+commands.allow = [
+  "history_load",
+  "history_append",
+  "history_clear",
+  "completion_query",
+]

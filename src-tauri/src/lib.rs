@@ -1,41 +1,111 @@
 mod commands;
-mod env_fix;
-mod fish;
+mod completion;
+mod config;
+mod error;
+mod history;
+mod logging;
 mod pty;
-mod theme;
+mod shell;
+mod storage;
+mod terminal;
 
-use pty::PtyManager;
-use std::sync::Arc;
+use shell::ShellIntegrationPaths;
+use tauri::path::BaseDirectory;
+use tauri::webview::PageLoadEvent;
+use tauri::{AppHandle, Manager, RunEvent, WindowEvent};
+use terminal::TerminalSessionManager;
+
+struct ApplicationCleanupGuard {
+    app_handle: AppHandle,
+}
+
+impl ApplicationCleanupGuard {
+    fn new(app_handle: AppHandle) -> Self {
+        Self { app_handle }
+    }
+}
+
+impl Drop for ApplicationCleanupGuard {
+    fn drop(&mut self) {
+        self.app_handle
+            .state::<TerminalSessionManager>()
+            .close_all();
+        logging::info("application_stopped");
+        logging::flush();
+    }
+}
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    env_fix::init_environment();
-    let pty_manager = Arc::new(PtyManager::new());
+    let app = tauri::Builder::default()
+        .setup(|app| {
+            if let Ok(directory) = app.path().app_log_dir() {
+                let _ = logging::initialize(&directory);
+            }
+            logging::info("application_started");
 
-
-    tauri::Builder::default()
-        .plugin(tauri_plugin_opener::init())
-        .manage(pty_manager)
+            let integration = app
+                .path()
+                .resolve("shell-integration", BaseDirectory::Resource)
+                .ok()
+                .map(ShellIntegrationPaths::new);
+            app.manage(TerminalSessionManager::new(integration));
+            app.manage(history::HistoryStore::default());
+            install_panic_hook();
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
-            commands::shell_exec,
-            commands::shell_write,
-            commands::shell_cancel,
-            commands::pty_spawn,
-            commands::pty_write,
-            commands::pty_resize,
-            commands::pty_kill,
-            commands::fish_check_command,
-            commands::fish_get_completions,
-            commands::fish_get_history,
-            commands::fish_add_history,
-            commands::get_solar_theme_info,
-            commands::get_system_info,
-            commands::get_git_branch,
-            commands::window_minimize,
-            commands::window_toggle_maximize,
-            commands::window_close,
-            commands::window_create_new,
+            config::config_load,
+            config::config_save,
+            history::history_load,
+            history::history_append,
+            history::history_clear,
+            completion::completion_query,
+            commands::terminal_start,
+            commands::terminal_prepare_transfer,
+            commands::terminal_cancel_transfer,
+            commands::terminal_attach_transfer,
+            commands::terminal_write,
+            commands::terminal_resize,
+            commands::terminal_ack_output,
+            commands::terminal_close,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .on_page_load(|webview, payload| {
+            if payload.event() == PageLoadEvent::Started {
+                logging::info("webview_navigation_started");
+                webview
+                    .state::<TerminalSessionManager>()
+                    .close_owner(webview.label());
+            }
+        })
+        .on_window_event(|window, event| {
+            if matches!(event, WindowEvent::Destroyed) {
+                logging::info("application_window_destroyed");
+                window
+                    .state::<TerminalSessionManager>()
+                    .close_owner(window.label());
+            }
+        })
+        .build(tauri::generate_context!())
+        .expect("error while building Twominal");
+
+    let _cleanup_guard = ApplicationCleanupGuard::new(app.handle().clone());
+    app.run(|app_handle, event| {
+        if matches!(event, RunEvent::Exit) {
+            app_handle.state::<TerminalSessionManager>().close_all();
+            logging::info("application_exit_requested");
+            logging::flush();
+        }
+    });
+}
+
+fn install_panic_hook() {
+    let previous_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |panic_info| {
+        // The cleanup guard runs after stack unwinding, when application locks are
+        // no longer held. The hook itself remains lock-safe and records no payload.
+        logging::error("application_panicked", "unexpected_panic");
+        logging::flush();
+        previous_hook(panic_info);
+    }));
 }

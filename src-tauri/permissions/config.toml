@@ -1,0 +1,4 @@
+[[permission]]
+identifier = "app-config"
+description = "Allows the main Twominal window to load and save validated application settings."
+commands.allow = ["config_load", "config_save"]
