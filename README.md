@@ -17,6 +17,35 @@ Twominal and work on a machine where Fish has never been installed.
   <img src="assets/screenshot-terminal.png" alt="Twominal terminal showing executable completions" width="800" />
 </p>
 
+## Install on macOS
+
+Download the DMG from [GitHub Releases](https://github.com/two-net/twominal/releases),
+open it, and drag **Twominal.app** into **Applications**. The `aarch64` download
+is for Apple Silicon Macs.
+
+macOS builds use an ad-hoc signature and are not notarized by Apple. If macOS
+blocks a build you trust, try opening it once, then go to **System Settings →
+Privacy & Security → Open Anyway** and confirm. See
+[Apple's instructions](https://support.apple.com/en-us/102445).
+
+The original v0.1.1 macOS package lacks a complete app bundle
+signature and may report that the app “is damaged.” For a trusted copy from
+this repository, verify the DMG's SHA-256 against the release's
+`SHA256SUMS.txt`, then repair the installed app's signature and remove its
+download quarantine:
+
+``` sh
+codesign --force --sign - /Applications/Twominal.app
+codesign --verify --deep --strict /Applications/Twominal.app
+xattr -rd com.apple.quarantine /Applications/Twominal.app
+open /Applications/Twominal.app
+```
+
+Removing quarantine bypasses the download trust check for this app. Only use
+this workaround for a copy you trust. New builds seal the app bundle with an
+ad-hoc signature; opening without an unidentified-developer override requires
+Developer ID signing and Apple notarization.
+
 ## Prerequisites
 
 - Node.js 22.13 or newer (22.x) and npm 10.9
@@ -328,6 +357,13 @@ tar archive so its executable bit survives artifact download. Artifact names
 include the commit SHA, retention is 14 days, updater artifacts are disabled,
 and the packaging jobs have read-only repository permission.
 
+macOS bundles are ad-hoc signed (`signingIdentity: "-"`) and checked with
+`codesign --verify --deep --strict` before upload. This seals the executable,
+Info.plist, and bundled resources so downloaded Apple Silicon apps do not fail
+bundle verification as “damaged.” It does not establish a verified developer
+identity or provide notarization. The macOS packaging command must not use
+`--no-sign`, which would skip this signature too.
+
 Pushing a tag such as `v0.1.1` runs the `Release` workflow. The tag must be `v`
 followed by the exact version shared by `package.json`, `Cargo.toml`, and
 `tauri.conf.json`. After every platform package succeeds, one least-privileged
@@ -335,13 +371,18 @@ job collects the five installers, adds `SHA256SUMS.txt`, and creates a draft
 GitHub Release. A failed platform build cannot create a partial release, and a
 rerun may replace assets only while the release remains a draft.
 
-The automated packages remain intentionally unsigned. Before publishing the
-draft, public distribution still requires project-owned identities and
-credentials: Apple Developer ID signing and notarization for macOS, an
-Authenticode identity for Windows, and the project's chosen package/repository
-signing policy for Linux. No placeholder identity, secret, or updater key is
-committed to the repository. Replace the staging assets with those signed
-packages and regenerate `SHA256SUMS.txt` before publishing the draft.
+An Apple Developer ID is not required for the configured ad-hoc signing or
+for publishing these packages on GitHub. After the builds and manual checks
+pass, the draft can be published with the generated installation notice and
+checksums. The macOS app is not notarized, so users must explicitly approve a
+trusted download through **Privacy & Security → Open Anyway**. Windows
+installers are unsigned and may also trigger a publisher warning.
+
+To distribute macOS builds without the unidentified-developer override in the
+future, set `APPLE_SIGNING_IDENTITY` to a Developer ID identity and configure
+[Tauri's notarization credentials](https://v2.tauri.app/distribute/sign/macos/).
+The current ad-hoc build needs neither a certificate nor Apple account secrets.
+If replacing any draft assets, regenerate `SHA256SUMS.txt` before publishing.
 
 To prepare a release, update the version in all three manifests and their lock
 files, pass CI and the manual compatibility checklist, commit the result, then
@@ -477,12 +518,15 @@ each run.
 - [ ] The dedicated performance suite passes repeatedly on the target hardware;
   large input remains ordered and pending input/scrollback stay bounded
 - [ ] The platform's unsigned QA installer installs, launches, and uninstalls
-  cleanly; separately signed release candidates pass native trust verification
+  cleanly; ad-hoc macOS packages pass bundle signature verification and launch
+  after the documented user approval. If using Developer ID signing and
+  notarization, also verify Gatekeeper acceptance
 
 ## Milestone status
 
 Milestones 1–6 are implemented. GitHub Actions builds tagged versions and
 creates a draft GitHub Release. Publishing remains an operator step because
-platform signing/notarization identities and target-machine manual compatibility
-results are external to the source tree. Do not publish an unsigned draft
-without completing those checks.
+target-machine manual compatibility results are external to the source tree.
+Complete those checks and retain the installation notice and checksums before
+publishing. Developer ID signing and notarization are optional upgrades to the
+current ad-hoc macOS distribution workflow.

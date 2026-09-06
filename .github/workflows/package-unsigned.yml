@@ -35,7 +35,7 @@ jobs:
           - name: macOS
             platform: macos
             os: macos-14
-            bundles: dmg
+            bundles: app,dmg
             paths: src-tauri/target/release/bundle/dmg/*.dmg
           - name: Windows
             platform: windows
@@ -85,7 +85,18 @@ jobs:
         run: npm run check:metadata
 
       - name: Build unsigned packages
+        if: runner.os != 'macOS'
         run: npm run tauri -- build --bundles "${{ matrix.bundles }}" --ci --no-sign -- --locked
+
+      - name: Build ad-hoc signed macOS package
+        if: runner.os == 'macOS'
+        env:
+          APPLE_SIGNING_IDENTITY: "-"
+        run: npm run tauri -- build --bundles "${{ matrix.bundles }}" --ci -- --locked
+
+      - name: Verify macOS app bundle signature
+        if: runner.os == 'macOS'
+        run: codesign --verify --deep --strict --verbose=2 src-tauri/target/release/bundle/macos/Twominal.app
 
       - name: Preserve AppImage executable permissions
         if: runner.os == 'Linux'

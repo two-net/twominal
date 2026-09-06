@@ -34,6 +34,18 @@ jobs:
           node-version: ${{ env.TWOMINAL_NODE_VERSION }}
           cache: npm
 
+      - name: Validate release metadata and tag
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          npm run check:metadata
+          expected_tag="v$(node -p "require('./package.json').version")"
+          if [[ "$RELEASE_TAG" != "$expected_tag" ]]; then
+            echo "Release tag $RELEASE_TAG must match $expected_tag." >&2
+            exit 1
+          fi
+
   package:
     name: Build release packages
     needs: validate
@@ -100,7 +112,11 @@ jobs:
           set -euo pipefail
           shopt -s nullglob
           assets=(release-assets/*)
-          warning=$'> [!WARNING]\n> These are unsigned staging packages. Replace them with signed/notarized packages and regenerate `SHA256SUMS.txt` before publishing this draft.'
+          warning=$'> [!IMPORTANT]\n'
+          warning+=$'> macOS builds are ad-hoc signed and are not notarized by Apple.\n'
+          warning+=$'> After trying to open a trusted copy, go to **System Settings → Privacy & Security → Open Anyway** and confirm.\n'
+          warning+=$'> See [macOS installation instructions](https://github.com/two-net/twominal#install-on-macos).\n>\n'
+          warning+=$'> Windows installers are unsigned and may display a publisher warning. Checksums are provided in `SHA256SUMS.txt`.'
 
           if is_draft="$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft 2>/dev/null)"; then
             if [[ "$is_draft" != "true" ]]; then
@@ -125,6 +141,7 @@ jobs:
             gh release create "$RELEASE_TAG" "${assets[@]}" \
               --repo "$GITHUB_REPOSITORY" \
               --verify-tag \
+              --draft \
               --title "Twominal ${RELEASE_TAG#v} (unsigned draft)" \
               --generate-notes \
               --notes "$warning"
