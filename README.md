@@ -19,6 +19,46 @@ Twominal and work on a machine where Fish has never been installed.
 
 ## Install on macOS
 
+### Terminal (curl)
+
+On an **Apple Silicon Mac**, paste this block into Terminal to install v0.1.1
+in `~/Applications` without administrator access. It verifies the release
+checksum and app signature, and stops if a copy already exists at that location.
+
+``` sh
+(
+  set -eu
+  twominal_version=0.1.1
+  twominal_asset="Twominal_${twominal_version}_aarch64.dmg"
+  twominal_release="https://github.com/two-net/twominal/releases/download/v${twominal_version}"
+  twominal_app="$HOME/Applications/Twominal.app"
+  if [ -e "$twominal_app" ] || [ -L "$twominal_app" ]; then
+    echo "An app already exists at $twominal_app; move it aside before installing." >&2
+    exit 1
+  fi
+
+  twominal_tmp="$(mktemp -d)"
+  cd "$twominal_tmp"
+  curl --fail --location --proto '=https' --remote-name "$twominal_release/$twominal_asset"
+  curl --fail --location --proto '=https' --remote-name "$twominal_release/SHA256SUMS.txt"
+  awk -v asset="$twominal_asset" '$2 == asset { print }' SHA256SUMS.txt | shasum -a 256 --check -
+
+  trap 'hdiutil detach "$twominal_tmp/mount" >/dev/null 2>&1 || true' EXIT
+  hdiutil attach -readonly -nobrowse -noautoopen -mountpoint "$twominal_tmp/mount" "$twominal_asset"
+  codesign --verify --deep --strict "$twominal_tmp/mount/Twominal.app"
+  mkdir -p "$HOME/Applications"
+  ditto "$twominal_tmp/mount/Twominal.app" "$twominal_app"
+  open "$twominal_app"
+)
+```
+
+`curl` normally downloads without the quarantine flag added by browsers, so
+this can avoid the **Open Anyway** step. The app remains ad-hoc signed and
+unnotarized; macOS or device-management policies can still block it. See
+[Apple's explanation](https://developer.apple.com/forums/thread/706442).
+
+### Browser (DMG)
+
 Download the DMG from [GitHub Releases](https://github.com/two-net/twominal/releases),
 open it, and drag **Twominal.app** into **Applications**. The `aarch64` download
 is for Apple Silicon Macs.
@@ -43,8 +83,8 @@ open /Applications/Twominal.app
 
 Removing quarantine bypasses the download trust check for this app. Only use
 this workaround for a copy you trust. New builds seal the app bundle with an
-ad-hoc signature; opening without an unidentified-developer override requires
-Developer ID signing and Apple notarization.
+ad-hoc signature; browser downloads that open without an unidentified-developer
+override require Developer ID signing and Apple notarization.
 
 ## Prerequisites
 
@@ -374,8 +414,9 @@ rerun may replace assets only while the release remains a draft.
 An Apple Developer ID is not required for the configured ad-hoc signing or
 for publishing these packages on GitHub. After the builds and manual checks
 pass, the draft can be published with the generated installation notice and
-checksums. The macOS app is not notarized, so users must explicitly approve a
-trusted download through **Privacy & Security → Open Anyway**. Windows
+checksums. The macOS app is not notarized, so browser downloads require approval
+through **Privacy & Security → Open Anyway**; the Terminal installation option
+is described above. Windows
 installers are unsigned and may also trigger a publisher warning.
 
 To distribute macOS builds without the unidentified-developer override in the
