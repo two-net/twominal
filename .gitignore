@@ -1,10 +1,25 @@
-/src-tauri/target/
-/src-tauri/gen/schemas/
-/node_modules/
-/dist/
-*.tsbuildinfo
-.env
-.env.*
-!.env.example
+# Logs
+logs
 *.log
+
+# Rust
+/src-tauri/target
+/src-tauri/gen/schemas
+target
+
+# Generated frontend
+dist
+dist-ssr
+*.local
+node_modules
+
+# Editor directories and files
+.vscode/*
+!.vscode/extensions.json
+.idea
 .DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?

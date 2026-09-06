@@ -1,111 +1,64 @@
-mod commands;
-mod completion;
 mod config;
-mod error;
-mod history;
-mod logging;
+mod host;
 mod pty;
-mod shell;
-mod storage;
-mod terminal;
 
-use shell::ShellIntegrationPaths;
-use tauri::path::BaseDirectory;
-use tauri::webview::PageLoadEvent;
-use tauri::{AppHandle, Manager, RunEvent, WindowEvent};
-use terminal::TerminalSessionManager;
+use config::{config_get, config_set};
+use host::{
+    complete_paths, default_shell, git_branch, history_load, history_save, list_commands,
+    list_shells,
+};
+use pty::{pty_kill, pty_park, pty_resize, pty_spawn, pty_unpark, pty_write, PtyHub};
+use tauri::{Manager, PhysicalSize, WebviewWindow};
 
-struct ApplicationCleanupGuard {
-    app_handle: AppHandle,
-}
+/// Matches `minWidth` / `minHeight` in tauri.conf.json (logical pixels).
+const MIN_WINDOW_WIDTH: f64 = 720.0;
+const MIN_WINDOW_HEIGHT: f64 = 420.0;
 
-impl ApplicationCleanupGuard {
-    fn new(app_handle: AppHandle) -> Self {
-        Self { app_handle }
+/// Inner size is half the monitor resolution on each axis (¼ of the display).
+fn apply_default_window_size(window: &WebviewWindow) {
+    if let Some(monitor) = window
+        .current_monitor()
+        .ok()
+        .flatten()
+        .or_else(|| window.primary_monitor().ok().flatten())
+    {
+        let scale = monitor.scale_factor().max(1.0);
+        let res = monitor.size();
+        let width = (res.width / 2).max((MIN_WINDOW_WIDTH * scale).round() as u32);
+        let height = (res.height / 2).max((MIN_WINDOW_HEIGHT * scale).round() as u32);
+        let _ = window.set_size(PhysicalSize::new(width, height));
+        let _ = window.center();
     }
-}
-
-impl Drop for ApplicationCleanupGuard {
-    fn drop(&mut self) {
-        self.app_handle
-            .state::<TerminalSessionManager>()
-            .close_all();
-        logging::info("application_stopped");
-        logging::flush();
-    }
+    let _ = window.show();
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    let app = tauri::Builder::default()
+    tauri::Builder::default()
+        .manage(PtyHub::default())
+        .invoke_handler(tauri::generate_handler![
+            pty_spawn,
+            pty_write,
+            pty_resize,
+            pty_kill,
+            pty_park,
+            pty_unpark,
+            config_get,
+            config_set,
+            history_load,
+            history_save,
+            complete_paths,
+            list_commands,
+            git_branch,
+            default_shell,
+            list_shells,
+        ])
         .setup(|app| {
-            if let Ok(directory) = app.path().app_log_dir() {
-                let _ = logging::initialize(&directory);
+            if let Some(window) = app.get_webview_window("main") {
+                apply_default_window_size(&window);
             }
-            logging::info("application_started");
-
-            let integration = app
-                .path()
-                .resolve("shell-integration", BaseDirectory::Resource)
-                .ok()
-                .map(ShellIntegrationPaths::new);
-            app.manage(TerminalSessionManager::new(integration));
-            app.manage(history::HistoryStore::default());
-            install_panic_hook();
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![
-            config::config_load,
-            config::config_save,
-            history::history_load,
-            history::history_append,
-            history::history_clear,
-            completion::completion_query,
-            commands::terminal_start,
-            commands::terminal_prepare_transfer,
-            commands::terminal_cancel_transfer,
-            commands::terminal_attach_transfer,
-            commands::terminal_write,
-            commands::terminal_resize,
-            commands::terminal_ack_output,
-            commands::terminal_close,
-        ])
-        .on_page_load(|webview, payload| {
-            if payload.event() == PageLoadEvent::Started {
-                logging::info("webview_navigation_started");
-                webview
-                    .state::<TerminalSessionManager>()
-                    .close_owner(webview.label());
-            }
-        })
-        .on_window_event(|window, event| {
-            if matches!(event, WindowEvent::Destroyed) {
-                logging::info("application_window_destroyed");
-                window
-                    .state::<TerminalSessionManager>()
-                    .close_owner(window.label());
-            }
-        })
-        .build(tauri::generate_context!())
-        .expect("error while building Twominal");
-
-    let _cleanup_guard = ApplicationCleanupGuard::new(app.handle().clone());
-    app.run(|app_handle, event| {
-        if matches!(event, RunEvent::Exit) {
-            app_handle.state::<TerminalSessionManager>().close_all();
-            logging::info("application_exit_requested");
-            logging::flush();
-        }
-    });
-}
-
-fn install_panic_hook() {
-    let previous_hook = std::panic::take_hook();
-    std::panic::set_hook(Box::new(move |panic_info| {
-        // The cleanup guard runs after stack unwinding, when application locks are
-        // no longer held. The hook itself remains lock-safe and records no payload.
-        logging::error("application_panicked", "unexpected_panic");
-        logging::flush();
-        previous_hook(panic_info);
-    }));
+        .run(tauri::generate_context!())
+        .expect("error while running tauri application");
 }

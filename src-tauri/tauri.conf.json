@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Twominal",
-  "version": "0.1.1",
-  "identifier": "com.twominal.desktop",
+  "version": "0.1.0",
+  "identifier": "com.twominal.twominal",
   "build": {
     "beforeDevCommand": "npm run dev",
     "devUrl": "http://localhost:1420",
@@ -15,36 +15,24 @@
       {
         "label": "main",
         "title": "Twominal",
-        "width": 800,
-        "height": 600,
-        "minWidth": 560,
-        "minHeight": 360,
-        "resizable": true,
-        "dragDropEnabled": false,
-        "fullscreen": false
+        "width": 1024,
+        "height": 680,
+        "minWidth": 720,
+        "minHeight": 420,
+        "center": true,
+        "visible": false,
+        "decorations": true,
+        "titleBarStyle": "Visible",
+        "dragDropEnabled": false
       }
     ],
     "security": {
-      "csp": "default-src 'self'; connect-src 'self' ipc: http://ipc.localhost; script-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self'; img-src 'self' data:; object-src 'none'; base-uri 'none'; frame-src 'none'; frame-ancestors 'none'; form-action 'none'",
-      "devCsp": "default-src 'self'; connect-src 'self' ipc: http://ipc.localhost http://localhost:1420 ws://localhost:1420; script-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self'; img-src 'self' data:; object-src 'none'; base-uri 'none'; frame-src 'none'; frame-ancestors 'none'; form-action 'none'",
-      "freezePrototype": false
+      "csp": null
     }
   },
   "bundle": {
     "active": true,
     "targets": "all",
-    "createUpdaterArtifacts": false,
-    "category": "DeveloperTool",
-    "shortDescription": "A fast, cross-platform terminal emulator.",
-    "longDescription": "Twominal is a native PTY-backed terminal emulator with tabs, configurable appearance, shell-aware suggestions, and optional Vim-style command editing.",
-    "resources": [
-      "shell-integration/twominal.bash",
-      "shell-integration/twominal.zsh",
-      "shell-integration/twominal.ps1",
-      "shell-integration/zsh/.zshenv",
-      "shell-integration/zsh/.zprofile",
-      "shell-integration/zsh/.zshrc"
-    ],
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
@@ -53,11 +41,7 @@
       "icons/icon.ico"
     ],
     "macOS": {
-      "minimumSystemVersion": "10.13",
-      "signingIdentity": "-"
-    },
-    "android": {
-      "debugApplicationIdSuffix": ".debug"
+      "hardenedRuntime": true
     }
   }
 }

@@ -1,148 +1,281 @@
+# Build Twominal for every desktop target and attach the installers to a
+# GitHub Release.
+#
+# Trigger:
+#   git tag v0.1.0 && git push origin v0.1.0
+#   or run "Release" from the Actions tab (workflow_dispatch).
+#
+# The tag (without the leading v) must match package.json, Cargo.toml, and
+# src-tauri/tauri.conf.json. Builds upload to a draft; the publish job
+# undrafts it only after every platform succeeds so a half-finished release
+# is never marked latest.
+#
+# Optional repo secrets for signed/notarized macOS builds (paid Apple Developer
+# Program). Without them, macOS uses ad-hoc signing. Downloaded ad-hoc apps
+# need a one-time right-click → Open on each Mac.
+#   APPLE_CERTIFICATE, APPLE_CERTIFICATE_PASSWORD, APPLE_SIGNING_IDENTITY,
+#   APPLE_ID, APPLE_PASSWORD, APPLE_TEAM_ID
+
 name: Release
-run-name: Draft release for ${{ github.ref_name }}
 
 on:
   push:
     tags:
-      - "v*.*.*"
+      - "v*"
+  workflow_dispatch:
 
 permissions:
-  contents: read
-
-env:
-  TWOMINAL_NODE_VERSION: "22.23.2"
+  contents: write
 
 concurrency:
   group: release-${{ github.ref }}
   cancel-in-progress: false
 
-jobs:
-  validate:
-    name: Validate release tag
-    runs-on: ubuntu-22.04
-    timeout-minutes: 10
+env:
+  CARGO_INCREMENTAL: 0
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  APPIMAGE_EXTRACT_AND_RUN: 1
 
+jobs:
+  check:
+    name: Check
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
     steps:
-      - name: Check out source
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/checkout@v7
         with:
           persist-credentials: false
 
-      - name: Install declared Node.js toolchain
-        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+      - uses: actions/setup-node@v6
         with:
-          node-version: ${{ env.TWOMINAL_NODE_VERSION }}
+          node-version: 22
           cache: npm
 
-      - name: Validate release metadata and tag
-        env:
-          RELEASE_TAG: ${{ github.ref_name }}
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Typecheck
+        run: npx tsc --noEmit
+
+      - name: Lint install.sh
+        run: sh -n install.sh
+
+      - name: Check versions agree
         run: |
           set -euo pipefail
-          npm run check:metadata
-          expected_tag="v$(node -p "require('./package.json').version")"
-          if [[ "$RELEASE_TAG" != "$expected_tag" ]]; then
-            echo "Release tag $RELEASE_TAG must match $expected_tag." >&2
+          PKG=$(jq -r .version package.json)
+          TAURI=$(jq -r .version src-tauri/tauri.conf.json)
+          CARGO=$(awk '
+            /^\[package\]/ { in_pkg = 1; next }
+            /^\[/ { in_pkg = 0 }
+            in_pkg && /^version = "/ {
+              gsub(/^version = "|"$/, "")
+              print
+              exit
+            }
+          ' src-tauri/Cargo.toml)
+          if [ "$PKG" != "$TAURI" ] || [ "$PKG" != "$CARGO" ]; then
+            echo "::error::Version mismatch: package.json=$PKG tauri.conf.json=$TAURI Cargo.toml=$CARGO"
+            exit 1
+          fi
+          echo "App version $PKG"
+
+      - name: Check tag matches app version
+        if: github.ref_type == 'tag'
+        run: |
+          set -euo pipefail
+          VERSION=$(jq -r .version src-tauri/tauri.conf.json)
+          TAG="${GITHUB_REF_NAME#v}"
+          if [ "$TAG" != "$VERSION" ]; then
+            echo "::error::Git tag $GITHUB_REF_NAME does not match tauri.conf.json version $VERSION"
             exit 1
           fi
 
-  package:
-    name: Build release packages
-    needs: validate
-    uses: ./.github/workflows/package-unsigned.yml
-
-  release:
-    name: Create draft GitHub Release
-    needs:
-      - validate
-      - package
-    runs-on: ubuntu-22.04
-    timeout-minutes: 15
-    permissions:
-      contents: write
-
-    steps:
-      - name: Download release packages
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
-        with:
-          pattern: twominal-*-${{ github.sha }}-unsigned
-          path: downloaded-packages
-
-      - name: Collect and checksum release assets
+  build:
+    name: ${{ matrix.name }}
+    needs: check
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macOS arm64
+            platform: macos-latest
+            rust_targets: aarch64-apple-darwin
+            args: --target aarch64-apple-darwin
+          - name: macOS x64
+            platform: macos-latest
+            rust_targets: x86_64-apple-darwin
+            args: --target x86_64-apple-darwin
+          - name: Linux x64
+            platform: ubuntu-22.04
+            rust_targets: x86_64-unknown-linux-gnu
+            args: --target x86_64-unknown-linux-gnu
+          - name: Linux arm64
+            platform: ubuntu-22.04-arm
+            rust_targets: aarch64-unknown-linux-gnu
+            args: --target aarch64-unknown-linux-gnu
+          - name: Windows x64
+            platform: windows-latest
+            rust_targets: x86_64-pc-windows-msvc
+            args: --target x86_64-pc-windows-msvc
+    runs-on: ${{ matrix.platform }}
+    timeout-minutes: 60
+    defaults:
+      run:
         shell: bash
-        run: |
-          set -euo pipefail
-          mkdir release-assets
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
 
-          while IFS= read -r -d '' artifact; do
-            filename="$(basename "$artifact")"
-            destination="release-assets/$filename"
-            if [[ -e "$destination" ]]; then
-              echo "Duplicate release asset name: $filename" >&2
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libssl-dev \
+            patchelf \
+            file \
+            wget \
+            xdg-utils \
+            rpm
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.rust_targets }}
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: "./src-tauri -> target"
+          prefix-key: ${{ matrix.rust_targets }}
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      # Tauri treats a *set-but-empty* APPLE_CERTIFICATE as "import this
+      # cert" and fails with SecKeychainItemImport. Only export Apple vars
+      # when the secrets have values; otherwise ad-hoc sign (`-`).
+      - name: Configure macOS signing
+        if: runner.os == 'macOS'
+        env:
+          CERT: ${{ secrets.APPLE_CERTIFICATE }}
+          CERT_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          NOTARY_APPLE_ID: ${{ secrets.APPLE_ID }}
+          NOTARY_APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          NOTARY_APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          if [ -n "$CERT" ]; then
+            missing=()
+            [ -n "$CERT_PASSWORD" ] || missing+=(APPLE_CERTIFICATE_PASSWORD)
+            [ -n "$NOTARY_APPLE_ID" ] || missing+=(APPLE_ID)
+            [ -n "$NOTARY_APPLE_PASSWORD" ] || missing+=(APPLE_PASSWORD)
+            [ -n "$NOTARY_APPLE_TEAM_ID" ] || missing+=(APPLE_TEAM_ID)
+            if (( ${#missing[@]} )); then
+              echo "::error::APPLE_CERTIFICATE is set but notarization secrets are missing: ${missing[*]}"
+              echo "::error::A Developer ID signature without notarization is still blocked by Gatekeeper."
               exit 1
             fi
-            cp "$artifact" "$destination"
-          done < <(find downloaded-packages -type f -print0)
+            {
+              echo "APPLE_CERTIFICATE<<EOF"
+              printf '%s\n' "$CERT"
+              echo "EOF"
+              echo "APPLE_CERTIFICATE_PASSWORD<<EOF"
+              printf '%s\n' "$CERT_PASSWORD"
+              echo "EOF"
+              echo "APPLE_ID<<EOF"
+              printf '%s\n' "$NOTARY_APPLE_ID"
+              echo "EOF"
+              echo "APPLE_PASSWORD<<EOF"
+              printf '%s\n' "$NOTARY_APPLE_PASSWORD"
+              echo "EOF"
+              echo "APPLE_TEAM_ID=$NOTARY_APPLE_TEAM_ID"
+            } >> "$GITHUB_ENV"
+            if [ -n "$IDENTITY" ]; then
+              echo "APPLE_SIGNING_IDENTITY=$IDENTITY" >> "$GITHUB_ENV"
+            fi
+          else
+            echo "APPLE_SIGNING_IDENTITY=-" >> "$GITHUB_ENV"
+            echo "No APPLE_CERTIFICATE secret; using ad-hoc signing."
+          fi
+
+      - name: Build and upload to GitHub Release
+        uses: tauri-apps/tauri-action@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tagName: ${{ github.ref_type == 'tag' && github.ref_name || 'v__VERSION__' }}
+          releaseName: Twominal ${{ github.ref_type == 'tag' && github.ref_name || 'v__VERSION__' }}
+          releaseBody: |
+            Installers for macOS, Windows, and Linux are attached below.
+
+            - **macOS:** `curl --proto '=https' --proto-redir '=https' -fsSL https://raw.githubusercontent.com/two-net/twominal-grok/main/install.sh | sh` installs to `/Applications` and usually skips Gatekeeper (curl does not quarantine). Browser `.dmg` downloads are ad-hoc signed and not notarized: **right-click Twominal.app → Open → Open** the first time.
+            - **Windows:** NSIS `.exe` or `.msi`. Unsigned; SmartScreen may warn.
+            - **Linux:** `.deb`, `.rpm`, or `.AppImage`.
+          generateReleaseNotes: true
+          releaseDraft: true
+          prerelease: ${{ github.ref_type == 'tag' && contains(github.ref_name, '-') }}
+          uploadUpdaterJson: false
+          retryAttempts: 3
+          args: ${{ matrix.args }} -- --locked
+
+  publish:
+    name: Publish release
+    needs: build
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Checksum assets and publish
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          VERSION=$(jq -r .version src-tauri/tauri.conf.json)
+          if [ "${{ github.ref_type }}" = "tag" ]; then
+            TAG="${{ github.ref_name }}"
+          else
+            TAG="v${VERSION}"
+          fi
+
+          mkdir -p release-assets
+          gh release download "$TAG" --repo "${{ github.repository }}" --dir release-assets
+          rm -f release-assets/SHA256SUMS.txt
 
           shopt -s nullglob
-          deb=(release-assets/*.deb)
-          appimage=(release-assets/*_AppImage.tar.gz)
-          dmg=(release-assets/*.dmg)
-          exe=(release-assets/*.exe)
-          msi=(release-assets/*.msi)
           assets=(release-assets/*)
-
-          if (( ${#deb[@]} != 1 || ${#appimage[@]} != 1 || ${#dmg[@]} != 1 || ${#exe[@]} != 1 || ${#msi[@]} != 1 || ${#assets[@]} != 5 )); then
-            echo "Expected exactly one DEB, AppImage archive, DMG, EXE, and MSI release asset." >&2
-            find release-assets -maxdepth 1 -type f -print >&2
+          dmg=(release-assets/*.dmg)
+          deb=(release-assets/*.deb)
+          win=(release-assets/*.exe release-assets/*.msi)
+          if (( ${#assets[@]} < 1 || ${#dmg[@]} < 1 || ${#deb[@]} < 1 || ${#win[@]} < 1 )); then
+            echo "Missing expected platform assets for $TAG" >&2
+            ls -la release-assets >&2
             exit 1
           fi
 
           (
             cd release-assets
-            sha256sum -- * > SHA256SUMS.txt
+            sha256sum -- * > ../SHA256SUMS.txt
           )
+          gh release upload "$TAG" SHA256SUMS.txt --repo "${{ github.repository }}" --clobber
 
-      - name: Create or update draft release
-        env:
-          GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: ${{ github.ref_name }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          shopt -s nullglob
-          assets=(release-assets/*)
-          warning=$'> [!IMPORTANT]\n'
-          warning+=$'> macOS builds are ad-hoc signed and are not notarized by Apple.\n'
-          warning+=$'> After trying to open a trusted copy, go to **System Settings → Privacy & Security → Open Anyway** and confirm.\n'
-          warning+=$'> See [macOS installation instructions](https://github.com/two-net/twominal#install-on-macos).\n>\n'
-          warning+=$'> Windows installers are unsigned and may display a publisher warning. Checksums are provided in `SHA256SUMS.txt`.'
-
-          if is_draft="$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft 2>/dev/null)"; then
-            if [[ "$is_draft" != "true" ]]; then
-              echo "Release $RELEASE_TAG already exists and is published; refusing to replace its assets." >&2
-              exit 1
-            fi
-
-            release_id="$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG" --jq .id)"
-            asset_ids_file="$RUNNER_TEMP/twominal-release-asset-ids"
-            gh api --paginate \
-              "repos/$GITHUB_REPOSITORY/releases/$release_id/assets?per_page=100" \
-              --jq '.[].id' > "$asset_ids_file"
-            while IFS= read -r asset_id; do
-              if [[ ! "$asset_id" =~ ^[0-9]+$ ]]; then
-                echo "Invalid release asset ID: $asset_id" >&2
-                exit 1
-              fi
-              gh api --method DELETE "repos/$GITHUB_REPOSITORY/releases/assets/$asset_id"
-            done < "$asset_ids_file"
-            gh release upload "$RELEASE_TAG" "${assets[@]}" --repo "$GITHUB_REPOSITORY"
+          if [[ "$TAG" == *-* ]]; then
+            gh release edit "$TAG" --draft=false --prerelease --repo "${{ github.repository }}"
           else
-            gh release create "$RELEASE_TAG" "${assets[@]}" \
-              --repo "$GITHUB_REPOSITORY" \
-              --verify-tag \
-              --draft \
-              --title "Twominal ${RELEASE_TAG#v} (unsigned draft)" \
-              --generate-notes \
-              --notes "$warning"
+            gh release edit "$TAG" --draft=false --latest --repo "${{ github.repository }}"
           fi
+          gh release view "$TAG" --repo "${{ github.repository }}"

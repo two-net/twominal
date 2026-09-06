@@ -1,13 +1,90 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" data-liga="on">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <meta name="color-scheme" content="dark light" />
     <title>Twominal</title>
+    <script>
+      if (/[?&]attach=/.test(location.search)) document.documentElement.dataset.boot = "attach";
+    </script>
+    <link rel="stylesheet" href="/src/styles.css" />
   </head>
   <body>
-    <div id="root"></div>
-    <script type="module" src="/src/main.tsx"></script>
+    <div id="splash" aria-hidden="false">
+      <div class="mark">
+        <div class="logo-row">
+          <div class="cursor-block"></div>
+          <div class="word">Twominal</div>
+        </div>
+        <div class="tag">friendly terminal · no fish dependency</div>
+        <div class="wave"></div>
+      </div>
+    </div>
+
+    <div id="app" hidden>
+      <div class="tabbar" id="tabbar">
+        <div class="tabs" id="tabs"></div>
+        <button type="button" class="add-tab" id="new-tab" title="New tab">+</button>
+        <div class="tab-actions">
+          <button type="button" class="icon-btn" id="theme-btn" title="Cycle theme">◐</button>
+          <button type="button" class="icon-btn" id="settings-btn" title="Settings">⚙</button>
+        </div>
+      </div>
+
+      <div class="stage">
+        <main id="sessions"></main>
+        <aside id="settings" class="drawer">
+          <h3>Settings</h3>
+          <div class="field">
+            <label for="set-theme">Theme</label>
+            <select id="set-theme">
+              <option value="dark">Always dark</option>
+              <option value="light">Always light</option>
+              <option value="system">System</option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="set-font">Font</label>
+            <select id="set-font"></select>
+          </div>
+          <div class="field">
+            <label for="set-size">Font size</label>
+            <input id="set-size" type="number" min="11" max="22" step="0.5" />
+          </div>
+          <div class="field">
+            <label class="check"><input type="checkbox" id="set-liga" /> Font ligatures</label>
+          </div>
+          <div class="field">
+            <label class="check"><input type="checkbox" id="set-vim" /> Vim line-editor mode</label>
+            <div class="hint">ESC / hjkl / i a 0 $ x dd. Suspended when a TUI (vim, less, htop) owns the PTY.</div>
+          </div>
+          <div class="field">
+            <label class="check"><input type="checkbox" id="set-motion" /> Reduce motion</label>
+          </div>
+          <div class="field">
+            <label class="check"><input type="checkbox" id="set-raw" /> Raw PTY (disable line editor)</label>
+          </div>
+          <div class="field">
+            <label for="set-shell">Shell</label>
+            <select id="set-shell"></select>
+            <div class="hint">Login shells found on this machine. New tabs use the selected path. Never Fish.</div>
+          </div>
+          <div class="field">
+            <label for="set-abbrev">Abbreviations (name=expansion)</label>
+            <textarea id="set-abbrev" rows="4" spellcheck="false"></textarea>
+          </div>
+        </aside>
+      </div>
+
+      <footer class="statusbar">
+        <span class="pill ins" id="mode-pill">insert</span>
+        <span id="stat-cwd"></span>
+        <span class="spacer"></span>
+        <span id="stat-theme"></span>
+        <span id="stat-shell"></span>
+        <span id="stat-clock"></span>
+      </footer>
+    </div>
+    <script type="module" src="/src/main.ts"></script>
   </body>
 </html>
