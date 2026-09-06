@@ -21,36 +21,18 @@ Twominal and work on a machine where Fish has never been installed.
 
 ### Terminal (curl)
 
-On an **Apple Silicon Mac**, paste this block into Terminal to install v0.1.1
-in `~/Applications` without administrator access. It verifies the release
-checksum and app signature, and stops if a copy already exists at that location.
+On an **Apple Silicon Mac**, run this command to install v0.1.1 in
+`~/Applications` without administrator access:
 
 ``` sh
-(
-  set -eu
-  twominal_version=0.1.1
-  twominal_asset="Twominal_${twominal_version}_aarch64.dmg"
-  twominal_release="https://github.com/two-net/twominal/releases/download/v${twominal_version}"
-  twominal_app="$HOME/Applications/Twominal.app"
-  if [ -e "$twominal_app" ] || [ -L "$twominal_app" ]; then
-    echo "An app already exists at $twominal_app; move it aside before installing." >&2
-    exit 1
-  fi
-
-  twominal_tmp="$(mktemp -d)"
-  cd "$twominal_tmp"
-  curl --fail --location --proto '=https' --remote-name "$twominal_release/$twominal_asset"
-  curl --fail --location --proto '=https' --remote-name "$twominal_release/SHA256SUMS.txt"
-  awk -v asset="$twominal_asset" '$2 == asset { print }' SHA256SUMS.txt | shasum -a 256 --check -
-
-  trap 'hdiutil detach "$twominal_tmp/mount" >/dev/null 2>&1 || true' EXIT
-  hdiutil attach -readonly -nobrowse -noautoopen -mountpoint "$twominal_tmp/mount" "$twominal_asset"
-  codesign --verify --deep --strict "$twominal_tmp/mount/Twominal.app"
-  mkdir -p "$HOME/Applications"
-  ditto "$twominal_tmp/mount/Twominal.app" "$twominal_app"
-  open "$twominal_app"
-)
+curl --proto '=https' --proto-redir '=https' -fsSL https://raw.githubusercontent.com/two-net/twominal/main/install.sh | sh
 ```
+
+[install.sh](install.sh) verifies the release checksum and app signature,
+installs the complete app, and removes temporary files. It stops if a copy
+already exists at the destination. Open `~/Applications/Twominal.app` after
+installation. To run the script from a checkout, use `sh install.sh`; set
+`TWOMINAL_INSTALL_DIR` to an absolute directory path to choose another location.
 
 `curl` normally downloads without the quarantine flag added by browsers, so
 this can avoid the **Open Anyway** step. The app remains ad-hoc signed and
