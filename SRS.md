@@ -1,6 +1,6 @@
 # Twominal — Software Requirements Specification
 
-**Version:** 0.4 (draft) · **Date:** 2026-10-13 · **Status:** For review
+**Version:** 0.5 (draft) · **Date:** 2026-10-13 · **Status:** For review
 
 > This SRS is technology-agnostic. It defines what Twominal must do and how well, not how it is built. Programming languages, frameworks, libraries, rendering methods and file formats are deliberately left to the design document.
 
@@ -98,7 +98,7 @@ Twominal is a new, standalone desktop application. In each tab it starts the use
 └──────────────────────────────────────────────────────────────┘
 ```
 
-Each `[ … × ]` is a tab with its close button, `●` marks new output in a background tab, `[+]` opens a new tab, and `NORMAL` is the Vim mode badge of the active (first) tab.
+Each `[ … × ]` is a tab with its close button, `●` marks new output in a background tab, `[+]` opens a new tab, and `NORMAL` is the Vim mode badge of the active (first) tab. A window with only one tab has no tab bar: the terminal area fills the window (UI-01).
 
 ### 2.2 User classes
 
@@ -134,8 +134,8 @@ Each `[ … × ]` is a tab with its close button, `●` marks new output in a ba
 
 | ID | Requirement | Priority |
 |---|---|---|
-| UI-01 | The main window shall show a tab bar at the top (OQ-6) and the terminal area below it, filling the rest of the window. | Must |
-| UI-02 | The find bar, the completion list and notices (such as "process exited") shall overlay the terminal area without resizing the terminal grid. | Must |
+| UI-01 | The main window shall show a tab bar at the top and the terminal area below it, filling the rest of the window. While the window has only one tab, the tab bar shall be hidden and the terminal area shall fill the window. Showing or hiding the tab bar shall not change the window's size. | Must |
+| UI-02 | The find bar, the completion list, notices (such as "process exited") and, while the tab bar is hidden, the Vim mode badge (VIM-04) shall overlay the terminal area without resizing the terminal grid. | Must |
 | UI-03 | Twominal shall provide a settings screen, an About screen and built-in help that lists shortcuts, command-line and Vim mode keys, and settings. | Must |
 | UI-04 | Right-clicking the terminal shall open a menu with Copy, Paste, Select All, Find, Clear and, over a link, Open Link. | Should |
 | UI-05 | Menus, window controls and shortcuts shall follow the conventions of each supported OS. | Must |
@@ -278,7 +278,7 @@ Vim mode has two parts:
 | VIM-01 | When the Vim mode setting is On (default Off), the command-line editor shall use vi-style editing with Insert, Normal and Visual modes, and each new command line shall start in Insert mode. When it is Off, only the standard editing keys shall apply (CMD-14). | Must |
 | VIM-02 | Changing the setting shall apply to every tab immediately. | Should |
 | VIM-03 | In Prompt Vim mode the cursor shall show the mode: a block in Normal and Visual, a bar in Insert, and an underline in Replace. | Must |
-| VIM-04 | While the command-line editor is active and the Vim mode setting is On, a badge at the right end of the tab bar shall show the active tab's mode: NORMAL, INSERT, VISUAL or REPLACE. The badge shall hide in passthrough. | Should |
+| VIM-04 | While the command-line editor is active and the Vim mode setting is On, a badge at the right end of the tab bar shall show the active tab's mode: NORMAL, INSERT, VISUAL or REPLACE. While the tab bar is hidden (UI-01), the badge shall show in a corner of the terminal area instead (UI-02). The badge shall hide in passthrough. | Should |
 | VIM-05 | Esc shall switch to Normal mode with no added delay; the switch shall be visible within 50 ms of pressing Esc. | Must |
 | VIM-16 | In Normal mode these keys shall work, the motions with an optional count such as `3w`: `h` `l` `w` `b` `e` `W` `B` `E` `0` `^` `$` to move; `i` `a` `I` `A` to enter Insert mode; `x` `D` `C` `dd` `cc`, and `d` `c` `y` followed by a motion, to edit; `p` `P` to paste what was last deleted or yanked; `u` to undo; `j` `k` to step through the history; and `v` to start a selection that `d` `c` `y` act on. Enter shall run the command line in any mode. | Must |
 | VIM-17 | `r` and `R` (Replace mode), `f` `F` `t` `T` `;` `,`, `.`, Ctrl+R (redo), and the word and quoted-string text objects, as in `ciw` and `ci"`, shall work. | Should |
@@ -511,7 +511,7 @@ Each scenario starts from default settings unless it says otherwise. Commands an
 | AT-02 | Type `ls` during the splash | The splash closes on the first key, and `ls` appears at the prompt | SPL-05 |
 | AT-03 | Switch the OS to light mode while an editor runs in one tab | Within 1 s Twominal cross-fades to Light; the editor keeps running and scrollback is intact | THM-02, THM-06, REL-03 |
 | AT-04 | Type `a != b -> c` with ligatures on, put the cursor on `!=`, then copy the line | `!=` and `->` are drawn as ligatures; `!=` splits under the cursor; the clipboard holds `a != b -> c` | FONT-04, FONT-05, FONT-07, FONT-08 |
-| AT-05 | Open three tabs, run `cd /tmp` in the third, then open a fourth | The fourth tab starts in `/tmp`; the tab bar animates; switching tabs is instant | TAB-02–03, TAB-09, ANIM-01 |
+| AT-05 | Open three tabs, run `cd /tmp` in the third, then open a fourth | The tab bar appears when the second tab opens; the fourth tab starts in `/tmp`; the tab bar animates; switching tabs is instant | UI-01, TAB-02–03, TAB-09, ANIM-01 |
 | AT-06 | Drag the third tab to the first position, then press the shortcut for tab 1 | The order updates with an animation, and the moved tab becomes active | TAB-08, TAB-10 |
 | AT-07 | Run `vim` in a tab and press Mod+W | A confirmation names `vim`; Cancel keeps the tab open | TAB-05 |
 | AT-08 | Turn Vim mode on, open a tab, type `echo hello`, press Esc, then `0` | The badge changes from INSERT to NORMAL and the cursor from bar to block within 50 ms; the cursor jumps to the line start | VIM-01, VIM-03–05, VIM-16 |
@@ -687,5 +687,5 @@ These keys apply in Normal mode when the Vim mode setting is On (VIM-16, VIM-17)
 | OQ-3 | Is Windows in scope? With no fish dependency (OQ-1) nothing rules it out, but it adds a third OS to build and test and another family of shells to integrate. | **Decided ([#4](https://github.com/two-net/twominal/issues/4)):** yes. Version 1.0 runs on Windows 11 as well as macOS and Linux (PORT-01). On Windows the default shell is PowerShell, with shell integration (SW-01, FISH-04). cmd, WSL and other shells run in passthrough (FISH-03). |
 | OQ-4 | Which font should be bundled? It needs programming ligatures and a license that allows redistribution. | **Decided ([#5](https://github.com/two-net/twominal/issues/5)):** JetBrains Mono, in regular, bold, italic and bold italic styles (FONT-01). It has programming ligatures, and the SIL Open Font License 1.1 allows bundling it as long as its copyright notice and license ship with it (C-3). Which font files to ship and how to load them is left to design. |
 | OQ-5 | What is the oldest supported fish version? | **Withdrawn:** Twominal does not use fish (OQ-1). |
-| OQ-6 | Should the tab bar hide when a window has only one tab? | No; always show it in 1.0. |
+| OQ-6 | Should the tab bar hide when a window has only one tab? | **Decided ([#7](https://github.com/two-net/twominal/issues/7)):** yes. The tab bar shows only while a window has two or more tabs; with one tab, the terminal area fills the window (UI-01). The window keeps its size when the tab bar shows or hides. While the tab bar is hidden, the Vim mode badge shows in a corner of the terminal area (VIM-04). Version 1.0 has no setting to always show the tab bar. |
 | OQ-7 | Should the command line show Twominal's own prompt or the shell's? The shell's prompt keeps the user's customization, but the editor then has to find exactly where it ends. | Twominal's own prompt (CMD-04), as in v0.1.x. The shell's prompt shows when the command-line editor is off. |
