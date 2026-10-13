@@ -9,7 +9,20 @@
 //! Filled in by #31 (open, close, switch), #32 (closing), #33 (reordering) and #34 (titles).
 
 /// The tabs of one window, in tab-bar order.
-#[expect(dead_code, reason = "constructed by #31")]
 pub struct TabManager {
+    #[expect(dead_code, reason = "read by #31")]
     tabs: Vec<tab::Handle>,
+}
+
+impl TabManager {
+    /// A window's tabs before any is opened.
+    pub fn new() -> Self {
+        Self { tabs: Vec::new() }
+    }
+
+    /// The active tab's title, for the window's title bar (GEN-04). No tab has a title
+    /// until #34.
+    pub fn active_title(&self) -> Option<&str> {
+        None
+    }
 }

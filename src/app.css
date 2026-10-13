@@ -8,8 +8,36 @@
   font: 13px/1.4 system-ui, sans-serif;
 }
 
+html,
 body {
+  height: 100%;
+}
+
+/* The tab bar at the top, and the terminal area in the rest of the window (UI-01). */
+body {
+  display: flex;
+  flex-direction: column;
   margin: 0;
+  overflow: hidden;
+}
+
+/* The Tab Manager's view draws the tabs and shows the bar while there are two or more
+   (#31). Its room comes from the terminal area, never from the window. */
+#tab-bar {
+  flex: none;
+  height: 36px;
+  border-bottom: 1px solid GrayText;
+  box-sizing: border-box;
+}
+
+#tab-bar[hidden] {
+  display: none;
+}
+
+/* The Renderer's canvas goes here (#22). */
+#terminal {
+  flex: 1;
+  min-height: 0;
 }
 
 /* Notices lie over the page and take no room from the terminal (UI-02). */

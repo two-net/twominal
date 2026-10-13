@@ -269,15 +269,7 @@ impl fmt::Display for Notice {
 /// the configuration now.
 #[derive(Clone, Debug)]
 pub struct Change {
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "read by the features that use each setting")
-    )]
     pub settings: Settings,
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "read by the features that use each setting")
-    )]
     pub previous: Settings,
     pub notices: Vec<Notice>,
 }
@@ -370,10 +362,6 @@ impl SettingsStore {
     }
 
     /// The settings in use.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "read by the features that use each setting")
-    )]
     pub fn settings(&self) -> Settings {
         self.shared.state().settings.clone()
     }
@@ -394,13 +382,6 @@ impl SettingsStore {
     ///
     /// If a value breaks a rule the file is held to, nothing changes, and the notices say
     /// which and why.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "called by the settings screen (#42) and the View menu (#10)"
-        )
-    )]
     pub fn update(&self, edit: impl FnOnce(&mut Settings)) -> Result<(), Vec<Notice>> {
         let mut changes = Vec::new();
         let outcome = {

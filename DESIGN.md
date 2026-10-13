@@ -1,6 +1,6 @@
 # Twominal — Design
 
-**Version:** 0.2 · **Date:** 2026-10-14 · **Tracks:** [SRS](SRS.md) v0.6
+**Version:** 0.3 · **Date:** 2026-10-14 · **Tracks:** [SRS](SRS.md) v0.6
 
 > The SRS says what Twominal must do. This document says how it is built: the technology choices the SRS leaves open (C-1) and where each component of SRS §6 lives. Requirement IDs such as `ARC-02` are the SRS's. Where the two disagree, the SRS wins and this document is corrected.
 
@@ -140,17 +140,40 @@ Planned, and added by the issue that first needs each:
 
 ## 3. Components
 
-As of this version the Settings Store is built. Every other Rust home exists as a skeleton: types that say who owns what, and no behaviour. Of the webview homes only `src/app.js` exists. The others are created by their issues, at the paths in §1.
+As of this version the Settings Store is built, and the App Shell opens windows and builds the native menus. Every other Rust home exists as a skeleton: types that say who owns what, and no behaviour. Of the webview homes only `src/app.js` exists. The others are created by their issues, at the paths in §1.
 
 ### Tier 1: App Shell
 
 - **Owns** the stores, the Theme Manager, every window, the native menus and the splash screen. Each window has one Tab Manager.
 - **Is the only code that names Tauri.** Every command and event is defined in `app.rs`. Commands are named `<component>_<verb>`, such as `app_ready` or `tabs_open`, and events `<component>:<what>`.
 - **Wires the stores and managers.** It hears a settings change and passes it to the Theme Manager, the Tab Managers and the webviews. They never name each other.
-- **Creates windows in code, not from `tauri.conf.json`.** A window then opens with the resolved background and the settings it needs for its first frame, so there is no flash of the wrong theme (SPL-02) and reduced motion applies from the start (SPL-07). Built in #10.
-- **Its page** hosts the tab bar, the canvas, the splash screen and the settings, About and help screens (UI-03).
+- **Creates windows in code, not from `tauri.conf.json`.** A window then opens with the settings it needs for its first frame, so there is no flash of the wrong theme (SPL-02) and reduced motion applies from the start (SPL-07). So far that is the OS appearance the Theme setting asks for. The resolved background comes with #39 and the splash with #41.
+- **Its page** hosts the tab bar, the canvas, the splash screen and the settings, About and help screens (UI-03). The tab bar is at the top and the terminal area fills the rest. Showing or hiding the tab bar takes room from the terminal area and never from the window (UI-01).
 - **Shows the notices that belong to no tab**, such as a bad value in the configuration file (SET-05). They overlay the page and take no room from the terminal (UI-02).
 - **Must not** contain terminal logic.
+
+#### Windows and menus
+
+- **Every window is alike.** There is no main window. A window's label is `window-1`, `window-2` and so on, and a label is never reused. The capability in `src-tauri/capabilities/default.json` names them all as `window-*`.
+- **The title** is the active tab's title, which the window's Tab Manager gives, or the product's name while no tab has one (GEN-04).
+- **A new window** (TAB-15) asked for from a menu is opened from a thread of its own, because on Windows the webview cannot be created from inside an event handler. On macOS it is placed a step down and right of the focused window. Elsewhere the OS places it.
+- **The last window.** On macOS Twominal keeps running with no window, and a click on its Dock icon opens one. On Linux and Windows closing the last window quits (TAB-07).
+- **The theme.** A theme chosen in the View menu is written through the Settings Store (THM-07). The App Shell hears that change as it hears any other, moves the check mark and gives every window the OS appearance the setting asks for: dark, light, or whatever the OS has. The palette is the Theme Manager's (#38).
+
+The menus hold only what works. Each feature adds its own items (UI-05).
+
+| Menu | macOS | Linux and Windows |
+|---|---|---|
+| Twominal | About, Services, Hide, Hide Others, Show All, Quit | — |
+| File | New Window, Close Window | New Window, Close Window, Quit |
+| Edit | Undo, Redo, Cut, Copy, Paste, Select All | — |
+| View | Theme: Dark, Light, System. Enter Full Screen | Theme: Dark, Light, System |
+| Window | Minimize, Zoom, Bring All to Front, and the open windows | — |
+| Help | The search field | About |
+
+- **On macOS** the menu bar belongs to the app. On Linux and Windows each window shows it.
+- **Off macOS no item takes a plain Ctrl+letter** (Appendix A). The OS's ready-made Edit items would take Ctrl+C from the shell, so there the Edit menu waits for #28.
+- **Off macOS, Close Window and Quit are Twominal's own items**, because Linux has no ready-made ones.
 
 ### Tier 2: stores and managers
 
@@ -180,7 +203,7 @@ A pure `no_std` crate. Bytes go in through one entry point. Out come the screen 
 ### What §6.1 does not name
 
 - **Find bar, completion list, notices, Vim mode badge.** Their state belongs to the Terminal Core (find), the Command Line (completions) and the Input Handler (mode). The Renderer draws them over the terminal area from the frame (UI-02).
-- **Menus and shortcuts.** A native menu item and its shortcut produce the same action. The Input Handler defines the actions; the App Shell's menus send them.
+- **Menus and shortcuts.** A native menu item and its shortcut produce the same action. An item that acts on the app or a window, such as New Window or a theme, is carried out by the App Shell. An item that acts on a tab sends an action that the Input Handler defines (#43).
 
 ### The webview holds no model state
 
@@ -299,6 +322,7 @@ Saving a setting changes only the keys whose value changed. Comments, the order 
 - **`cargo test --workspace`** runs everything below that exists.
 - **Architecture test**, `src-tauri/tests/architecture.rs`. It reads the two marked tables in this document and checks the code against them (§10).
 - **Settings Store.** `src-tauri/src/settings/tests.rs` gives each test a configuration folder of its own, and covers loading, each kind of bad value, hand edits and saving (SET-02 to SET-05, AT-13). The store does not depend on Tauri, so it needs no window.
+- **App Shell.** `src-tauri/src/app/tests.rs` covers what needs no window: window titles and labels, what each menu item does, and the shortcut on each OS. The windows and menus themselves are checked by hand (MAINT-02).
 - **Terminal Core.** A conformance suite that feeds byte streams and checks the screen (MAINT-03), and fuzz targets (REL-02). Both run with no window (ARC-03). #17.
 - **Tab tier.** The `tab` crate does not depend on Tauri, so the Command Line, key handling and the Renderer's choice of text runs are unit-tested without a window.
 - **Webview.** It has no logic of its own to unit-test. What it draws is checked by the acceptance scenarios (SRS §7) as documented manual tests (MAINT-02).
