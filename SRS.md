@@ -1,6 +1,6 @@
 # Twominal — Software Requirements Specification
 
-**Version:** 0.2 (draft) · **Date:** 2026-10-13 · **Status:** For review
+**Version:** 0.3 (draft) · **Date:** 2026-10-13 · **Status:** For review
 
 > This SRS is technology-agnostic. It defines what Twominal must do and how well, not how it is built. Programming languages, frameworks, libraries, rendering methods and file formats are deliberately left to the design document.
 
@@ -37,16 +37,16 @@ Twominal is a terminal emulator that runs the user's own shell in every tab and 
 - an animated splash screen at launch;
 - a deliberately simple architecture (§6).
 
-Twominal has no fish dependency. It does not bundle or require fish, and every feature works on a machine where fish has never been installed (FISH-08). The fish-style features are Twominal's own; the user's shell, such as zsh or bash, runs the commands in its own syntax. Twominal does not implement the fish scripting language or read fish configuration.
+Twominal has no fish dependency. It does not bundle or require fish, and every feature works on a machine where fish has never been installed (FISH-08). The fish-style features are Twominal's own; the user's shell, such as zsh, bash or PowerShell, runs the commands in its own syntax. Twominal does not implement the fish scripting language or read fish configuration.
 
-**Out of scope for 1.0:** split panes; restoring tabs after a restart; plugins and scripting; SSH or connection management; inline images; accounts, sync, telemetry and automatic updates; moving tabs between windows; Windows support (OQ-3).
+**Out of scope for 1.0:** split panes; restoring tabs after a restart; plugins and scripting; SSH or connection management; inline images; accounts, sync, telemetry and automatic updates; moving tabs between windows.
 
 ### 1.3 Definitions
 
 | Term | Meaning |
 |---|---|
 | fish | The friendly interactive shell. Twominal models its command line on fish but does not bundle or require it. |
-| Shell | The command-line shell that a tab runs: by default the user's default shell, such as zsh or bash. |
+| Shell | The command-line shell that a tab runs: by default the user's default shell (SW-01), such as zsh, bash or PowerShell. |
 | Session | One shell process connected to one tab through a pseudo-terminal. |
 | Command-line editor | The part of Twominal that edits the command line at the prompt, with highlighting, autosuggestions, completions, abbreviations, history and Vim keys. The shell runs the finished line. |
 | Passthrough | The state in which input goes straight to the session and not to the command-line editor: while a program runs, or when the editor is off. |
@@ -61,7 +61,7 @@ Twominal has no fish dependency. It does not bundle or require fish, and every f
 | Prompt Vim mode | Editing the command line with vi-style keys in the command-line editor (Normal, Insert, Visual and Replace modes). |
 | Scrollback Vim mode | Twominal's own mode for moving through, searching and copying output with Vim keys. |
 | Shell integration | Instructions Twominal passes to the shell at startup, without touching the user's files, so the shell reports its working directory and when it is ready for a command, and leaves the command line to Twominal. |
-| Mod | The main shortcut modifier: Cmd on macOS, Ctrl+Shift on Linux. |
+| Mod | The main shortcut modifier: Cmd on macOS, Ctrl+Shift on Linux and Windows. |
 | Reduced motion | The OS accessibility setting that asks apps to minimize movement. |
 | Cold start | Launching Twominal when it is not already running. |
 
@@ -109,8 +109,8 @@ Each `[ … × ]` is a tab with its close button, `●` marks new output in a ba
 
 ### 2.3 Operating environment
 
-- Desktop OS: macOS and Linux (Windows: OQ-3).
-- The user's default shell, such as zsh or bash. fish is not needed (FISH-08).
+- Desktop OS: macOS, Linux and Windows (PORT-01).
+- The user's default shell: usually zsh or bash on macOS and Linux, and PowerShell on Windows (SW-01). fish is not needed (FISH-08).
 - Standard and high-density displays, including several monitors with different scale factors.
 - Any keyboard layout and input method, plus mouse and trackpad.
 
@@ -122,7 +122,7 @@ Each `[ … × ]` is a tab with its close button, `●` marks new output in a ba
 
 ### 2.5 Assumptions and dependencies
 
-- **A-1** The OS provides a default shell for the user, and the user can run it.
+- **A-1** The OS provides a shell that the user can run: the user's default shell on macOS and Linux, and PowerShell on Windows (SW-01).
 - **A-2** The OS reports its dark/light appearance and tells apps when it changes. Where it does not, System resolves to Dark (THM-02).
 - **A-3** The OS reports its reduced-motion setting. Where it does not, Twominal assumes full motion.
 - **A-4** Users who turn on Vim mode know basic Vim keys.
@@ -152,8 +152,8 @@ Each `[ … × ]` is a tab with its close button, `●` marks new output in a ba
 
 | ID | Requirement | Priority |
 |---|---|---|
-| SW-01 | **Shell:** Twominal shall start one shell process per tab, by default the user's default shell as an interactive login shell, connected through a pseudo-terminal. | Must |
-| SW-02 | **Environment:** each session shall receive `TERM=xterm-256color`, `COLORTERM=truecolor`, `TERM_PROGRAM=Twominal`, `TERM_PROGRAM_VERSION=<version>`, and a UTF-8 locale if none is set. | Must |
+| SW-01 | **Shell:** Twominal shall start one shell process per tab, by default the user's default shell, connected through a pseudo-terminal. On macOS and Linux it shall start as an interactive login shell. On Windows, which records no default shell for a user, the default shall be PowerShell: PowerShell 7 or later if it is installed, otherwise the Windows PowerShell that ships with Windows. | Must |
+| SW-02 | **Environment:** each session shall receive `TERM=xterm-256color`, `COLORTERM=truecolor`, `TERM_PROGRAM=Twominal`, `TERM_PROGRAM_VERSION=<version>`, and a UTF-8 locale if none is set. On Windows the session shall use UTF-8 for console input and output. | Must |
 | SW-03 | **Appearance:** Twominal shall read the OS dark/light appearance and react when it changes. | Must |
 | SW-04 | **Reduced motion:** Twominal shall read the OS reduced-motion setting and react when it changes. | Must |
 | SW-05 | **Clipboard:** copy and paste shall use the OS clipboard. On Linux, selecting text shall also set the primary selection, and middle-click shall paste it. | Must |
@@ -196,10 +196,10 @@ None. Twominal itself opens no network connections (SEC-01); programs running in
 | TERM-14 | Each tab shall keep 10,000 lines of scrollback by default, configurable from 0 to 100,000. | Must |
 | TERM-15 | When the terminal area changes size, the session shall be told the new number of rows and columns. | Must |
 | TERM-16 | On resize, wrapped lines shall reflow to the new width. | Should |
-| TERM-17 | Dragging shall select characters, double-clicking a word and triple-clicking a line; Option+drag on macOS and Ctrl+drag on Linux shall select a rectangular block. Copying shall return the original text, with trailing spaces removed and wrapped lines joined. | Must |
+| TERM-17 | Dragging shall select characters, double-clicking a word and triple-clicking a line; Option+drag on macOS, Ctrl+drag on Linux and Alt+drag on Windows shall select a rectangular block. Copying shall return the original text, with trailing spaces removed and wrapped lines joined. | Must |
 | TERM-18 | Find (Mod+F) shall highlight every match on screen and in scrollback, move between matches, and offer a case-sensitivity toggle. | Must |
 | TERM-19 | Find shall support regular expressions. | Could |
-| TERM-20 | URLs in output shall be detected. Cmd+click on macOS or Ctrl+click on Linux shall open them, and hovering shall show the full target. | Should |
+| TERM-20 | URLs in output shall be detected. Cmd+click on macOS or Ctrl+click on Linux and Windows shall open them, and hovering shall show the full target. | Should |
 | TERM-21 | The bell shall be visual by default (a short flash) and configurable as audible or off. | Should |
 | TERM-22 | Clear (Mod+K) shall clear the screen and scrollback, keeping the line with the cursor. | Should |
 
@@ -214,8 +214,8 @@ Twominal gives the user's shell a fish-style command line. Twominal's command-li
 | FISH-01 | Each new tab shall start the user's default shell (SW-01). A window's first tab shall start in the home directory, or in the directory given to the launcher. | Must |
 | FISH-02 | If the shell cannot be found or fails to start, the tab shall explain the problem and offer to open another shell found on the system. The rest of Twominal shall keep working. | Must |
 | FISH-03 | The user shall be able to choose another shell executable and its arguments. If Twominal has no shell integration for that shell, its tabs shall stay in passthrough, features that need shell integration shall turn off quietly (FISH-06), and everything else shall keep working. | Should |
-| FISH-04 | Twominal shall provide shell integration for at least zsh and bash. It shall be applied when a session starts, without creating, changing or deleting any of the user's shell files, and the user's own shell configuration shall load as usual. | Must |
-| FISH-05 | Shell integration shall report to Twominal the session's working directory and command search path, the names of the shell's aliases and functions, and when the shell is ready for a command, including the first time. | Must |
+| FISH-04 | Twominal shall provide shell integration for at least zsh and bash on macOS and Linux, and for PowerShell on Windows (Windows PowerShell 5.1 and PowerShell 7 or later). It shall be applied when a session starts, without creating, changing or deleting any of the user's shell files, and the user's own shell configuration shall load as usual. | Must |
+| FISH-05 | Shell integration shall report to Twominal the session's working directory and command search path, the names of the shell's aliases and functions, and when the shell is ready for a command, including the first time. For PowerShell it shall also report the names of the available cmdlets, which count as shell builtins in CMD-07 and CMD-09. | Must |
 | FISH-06 | Shell integration shall be switchable off in settings. Features that depend on it (the command-line editor, new tab in the same directory, prompt jumps, detecting the first prompt) shall then turn off or fall back without errors. | Should |
 | FISH-07 | Syntax highlighting, autosuggestions and the completion list shall use only the active theme's 16 ANSI colors, so the command line follows Twominal's theme. | Must |
 | FISH-08 | Twominal shall not bundle, require or depend on fish, and shall contain no fish code or data. Every feature shall work on a machine where fish has never been installed. If the user's own shell is fish, Twominal shall run it like any other shell (FISH-03). | Must |
@@ -232,7 +232,7 @@ The command-line editor is active while the shell waits for a command. Its keys 
 | CMD-04 | At each command line Twominal shall show its own prompt with the working directory, shortening the home directory to `~` (OQ-7). | Must |
 | CMD-05 | Inside a Git repository, the prompt shall also show the current branch. | Should |
 | CMD-06 | The prompt and command line shall be drawn in the terminal area, directly below the last output, with the terminal's font, ligatures, colors and cursor settings; long lines shall wrap. When a command runs, its prompt and command line shall stay on screen and in scrollback as ordinary text. | Must |
-| CMD-07 | **Syntax highlighting:** as the user types, the editor shall color command names, options, quoted strings, variables, redirections, pipes and comments. A command name shall be highlighted as not found unless it is a program on the search path, a shell builtin or keyword, or one of the shell's aliases or functions. | Must |
+| CMD-07 | **Syntax highlighting:** as the user types, the editor shall color command names, options, quoted strings, variables, redirections, pipes and comments, following the syntax of the tab's shell. A command name shall be highlighted as not found unless it is a program on the search path, a shell builtin or keyword, or one of the shell's aliases or functions. | Must |
 | CMD-08 | **Autosuggestions:** as the user types, the editor shall show an autosuggestion after the cursor, taken from the command history first and from completions otherwise. Right Arrow or Ctrl+F at the end of the line shall accept it, and Alt+Right Arrow shall accept its next word. A suggestion shall never run or enter the command line unless the user accepts it. | Must |
 | CMD-09 | **Completions:** Tab shall complete the word at the cursor with command names (programs on the search path, shell builtins, and the shell's aliases and functions) and with file and directory paths. A single candidate shall be inserted directly; several shall appear in a list that the user can move through with Tab, Shift+Tab and the arrow keys, accept with Enter and dismiss with Esc. | Must |
 | CMD-10 | Tab shall also complete the subcommands and options of common commands, such as `git`, and show a short description of each candidate. | Should |
@@ -425,7 +425,7 @@ Targets are measured on a reference machine: a laptop with a 4-core CPU from 202
 
 | ID | Requirement | Priority |
 |---|---|---|
-| PORT-01 | Version 1.0 shall run on the two most recent major macOS releases and on mainstream Linux desktops, under both X11 and Wayland. | Must |
+| PORT-01 | Version 1.0 shall run on the two most recent major macOS releases, on mainstream Linux desktops under both X11 and Wayland, and on Windows 11. | Must |
 | PORT-02 | Behavior shall be the same on every supported OS, except where that OS's conventions differ, such as shortcuts, menus and file locations. | Must |
 
 ### 5.6 Maintainability
@@ -502,7 +502,7 @@ keys ──► Input Handler ──► Command Line ──► Session ◄──�
 
 ## 7. Acceptance scenarios
 
-Each scenario starts from default settings unless it says otherwise.
+Each scenario starts from default settings unless it says otherwise. Commands and paths are written for macOS and Linux. On Windows, use the PowerShell equivalents: a temporary directory such as `$env:TEMP` for `/tmp` (AT-05), `1..5000` for `seq 1 5000` (AT-09), and `C:\Us` completing to `C:\Users\` for `/us` completing to `/usr/` (AT-14).
 
 | ID | Scenario | Expected result | Covers |
 |---|---|---|---|
@@ -540,11 +540,11 @@ Each scenario starts from default settings unless it says otherwise.
 
 ## Appendix A. Default keyboard shortcuts
 
-In the requirements, Mod means Cmd on macOS and Ctrl+Shift on Linux. All shortcuts can be remapped (SET-06). Twominal's shortcuts never use a plain Ctrl+letter combination, so those keys stay free for command-line editing and for programs.
+In the requirements, Mod means Cmd on macOS and Ctrl+Shift on Linux and Windows. All shortcuts can be remapped (SET-06). Twominal's shortcuts never use a plain Ctrl+letter combination, so those keys stay free for command-line editing and for programs.
 
 ### Keyboard
 
-| Action | macOS | Linux |
+| Action | macOS | Linux and Windows |
 |---|---|---|
 | New tab | Cmd+T | Ctrl+Shift+T |
 | Close tab | Cmd+W | Ctrl+Shift+W |
@@ -566,14 +566,14 @@ In the requirements, Mod means Cmd on macOS and Ctrl+Shift on Linux. All shortcu
 
 ### Mouse
 
-| Action | macOS | Linux |
-|---|---|---|
-| Open link | Cmd+click | Ctrl+click |
-| Rectangular selection | Option+drag | Ctrl+drag |
-| Select while a program uses the mouse | Shift+drag | Shift+drag |
-| Rename tab | Double-click the tab | Double-click the tab |
-| Close tab | Middle-click the tab | Middle-click the tab |
-| Paste the primary selection | — | Middle-click in the terminal |
+| Action | macOS | Linux | Windows |
+|---|---|---|---|
+| Open link | Cmd+click | Ctrl+click | Ctrl+click |
+| Rectangular selection | Option+drag | Ctrl+drag | Alt+drag |
+| Select while a program uses the mouse | Shift+drag | Shift+drag | Shift+drag |
+| Rename tab | Double-click the tab | Double-click the tab | Double-click the tab |
+| Close tab | Middle-click the tab | Middle-click the tab | Middle-click the tab |
+| Paste the primary selection | — | Middle-click in the terminal | — |
 
 ### Command-line editor keys
 
@@ -664,7 +664,7 @@ These keys apply in Normal mode when the Vim mode setting is On (VIM-16, VIM-17)
 | Cursor style | Block, Bar, Underline | Block | Immediately; programs may override |
 | Cursor blink | On, Off | On | Immediately |
 | Scrollback | 0–100,000 lines | 10,000 | Immediately; shrinking drops the oldest lines |
-| Shell | Executable and arguments | The user's default shell, as an interactive login shell | New tabs |
+| Shell | Executable and arguments | The user's default shell (SW-01) | New tabs |
 | Shell integration | On, Off | On | New tabs |
 | Command-line editor | On, Off | On | At the next command line |
 | Abbreviations | Pairs of a word and its expansion | None | Immediately |
@@ -683,7 +683,7 @@ These keys apply in Normal mode when the Vim mode setting is On (VIM-16, VIM-17)
 |---|---|---|
 | OQ-1 | Should Twominal bundle fish or require it to be installed? Bundling means zero setup, but Twominal would then have to ship fish updates and comply with fish's GPL-2.0 license. | **Decided ([#2](https://github.com/two-net/twominal/issues/2)):** neither. Twominal has no fish dependency: it runs the user's own shell and provides the fish-style command line itself (FISH-08, §4.3). |
 | OQ-2 | Should Vim mode be On by default? | **Decided ([#3](https://github.com/two-net/twominal/issues/3)):** Off. Vim users turn it on once in the settings, and it applies to every tab (VIM-01, VIM-02). Scrollback Vim mode does not depend on the setting (VIM-15). |
-| OQ-3 | Is Windows in scope? With no fish dependency (OQ-1) nothing rules it out, but it adds a third OS to build and test and another family of shells to integrate. | Not in 1.0. |
+| OQ-3 | Is Windows in scope? With no fish dependency (OQ-1) nothing rules it out, but it adds a third OS to build and test and another family of shells to integrate. | **Decided ([#4](https://github.com/two-net/twominal/issues/4)):** yes. Version 1.0 runs on Windows 11 as well as macOS and Linux (PORT-01). On Windows the default shell is PowerShell, with shell integration (SW-01, FISH-04). cmd, WSL and other shells run in passthrough (FISH-03). |
 | OQ-4 | Which font should be bundled? It needs programming ligatures and a license that allows redistribution. | Decide during design. |
 | OQ-5 | What is the oldest supported fish version? | **Withdrawn:** Twominal does not use fish (OQ-1). |
 | OQ-6 | Should the tab bar hide when a window has only one tab? | No; always show it in 1.0. |
