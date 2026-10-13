@@ -1,0 +1,14 @@
+# The crates follow the tiers of the architecture (SRS §6, DESIGN.md §1), so Cargo enforces
+# the direction of ARC-02: the app depends on the tab tier, which depends on the Terminal Core.
+[workspace]
+members = ["src-tauri", "crates/tab", "crates/terminal-core"]
+resolver = "2"
+
+# Read the optimization guideline for more details: https://tauri.app/concept/size/#cargo-configuration
+# `panic = "abort"` is left out on purpose: each tab runs on its own thread, and a panic there
+# must end that tab, not the app (DESIGN.md §4).
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = 3
+strip = true

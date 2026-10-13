@@ -2971,6 +2971,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "tab"
+version = "0.1.0"
+dependencies = [
+ "terminal-core",
+]
+
+[[package]]
 name = "tao"
 version = "0.37.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3248,6 +3255,10 @@ checksum = "5fed54709c5b3a53d09bb1c113ea4f5ceafd1e772ddcb0030a82e1d56c087b08"
 dependencies = [
  "new_debug_unreachable",
 ]
+
+[[package]]
+name = "terminal-core"
+version = "0.1.0"
 
 [[package]]
 name = "thiserror"
@@ -3554,6 +3565,7 @@ checksum = "e421abadd41a4225275504ea4d6566923418b7f05506fbc9c0fe86ba7396114b"
 name = "twominal"
 version = "0.1.0"
 dependencies = [
+ "tab",
  "tauri",
  "tauri-build",
 ]

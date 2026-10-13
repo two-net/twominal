@@ -1,0 +1,11 @@
+[package]
+name = "tab"
+version = "0.1.0"
+description = "Twominal's tab tier: the Session, Terminal Core, Command Line, Input Handler and Renderer of one tab"
+edition = "2021"
+publish = false
+
+# Every dependency must be listed in DESIGN.md §2 first (ARC-06). This crate never depends
+# on tauri: only the App Shell talks to the windowing framework (ARC-02).
+[dependencies]
+terminal-core = { path = "../terminal-core" }

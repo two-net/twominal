@@ -14,16 +14,10 @@ edition = "2021"
 name = "twominal_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
+# Every dependency must be listed in DESIGN.md §2 first (ARC-06).
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
 tauri = { version = "2", features = [] }
-
-# Read the optimization guideline for more details: https://tauri.app/concept/size/#cargo-configuration
-[profile.release]
-codegen-units = 1
-lto = true
-opt-level = 3
-panic = "abort"
-strip = true
+tab = { path = "../crates/tab" }
