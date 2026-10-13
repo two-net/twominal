@@ -274,7 +274,7 @@ Vim mode has two parts:
 
 | ID | Requirement | Priority |
 |---|---|---|
-| VIM-01 | When the Vim mode setting is On (default Off; OQ-2), the command-line editor shall use vi-style editing with Insert, Normal and Visual modes, and each new command line shall start in Insert mode. When it is Off, only the standard editing keys shall apply (CMD-14). | Must |
+| VIM-01 | When the Vim mode setting is On (default Off), the command-line editor shall use vi-style editing with Insert, Normal and Visual modes, and each new command line shall start in Insert mode. When it is Off, only the standard editing keys shall apply (CMD-14). | Must |
 | VIM-02 | Changing the setting shall apply to every tab immediately. | Should |
 | VIM-03 | In Prompt Vim mode the cursor shall show the mode: a block in Normal and Visual, a bar in Insert, and an underline in Replace. | Must |
 | VIM-04 | While the command-line editor is active and the Vim mode setting is On, a badge at the right end of the tab bar shall show the active tab's mode: NORMAL, INSERT, VISUAL or REPLACE. The badge shall hide in passthrough. | Should |
@@ -658,7 +658,7 @@ These keys apply in Normal mode when the Vim mode setting is On (VIM-16, VIM-17)
 | Font | Any installed monospaced font | Bundled font | Immediately |
 | Font size | 6–72 pt | 13 pt | Immediately |
 | Font ligatures | On, Off | On | Immediately |
-| Vim mode | On, Off | Off (OQ-2) | Immediately |
+| Vim mode | On, Off | Off | Immediately |
 | Animations | On, Off | On, reduced when the OS asks | Immediately |
 | Splash screen | On, Off | On | Next launch |
 | Cursor style | Block, Bar, Underline | Block | Immediately; programs may override |
@@ -682,7 +682,7 @@ These keys apply in Normal mode when the Vim mode setting is On (VIM-16, VIM-17)
 | ID | Question | Proposed answer |
 |---|---|---|
 | OQ-1 | Should Twominal bundle fish or require it to be installed? Bundling means zero setup, but Twominal would then have to ship fish updates and comply with fish's GPL-2.0 license. | **Decided ([#2](https://github.com/two-net/twominal/issues/2)):** neither. Twominal has no fish dependency: it runs the user's own shell and provides the fish-style command line itself (FISH-08, §4.3). |
-| OQ-2 | Should Vim mode be On by default? | Off; Vim users turn it on once. |
+| OQ-2 | Should Vim mode be On by default? | **Decided ([#3](https://github.com/two-net/twominal/issues/3)):** Off. Vim users turn it on once in the settings, and it applies to every tab (VIM-01, VIM-02). Scrollback Vim mode does not depend on the setting (VIM-15). |
 | OQ-3 | Is Windows in scope? With no fish dependency (OQ-1) nothing rules it out, but it adds a third OS to build and test and another family of shells to integrate. | Not in 1.0. |
 | OQ-4 | Which font should be bundled? It needs programming ligatures and a license that allows redistribution. | Decide during design. |
 | OQ-5 | What is the oldest supported fish version? | **Withdrawn:** Twominal does not use fish (OQ-1). |
