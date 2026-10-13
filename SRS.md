@@ -1,6 +1,6 @@
 # Twominal — Software Requirements Specification
 
-**Version:** 0.5 (draft) · **Date:** 2026-10-13 · **Status:** For review
+**Version:** 0.6 (draft) · **Date:** 2026-10-13 · **Status:** For review
 
 > This SRS is technology-agnostic. It defines what Twominal must do and how well, not how it is built. Programming languages, frameworks, libraries, rendering methods and file formats are deliberately left to the design document.
 
@@ -126,7 +126,7 @@ Each `[ … × ]` is a tab with its close button, `●` marks new output in a ba
 - **A-1** The OS provides a shell that the user can run: the user's default shell on macOS and Linux, and PowerShell on Windows (SW-01).
 - **A-2** The OS reports its dark/light appearance and tells apps when it changes. Where it does not, System resolves to Dark (THM-02).
 - **A-3** The OS reports its reduced-motion setting. Where it does not, Twominal assumes full motion.
-- **A-4** Users who turn on Vim mode know basic Vim keys.
+- **A-4** Users who keep Vim mode on know basic Vim keys. Users who do not know them turn it off in the settings (VIM-01).
 
 ## 3. External interfaces
 
@@ -275,7 +275,7 @@ Vim mode has two parts:
 
 | ID | Requirement | Priority |
 |---|---|---|
-| VIM-01 | When the Vim mode setting is On (default Off), the command-line editor shall use vi-style editing with Insert, Normal and Visual modes, and each new command line shall start in Insert mode. When it is Off, only the standard editing keys shall apply (CMD-14). | Must |
+| VIM-01 | When the Vim mode setting is On (the default), the command-line editor shall use vi-style editing with Insert, Normal and Visual modes, and each new command line shall start in Insert mode. When it is Off, only the standard editing keys shall apply (CMD-14). | Must |
 | VIM-02 | Changing the setting shall apply to every tab immediately. | Should |
 | VIM-03 | In Prompt Vim mode the cursor shall show the mode: a block in Normal and Visual, a bar in Insert, and an underline in Replace. | Must |
 | VIM-04 | While the command-line editor is active and the Vim mode setting is On, a badge at the right end of the tab bar shall show the active tab's mode: NORMAL, INSERT, VISUAL or REPLACE. While the tab bar is hidden (UI-01), the badge shall show in a corner of the terminal area instead (UI-02). The badge shall hide in passthrough. | Should |
@@ -514,7 +514,7 @@ Each scenario starts from default settings unless it says otherwise. Commands an
 | AT-05 | Open three tabs, run `cd /tmp` in the third, then open a fourth | The tab bar appears when the second tab opens; the fourth tab starts in `/tmp`; the tab bar animates; switching tabs is instant | UI-01, TAB-02–03, TAB-09, ANIM-01 |
 | AT-06 | Drag the third tab to the first position, then press the shortcut for tab 1 | The order updates with an animation, and the moved tab becomes active | TAB-08, TAB-10 |
 | AT-07 | Run `vim` in a tab and press Mod+W | A confirmation names `vim`; Cancel keeps the tab open | TAB-05 |
-| AT-08 | Turn Vim mode on, open a tab, type `echo hello`, press Esc, then `0` | The badge changes from INSERT to NORMAL and the cursor from bar to block within 50 ms; the cursor jumps to the line start | VIM-01, VIM-03–05, VIM-16 |
+| AT-08 | Type `echo hello`, press Esc, then `0` | The badge changes from INSERT to NORMAL and the cursor from bar to block within 50 ms; the cursor jumps to the line start | VIM-01, VIM-03–05, VIM-16 |
 | AT-09 | Run `seq 1 5000`, press Ctrl+Shift+Space, then type `/4242`, Enter, `V`, `y`, `q` | The match is highlighted, the line `4242` is copied, and the view returns to the live bottom | VIM-06–07, VIM-10–11, VIM-14 |
 | AT-10 | Turn on the OS reduced-motion setting and relaunch | The splash is static; tab and theme changes have no movement, only fades of 150 ms or less, or instant changes | ANIM-02, SPL-07, ACC-01 |
 | AT-11 | On a machine where fish has never been installed, launch Twominal, run `echo hello`, then type `ec` | `echo hello` is suggested in dimmed text and Right Arrow accepts it; nothing asks for fish | FISH-08, CMD-08, CMD-12, USE-01 |
@@ -659,7 +659,7 @@ These keys apply in Normal mode when the Vim mode setting is On (VIM-16, VIM-17)
 | Font | Any installed monospaced font | JetBrains Mono, bundled (FONT-01) | Immediately |
 | Font size | 6–72 pt | 13 pt | Immediately |
 | Font ligatures | On, Off | On | Immediately |
-| Vim mode | On, Off | Off | Immediately |
+| Vim mode | On, Off | On | Immediately |
 | Animations | On, Off | On, reduced when the OS asks | Immediately |
 | Splash screen | On, Off | On | Next launch |
 | Cursor style | Block, Bar, Underline | Block | Immediately; programs may override |
@@ -683,7 +683,7 @@ These keys apply in Normal mode when the Vim mode setting is On (VIM-16, VIM-17)
 | ID | Question | Proposed answer |
 |---|---|---|
 | OQ-1 | Should Twominal bundle fish or require it to be installed? Bundling means zero setup, but Twominal would then have to ship fish updates and comply with fish's GPL-2.0 license. | **Decided ([#2](https://github.com/two-net/twominal/issues/2)):** neither. Twominal has no fish dependency: it runs the user's own shell and provides the fish-style command line itself (FISH-08, §4.3). |
-| OQ-2 | Should Vim mode be On by default? | **Decided ([#3](https://github.com/two-net/twominal/issues/3)):** Off. Vim users turn it on once in the settings, and it applies to every tab (VIM-01, VIM-02). Scrollback Vim mode does not depend on the setting (VIM-15). |
+| OQ-2 | Should Vim mode be On by default? | **Decided ([#3](https://github.com/two-net/twominal/issues/3)):** yes. Vim mode is On by default, as in v0.1.x. Each command line starts in Insert mode, where the standard editing keys apply (VIM-01, CMD-14). Users who do not want Vim keys turn it off once in the settings, and that applies to every tab (VIM-02). Scrollback Vim mode does not depend on the setting (VIM-15). |
 | OQ-3 | Is Windows in scope? With no fish dependency (OQ-1) nothing rules it out, but it adds a third OS to build and test and another family of shells to integrate. | **Decided ([#4](https://github.com/two-net/twominal/issues/4)):** yes. Version 1.0 runs on Windows 11 as well as macOS and Linux (PORT-01). On Windows the default shell is PowerShell, with shell integration (SW-01, FISH-04). cmd, WSL and other shells run in passthrough (FISH-03). |
 | OQ-4 | Which font should be bundled? It needs programming ligatures and a license that allows redistribution. | **Decided ([#5](https://github.com/two-net/twominal/issues/5)):** JetBrains Mono, in regular, bold, italic and bold italic styles (FONT-01). It has programming ligatures, and the SIL Open Font License 1.1 allows bundling it as long as its copyright notice and license ship with it (C-3). Which font files to ship and how to load them is left to design. |
 | OQ-5 | What is the oldest supported fish version? | **Withdrawn:** Twominal does not use fish (OQ-1). |
