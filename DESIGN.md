@@ -1,6 +1,6 @@
 # Twominal — Design
 
-**Version:** 0.3 · **Date:** 2026-10-14 · **Tracks:** [SRS](SRS.md) v0.6
+**Version:** 0.4 · **Date:** 2026-10-14 · **Tracks:** [SRS](SRS.md) v0.6
 
 > The SRS says what Twominal must do. This document says how it is built: the technology choices the SRS leaves open (C-1) and where each component of SRS §6 lives. Requirement IDs such as `ARC-02` are the SRS's. Where the two disagree, the SRS wins and this document is corrected.
 
@@ -140,7 +140,7 @@ Planned, and added by the issue that first needs each:
 
 ## 3. Components
 
-As of this version the Settings Store is built, and the App Shell opens windows and builds the native menus. Every other Rust home exists as a skeleton: types that say who owns what, and no behaviour. Of the webview homes only `src/app.js` exists. The others are created by their issues, at the paths in §1.
+As of this version the Settings Store is built, and the App Shell opens windows, builds the native menus and gives the product its name and logo. Every other Rust home exists as a skeleton: types that say who owns what, and no behaviour. Of the webview homes only `src/app.js` exists. The others are created by their issues, at the paths in §1.
 
 ### Tier 1: App Shell
 
@@ -174,6 +174,16 @@ The menus hold only what works. Each feature adds its own items (UI-05).
 - **On macOS** the menu bar belongs to the app. On Linux and Windows each window shows it.
 - **Off macOS no item takes a plain Ctrl+letter** (Appendix A). The OS's ready-made Edit items would take Ctrl+C from the shell, so there the Edit menu waits for #28.
 - **Off macOS, Close Window and Quit are Twominal's own items**, because Linux has no ready-made ones.
+
+#### Identity
+
+- **The name** is Twominal wherever the user reads it (GEN-01). It is written once, as `productName` in `tauri.conf.json`. The App Shell reads it from Tauri and gives it to the window titles, the menus and the About dialog. The installers take it from the same place.
+- **`twominal`**, in lowercase, is every identifier (GEN-02): the package and so the executable, the folders in §7, and the last part of the bundle identifier `com.two.twominal`.
+- **The logo** is one file, `src/logo.svg`: a 2 and a block cursor on a dark tile (GEN-03).
+  - The tile is the logo's own background, so the mark reads on a dark page and on a light one.
+  - The app icons in `src-tauri/icons/` are generated from it with `cargo tauri icon src/logo.svg`. They are never edited by hand.
+  - The page shows the file itself, on the splash screen (#41) and the About screen (#44). Until #44 the About dialog is the OS's, and it shows the logo where that dialog has a place for one: on macOS and Linux.
+  - It was drawn for Twominal and holds no one else's artwork (C-3).
 
 ### Tier 2: stores and managers
 
@@ -266,6 +276,7 @@ No plugin system, no scripting engine and no network component (ARC-06).
 | Settings | `config.toml` in the OS configuration folder `twominal/`: `~/Library/Application Support` on macOS, `$XDG_CONFIG_HOME` or `~/.config` on Linux, `%APPDATA%` on Windows | TOML. One file (SET-03) |
 | Command history | `history` in the OS data folder `twominal/`: `~/Library/Application Support` on macOS, `$XDG_DATA_HOME` or `~/.local/share` on Linux, `%LOCALAPPDATA%` on Windows | Plain text, one command per line, a line break written as `\n` and a backslash as `\\`. Readable only by the user (SEC-02) |
 | Bundled font | `src/fonts/`, with its license (FONT-01) | The four JetBrains Mono styles |
+| Logo | `src/logo.svg`. The app icons in `src-tauri/icons/` are generated from it (GEN-03) | SVG, made of shapes only: no text, no style sheet, nothing loaded from elsewhere |
 | Shell integration | Inside the `tab` crate, as data of the Session | One script per shell, passed to the shell at startup. No user file is touched (FISH-04) |
 | Webview code | `src/` | Served as it is |
 
@@ -321,6 +332,7 @@ Saving a setting changes only the keys whose value changed. Comments, the order 
 
 - **`cargo test --workspace`** runs everything below that exists.
 - **Architecture test**, `src-tauri/tests/architecture.rs`. It reads the two marked tables in this document and checks the code against them (§10).
+- **Identity test**, `src-tauri/tests/identity.rs`. It checks the product's name, that the code spells it only as `Twominal` or `twominal`, the lowercase identifiers, and that the logo stands alone (GEN-01 to GEN-03).
 - **Settings Store.** `src-tauri/src/settings/tests.rs` gives each test a configuration folder of its own, and covers loading, each kind of bad value, hand edits and saving (SET-02 to SET-05, AT-13). The store does not depend on Tauri, so it needs no window.
 - **App Shell.** `src-tauri/src/app/tests.rs` covers what needs no window: window titles and labels, what each menu item does, and the shortcut on each OS. The windows and menus themselves are checked by hand (MAINT-02).
 - **Terminal Core.** A conformance suite that feeds byte streams and checks the screen (MAINT-03), and fuzz targets (REL-02). Both run with no window (ARC-03). #17.

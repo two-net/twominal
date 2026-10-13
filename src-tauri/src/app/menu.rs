@@ -91,6 +91,8 @@ impl Menus {
         let about = AboutMetadata {
             name: Some(product.to_string()),
             version: Some(app.package_info().version.to_string()),
+            // The logo (GEN-03). The dialog of Windows has no place for one.
+            icon: Some(tauri::include_image!("./icons/128x128.png")),
             ..Default::default()
         };
 

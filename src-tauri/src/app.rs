@@ -12,7 +12,10 @@
 //! Windows are opened here, in code, and each has a Tab Manager of its own. The menus are in
 //! `app/menu.rs`. DESIGN.md §3 says how windows and menus behave on each OS.
 //!
-//! Filled in by #11 (identity), #12 (launcher) and #41 (splash).
+//! The product's name is read from Tauri, which has it from `tauri.conf.json` (GEN-01).
+//! DESIGN.md §3 says where the name, the identifiers and the logo are kept.
+//!
+//! Filled in by #12 (launcher) and #41 (splash).
 
 mod menu;
 #[cfg(test)]
@@ -277,7 +280,7 @@ pub fn run() {
         .on_menu_event(menu_chosen)
         .invoke_handler(tauri::generate_handler![app_ready])
         .build(tauri::generate_context!())
-        .expect("error while building tauri application")
+        .expect("Twominal could not start")
         .run(|handle, event| match event {
             tauri::RunEvent::WindowEvent {
                 label,

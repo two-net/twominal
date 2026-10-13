@@ -1,0 +1,29 @@
+<!-- Twominal's logo (GEN-03): a 2 and a block cursor.
+
+     The one logo. The app icons in src-tauri/icons/ are generated from this file with
+     `cargo tauri icon src/logo.svg`, and the About and splash screens show it as it is.
+
+     The tile is its own background, so the mark reads on dark and on light. It fills
+     824 of the 1024 units, as an app icon does on macOS.
+
+     Shapes only: no text, no style sheet and nothing loaded from elsewhere, so the icon
+     generator and every webview draw it alike. -->
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="tile" x1="0" y1="100" x2="0" y2="924" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#1e2536" />
+      <stop offset="1" stop-color="#0b0e14" />
+    </linearGradient>
+    <linearGradient id="mark" x1="220" y1="242" x2="804" y2="782" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#7ddcb4" />
+      <stop offset="1" stop-color="#7c9cf0" />
+    </linearGradient>
+  </defs>
+
+  <rect x="100" y="100" width="824" height="824" rx="185" fill="url(#tile)" />
+  <!-- The rim keeps the tile's edge in sight on a dark background. -->
+  <rect x="103" y="103" width="818" height="818" rx="182" fill="none" stroke="#fff" stroke-opacity="0.14" stroke-width="6" />
+
+  <path d="M265 480 A100 100 0 1 1 433 525 L262 695 H462" fill="none" stroke="url(#mark)" stroke-width="84" stroke-linecap="round" stroke-linejoin="round" />
+  <rect x="564" y="242" width="240" height="540" rx="24" fill="url(#mark)" />
+</svg>
