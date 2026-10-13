@@ -11,5 +11,32 @@
 // (ARC-02). DESIGN.md §1 lists the other modules and where each one goes.
 
 const { invoke } = window.__TAURI__.core;
+const { getCurrentWebviewWindow } = window.__TAURI__.webviewWindow;
 
-invoke("app_ready");
+// Notices that belong to no tab, such as a bad value in the configuration file (SET-05).
+// Rust sends the whole list each time, so the page shows the latest and keeps nothing.
+const notices = document.getElementById("notices");
+const list = notices.querySelector("ul");
+
+function showNotices(texts) {
+  // The texts quote the configuration file, so they are never read as HTML.
+  list.replaceChildren(
+    ...texts.map((text) => {
+      const item = document.createElement("li");
+      item.textContent = text;
+      return item;
+    }),
+  );
+  notices.hidden = texts.length === 0;
+}
+
+// Dismissing hides the list until Rust sends another.
+notices.querySelector("button").addEventListener("click", () => {
+  notices.hidden = true;
+});
+
+// Listening comes first: app_ready makes Rust send what it found before this page loaded.
+// The listener is this window's own, so it hears that answer and what goes to every window.
+getCurrentWebviewWindow()
+  .listen("settings:notices", (event) => showNotices(event.payload))
+  .then(() => invoke("app_ready"));

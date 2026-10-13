@@ -1,6 +1,6 @@
 # Twominal — Design
 
-**Version:** 0.1 · **Date:** 2026-10-14 · **Tracks:** [SRS](SRS.md) v0.6
+**Version:** 0.2 · **Date:** 2026-10-14 · **Tracks:** [SRS](SRS.md) v0.6
 
 > The SRS says what Twominal must do. This document says how it is built: the technology choices the SRS leaves open (C-1) and where each component of SRS §6 lives. Requirement IDs such as `ARC-02` are the SRS's. Where the two disagree, the SRS wins and this document is corrected.
 
@@ -83,6 +83,7 @@ The table above and the dependency table in §2 are read by `src-tauri/tests/arc
 | Pseudo-terminal | `portable-pty`, which uses ConPTY on Windows | SW-01, PORT-01 |
 | Rust ⇄ webview | Tauri commands in; events and channels out | PERF-04, PERF-07 |
 | Settings file | TOML | SET-03, SET-04 |
+| Watching the settings file | One thread asks the OS for the file's modification time, four times a second. No watcher library | SET-04, ARC-06 |
 | Animation | Web Animations API, started only by the Animator | ANIM-01 to ANIM-04, ARC-05 |
 | OS appearance | Tauri's window theme events | SW-03, THM-02 |
 | OS reduced motion | The `prefers-reduced-motion` media query | SW-04, ACC-01 |
@@ -124,6 +125,7 @@ Every crate Twominal depends on directly is listed here, and nothing else may be
 | `twominal` | `tauri` | Windows, menus, the webview and IPC |
 | `twominal` | `tauri-build` | The build script `tauri` needs |
 | `twominal` | `tab` | The tab tier |
+| `twominal` | `toml_edit` | Reads the configuration file, and saves it with the user's comments kept (SET-03, SET-04) |
 | `tab` | `terminal-core` | The Terminal Core |
 <!-- dependencies:end -->
 
@@ -133,13 +135,12 @@ Planned, and added by the issue that first needs each:
 |---|---|---|---|
 | `terminal-core` | `vte`, with default features off so it stays `no_std` | Parsing escape sequences | #16 |
 | `tab` | `portable-pty` | Pseudo-terminals | #13 |
-| `twominal` | A TOML library that keeps comments when it saves | The configuration file (SET-04) | #9 |
 | `twominal` | A clipboard library that reaches the Linux primary selection | SW-05 | #28 |
 | `twominal` | A font library that lists installed monospaced families | FONT-02 | #23 |
 
 ## 3. Components
 
-As of this version every Rust home exists as a skeleton: types that say who owns what, and no behaviour. Of the webview homes only `src/app.js` exists. The others are created by their issues, at the paths in §1.
+As of this version the Settings Store is built. Every other Rust home exists as a skeleton: types that say who owns what, and no behaviour. Of the webview homes only `src/app.js` exists. The others are created by their issues, at the paths in §1.
 
 ### Tier 1: App Shell
 
@@ -148,11 +149,17 @@ As of this version every Rust home exists as a skeleton: types that say who owns
 - **Wires the stores and managers.** It hears a settings change and passes it to the Theme Manager, the Tab Managers and the webviews. They never name each other.
 - **Creates windows in code, not from `tauri.conf.json`.** A window then opens with the resolved background and the settings it needs for its first frame, so there is no flash of the wrong theme (SPL-02) and reduced motion applies from the start (SPL-07). Built in #10.
 - **Its page** hosts the tab bar, the canvas, the splash screen and the settings, About and help screens (UI-03).
+- **Shows the notices that belong to no tab**, such as a bad value in the configuration file (SET-05). They overlay the page and take no room from the terminal (UI-02).
 - **Must not** contain terminal logic.
 
 ### Tier 2: stores and managers
 
 - **Settings Store.** Owns the file, its format, every default in Appendix B and every validation rule. Names no other component.
+  - The App Shell creates it with two things: the OS configuration folder, and a function to call with each change. That is how a change travels up without the store naming who hears it.
+  - A change carries the settings now, the settings before, and the notices. It is announced the same way whether it came from the settings screen or from a hand edit of the file (SET-02, SET-04).
+  - Every setting is written once, in one list: its key in the file, its rule and its field. Loading, saving and comparing all read that list.
+  - It watches the file from one thread of its own, and reloads when a save has settled.
+  - It never writes over a file it could not read. A change made while the file is broken applies, is not saved, and says so in a notice.
 - **History Store.** Owns the shared command history and its file. It implements the history trait that the Command Line defines, and tabs hold it only as that trait (ARC-04). Must not store terminal output.
 - **Theme Manager.** Takes the Theme setting and the OS appearance, both passed in by the App Shell, and announces the palette. `src/theme.js` applies the announced palette to the page.
 - **Animator.** Lives in the webview, because that is where animations run and where the webview reports the OS reduced-motion setting. Views ask it to animate, and it decides how, or whether. Must not delay input or output.
@@ -241,10 +248,57 @@ No plugin system, no scripting engine and no network component (ARC-06).
 
 Prior art in this repository: `origin/codex:src-tauri/shell-integration/` for integration that leaves the user's files alone.
 
+### The settings file
+
+`config.toml` has one key for each setting of SRS Appendix B, in the same order, except that the abbreviations come last: they are a table, and in TOML a table follows the plain keys. A key that is missing means the default, so an empty file and no file both mean every default. Words may be written in any letter case.
+
+| Setting | Key | Value | Default |
+|---|---|---|---|
+| Theme | `theme` | `"dark"`, `"light"` or `"system"` | `"system"` |
+| Font | `font` | A font name | `"JetBrains Mono"` |
+| Font size | `font_size` | A number from 6 to 72 | `13` |
+| Font ligatures | `font_ligatures` | `true` or `false` | `true` |
+| Vim mode | `vim_mode` | `true` or `false` | `true` |
+| Animations | `animations` | `true` or `false` | `true` |
+| Splash screen | `splash_screen` | `true` or `false` | `true` |
+| Cursor style | `cursor_style` | `"block"`, `"bar"` or `"underline"` | `"block"` |
+| Cursor blink | `cursor_blink` | `true` or `false` | `true` |
+| Scrollback | `scrollback` | A whole number from 0 to 100000 | `10000` |
+| Shell | `shell` | A list of strings: the executable, then its arguments | Not set: the user's default shell (SW-01) |
+| Shell integration | `shell_integration` | `true` or `false` | `true` |
+| Command-line editor | `command_line_editor` | `true` or `false` | `true` |
+| Command history | `command_history` | `true` or `false` | `true` |
+| New tab directory | `new_tab_directory` | `"current"` or `"home"` | `"current"` |
+| Confirm before closing running programs | `confirm_close` | `true` or `false` | `true` |
+| Bell | `bell` | `"visual"`, `"audible"` or `"off"` | `"visual"` |
+| Clipboard writes by programs | `clipboard_write` | `"allow"`, `"ask"` or `"deny"` | `"allow"` |
+| Clipboard reads by programs | `clipboard_read` | `"allow"`, `"ask"` or `"deny"` | `"deny"` |
+| Multi-line paste warning | `paste_warning` | `true` or `false` | `true` |
+| Abbreviations | `[abbreviations]` | One `word = "expansion"` line for each. A word has no spaces | None |
+
+Keyboard shortcuts (SET-06), theme color overrides (THM-09) and font features (FONT-12) get their own tables in this file, each added by its feature.
+
+The store checks only what the file can say. Whether the font is installed is the Renderer's to find out (#23), and whether the shell exists is the Session's (FISH-02).
+
+What happens to a file that is not right (SET-05):
+
+| The file | Settings used | Notice |
+|---|---|---|
+| Is missing | Every default | None. The file is created the first time a setting is saved |
+| Cannot be read, or is not TOML, at startup | Every default | One, naming the file and the problem, with the line for a syntax error |
+| Becomes unreadable or stops being TOML while Twominal runs | The ones in use stay. A file caught half-edited should not reset the font and the theme | The same |
+| Has a value of the wrong type, out of range or not one of the words | That setting's default. The others apply | One for each, naming the key, the problem and the default used |
+| Has a key that is not a setting | — | One, naming the key. The key is kept when the file is saved |
+
+Notices follow the file: when it is fixed and saved, they go.
+
+Saving a setting changes only the keys whose value changed. Comments, the order of keys and keys the store does not know stay as they were. The new text is written to a temporary file beside `config.toml` and renamed over it, so a reader never sees half a file. A `config.toml` that is a symbolic link stays one, and what it points to is rewritten.
+
 ## 8. Testing
 
 - **`cargo test --workspace`** runs everything below that exists.
 - **Architecture test**, `src-tauri/tests/architecture.rs`. It reads the two marked tables in this document and checks the code against them (§10).
+- **Settings Store.** `src-tauri/src/settings/tests.rs` gives each test a configuration folder of its own, and covers loading, each kind of bad value, hand edits and saving (SET-02 to SET-05, AT-13). The store does not depend on Tauri, so it needs no window.
 - **Terminal Core.** A conformance suite that feeds byte streams and checks the screen (MAINT-03), and fuzz targets (REL-02). Both run with no window (ARC-03). #17.
 - **Tab tier.** The `tab` crate does not depend on Tauri, so the Command Line, key handling and the Renderer's choice of text runs are unit-tested without a window.
 - **Webview.** It has no logic of its own to unit-test. What it draws is checked by the acceptance scenarios (SRS §7) as documented manual tests (MAINT-02).

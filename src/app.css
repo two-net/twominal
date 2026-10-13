@@ -1,0 +1,49 @@
+/* App Shell's page (SRS §6.1). Its script is app.js.
+
+   The colors are the system's until the Theme Manager brings the palettes (#39). Nothing
+   here moves or fades: the Animator runs every animation (ARC-05). */
+
+:root {
+  color-scheme: light dark;
+  font: 13px/1.4 system-ui, sans-serif;
+}
+
+body {
+  margin: 0;
+}
+
+/* Notices lie over the page and take no room from the terminal (UI-02). */
+#notices {
+  position: fixed;
+  inset: 0 0 auto 0;
+  z-index: 1;
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  max-height: 40vh;
+  overflow: auto;
+  padding: 8px 12px;
+  border-bottom: 1px solid GrayText;
+  background: Canvas;
+  color: CanvasText;
+}
+
+#notices[hidden] {
+  display: none;
+}
+
+#notices ul {
+  flex: 1;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  overflow-wrap: anywhere;
+}
+
+#notices li + li {
+  margin-top: 4px;
+}
+
+#notices button {
+  font: inherit;
+}

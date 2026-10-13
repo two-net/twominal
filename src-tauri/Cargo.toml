@@ -21,3 +21,4 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 tauri = { version = "2", features = [] }
 tab = { path = "../crates/tab" }
+toml_edit = "0.25"
