@@ -1,6 +1,6 @@
 # Twominal — Software Requirements Specification
 
-**Version:** 0.3 (draft) · **Date:** 2026-10-13 · **Status:** For review
+**Version:** 0.4 (draft) · **Date:** 2026-10-13 · **Status:** For review
 
 > This SRS is technology-agnostic. It defines what Twominal must do and how well, not how it is built. Programming languages, frameworks, libraries, rendering methods and file formats are deliberately left to the design document.
 
@@ -78,6 +78,7 @@ Twominal has no fish dependency. It does not bundle or require fish, and every f
 - The Unicode Standard, including UAX #11, *East Asian Width*
 - WCAG 2.2, success criteria 1.4.3 *Contrast (Minimum)* and 2.3.3 *Animation from Interactions*
 - fish shell documentation, as the model for the command-line features
+- SIL Open Font License, Version 1.1, the license of the bundled font (FONT-01)
 
 ## 2. Overall description
 
@@ -315,7 +316,7 @@ Vim mode has two parts:
 
 | ID | Requirement | Priority |
 |---|---|---|
-| FONT-01 | Twominal shall bundle a default monospaced font that has programming ligatures and is licensed for redistribution (OQ-4). | Must |
+| FONT-01 | Twominal shall bundle JetBrains Mono as its default font, in regular, bold, italic and bold italic styles. JetBrains Mono is monospaced, has programming ligatures and is licensed for redistribution under the SIL Open Font License 1.1 (C-3). Twominal shall ship the font's copyright notice and license with every copy. | Must |
 | FONT-02 | The user shall be able to choose any installed monospaced font and a size from 6 to 72 pt (default 13 pt), and change the size with the zoom shortcuts (Appendix A). | Must |
 | FONT-03 | Ligatures shall be On by default and switchable in settings; a change shall apply immediately to every tab. | Must |
 | FONT-04 | With ligatures On, Twominal shall draw every ligature the font provides, such as `->`, `=>`, `!=`, `>=`, `===` and `::`. Fonts without ligatures shall render normally. | Must |
@@ -655,7 +656,7 @@ These keys apply in Normal mode when the Vim mode setting is On (VIM-16, VIM-17)
 | Setting | Values | Default | Takes effect |
 |---|---|---|---|
 | Theme | Dark, Light, System | **System** | Immediately |
-| Font | Any installed monospaced font | Bundled font | Immediately |
+| Font | Any installed monospaced font | JetBrains Mono, bundled (FONT-01) | Immediately |
 | Font size | 6–72 pt | 13 pt | Immediately |
 | Font ligatures | On, Off | On | Immediately |
 | Vim mode | On, Off | Off | Immediately |
@@ -684,7 +685,7 @@ These keys apply in Normal mode when the Vim mode setting is On (VIM-16, VIM-17)
 | OQ-1 | Should Twominal bundle fish or require it to be installed? Bundling means zero setup, but Twominal would then have to ship fish updates and comply with fish's GPL-2.0 license. | **Decided ([#2](https://github.com/two-net/twominal/issues/2)):** neither. Twominal has no fish dependency: it runs the user's own shell and provides the fish-style command line itself (FISH-08, §4.3). |
 | OQ-2 | Should Vim mode be On by default? | **Decided ([#3](https://github.com/two-net/twominal/issues/3)):** Off. Vim users turn it on once in the settings, and it applies to every tab (VIM-01, VIM-02). Scrollback Vim mode does not depend on the setting (VIM-15). |
 | OQ-3 | Is Windows in scope? With no fish dependency (OQ-1) nothing rules it out, but it adds a third OS to build and test and another family of shells to integrate. | **Decided ([#4](https://github.com/two-net/twominal/issues/4)):** yes. Version 1.0 runs on Windows 11 as well as macOS and Linux (PORT-01). On Windows the default shell is PowerShell, with shell integration (SW-01, FISH-04). cmd, WSL and other shells run in passthrough (FISH-03). |
-| OQ-4 | Which font should be bundled? It needs programming ligatures and a license that allows redistribution. | Decide during design. |
+| OQ-4 | Which font should be bundled? It needs programming ligatures and a license that allows redistribution. | **Decided ([#5](https://github.com/two-net/twominal/issues/5)):** JetBrains Mono, in regular, bold, italic and bold italic styles (FONT-01). It has programming ligatures, and the SIL Open Font License 1.1 allows bundling it as long as its copyright notice and license ship with it (C-3). Which font files to ship and how to load them is left to design. |
 | OQ-5 | What is the oldest supported fish version? | **Withdrawn:** Twominal does not use fish (OQ-1). |
 | OQ-6 | Should the tab bar hide when a window has only one tab? | No; always show it in 1.0. |
 | OQ-7 | Should the command line show Twominal's own prompt or the shell's? The shell's prompt keeps the user's customization, but the editor then has to find exactly where it ends. | Twominal's own prompt (CMD-04), as in v0.1.x. The shell's prompt shows when the command-line editor is off. |
