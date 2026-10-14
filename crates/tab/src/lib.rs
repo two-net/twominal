@@ -10,8 +10,7 @@
 //! A tab knows nothing of the stores and managers above it. Settings and theme arrive as
 //! messages, and the shared command history through a trait the Command Line defines.
 //!
-//! Filled in by #13 (Session), #16 (Terminal Core), #20 (Input Handler), #22 (Renderer) and
-//! #31 (tabs).
+//! Filled in by #16 (Terminal Core), #20 (Input Handler), #22 (Renderer) and #31 (tabs).
 
 pub mod command_line;
 pub mod input;
@@ -33,7 +32,7 @@ pub struct TabId(u64);
 /// One tab: a shell session and everything needed to show it and type into it.
 #[expect(
     dead_code,
-    reason = "the components are wired together by #13, #16, #20 and #22"
+    reason = "the components are wired together by #16, #20, #22 and #31"
 )]
 pub struct Tab {
     session: Session,

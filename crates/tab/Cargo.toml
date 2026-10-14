@@ -8,4 +8,5 @@ publish = false
 # Every dependency must be listed in DESIGN.md §2 first (ARC-06). This crate never depends
 # on tauri: only the App Shell talks to the windowing framework (ARC-02).
 [dependencies]
+portable-pty = "0.9"
 terminal-core = { path = "../terminal-core" }

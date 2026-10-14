@@ -1,6 +1,6 @@
 # Twominal — Design
 
-**Version:** 0.5 · **Date:** 2026-10-14 · **Tracks:** [SRS](SRS.md) v0.6
+**Version:** 0.6 · **Date:** 2026-10-14 · **Tracks:** [SRS](SRS.md) v0.6
 
 > The SRS says what Twominal must do. This document says how it is built: the technology choices the SRS leaves open (C-1) and where each component of SRS §6 lives. Requirement IDs such as `ARC-02` are the SRS's. Where the two disagree, the SRS wins and this document is corrected.
 
@@ -129,6 +129,7 @@ Every crate Twominal depends on directly is listed here, and nothing else may be
 | `twominal` | `tab` | The tab tier |
 | `twominal` | `toml_edit` | Reads the configuration file, and saves it with the user's comments kept (SET-03, SET-04) |
 | `tab` | `terminal-core` | The Terminal Core |
+| `tab` | `portable-pty` | Pseudo-terminals: starts the shell on one and carries its bytes, through ConPTY on Windows (SW-01, PORT-01) |
 <!-- dependencies:end -->
 
 Planned, and added by the issue that first needs each:
@@ -136,13 +137,12 @@ Planned, and added by the issue that first needs each:
 | Crate | Will depend on | For | Issue |
 |---|---|---|---|
 | `terminal-core` | `vte`, with default features off so it stays `no_std` | Parsing escape sequences | #16 |
-| `tab` | `portable-pty` | Pseudo-terminals | #13 |
 | `twominal` | A clipboard library that reaches the Linux primary selection | SW-05 | #28 |
 | `twominal` | A font library that lists installed monospaced families | FONT-02 | #23 |
 
 ## 3. Components
 
-As of this version the Settings Store is built, and the App Shell opens windows, builds the native menus, gives the product its name and logo and answers the `twominal` command. Every other Rust home exists as a skeleton: types that say who owns what, and no behaviour. Of the webview homes only `src/app.js` exists. The others are created by their issues, at the paths in §1.
+As of this version the Settings Store and the Session are built, and the App Shell opens windows, builds the native menus, gives the product its name and logo and answers the `twominal` command. Every other Rust home exists as a skeleton: types that say who owns what, and no behaviour. Of the webview homes only `src/app.js` exists. The others are created by their issues, at the paths in §1.
 
 ### Tier 1: App Shell
 
@@ -232,6 +232,26 @@ The `twominal` command is the app's own executable (GEN-02, GEN-05). `src-tauri/
 - **Input Handler.** The Rust half decides what an event means: a shortcut, a command-line key, encoded input or a Vim action. The webview half captures keyboard, input-method and mouse events and normalises them. It never interprets them. Must not draw.
 - **Renderer.** The Rust half reads the Terminal Core and the Command Line and decides what to draw, including where each run of text starts and ends, so the ligature rules are tested in Rust (FONT-05 to FONT-08). The webview half paints. Must not change terminal state.
 
+#### Session
+
+`crates/tab/src/session.rs` starts one shell on one pseudo-terminal, through `portable-pty`. The Tab gives it what to start, and a function to call with what the shell writes and with how it ended.
+
+- **What runs** is the Shell setting, the executable and its arguments as written. With the setting not set it is the user's default shell (SW-01):
+  - On macOS and Linux that is `$SHELL`, else the shell in the user's account entry, else `/bin/sh`. It starts as an interactive login shell, the way `login` starts one: with a `-` before its name, as in `-zsh`, so no argument has to be one that every shell understands.
+  - On Windows it is PowerShell 7 if `pwsh.exe` is on the `PATH`, and otherwise the Windows PowerShell that ships with Windows.
+- **The environment** is Twominal's own, plus `TERM=xterm-256color`, `COLORTERM=truecolor`, `TERM_PROGRAM` and `TERM_PROGRAM_VERSION` (SW-02). The name and version are the ones the App Shell has from Tauri, handed down, so the name is still written once.
+  - If none of `LC_ALL`, `LC_CTYPE` and `LANG` is set, which is usual for an app opened from the macOS Dock, the shell gets `LANG=C.UTF-8`: UTF-8, and nothing else changed from the defaults. A locale the user did set is kept, whatever it is.
+  - On Windows ConPTY already carries UTF-8. Telling PowerShell to read and write UTF-8 is an instruction to the shell at startup, so it comes with the PowerShell integration (#15).
+- **The directory** is the one the Tab is given, with `PWD` set to it, so a path through a symbolic link stays as it was typed. With none, the shell starts in the home directory and the `PWD` Twominal inherited is removed, so the shell works it out (FISH-01). A directory that has gone by then also means the home directory.
+- **Privileges.** The shell is a plain child of Twominal and runs as the user. Nothing in Twominal asks for more (SEC-03).
+- **Three threads** per session, so the tab's own thread never waits on the shell:
+  - The reader reads up to 64 KB at a time and calls the Tab's function with each piece, untouched. The function may block, and while it does the reader stops reading, which stops the shell (PERF-07).
+  - The writer takes what the Tab writes from an unbounded queue. A shell that stops reading, such as `cat` with its output backed up, then blocks only the writer, never the tab.
+  - The waiter waits for the shell to end and reports it once, with the exit status or the signal (TAB-06).
+- **The exit comes after the last output.** The waiter reports it when the reader has reached the end, or has waited 100 ms with nothing to read. A program the shell left running in the background can keep the pseudo-terminal open, and then the end of the output may not come for as long as it runs. Whatever such a program writes later still arrives after the exit.
+- **The size** is the terminal area's rows and columns, given when the session starts and each time it changes (TERM-15). A size of zero is made one.
+- **Closing** the session hangs up the shell, as closing a terminal always has. On macOS and Linux that is `SIGHUP`, which the shell passes on to its jobs. Once the waiter has the shell's exit status the shell is not signalled again, because the OS may have given its process ID to another process. On Windows the shell is ended.
+
 ### Tier 4: Terminal Core
 
 A pure `no_std` crate. Bytes go in through one entry point. Out come the screen state, replies to terminal queries, and what shell integration reports. It holds the screen, scrollback, selection, Vim cursor and find matches. Must not depend on the interface, rendering or OS processes.
@@ -257,7 +277,7 @@ SRS §6.2, mapped to code:
 
 1. **Input.** The webview half of the Input Handler sends an `InputEvent`. The App Shell forwards it as a `Message` to the tab's thread without waiting. The Rust half decides what it means.
 2. **Command line.** While the shell is ready for a command, keys go to the Command Line. Completions and suggestions are computed off the tab's thread and applied when they arrive (CMD-16).
-3. **Session.** The Tab writes input to the Session. A reader thread reads the shell's output and hands it to the tab's thread through a bounded channel.
+3. **Session.** The Tab writes input to the Session, whose writer thread passes it on, so a shell that stops reading never blocks the tab. A reader thread reads the shell's output and hands it to the tab's thread through a bounded channel: the Session calls a function the Tab hands down, and the Tab sends on its channel from it.
 4. **Terminal Core.** The Tab feeds the bytes in, sends any replies back through the Session, and acts on what shell integration reports.
 5. **Renderer.** The Tab builds a frame from what changed and sends it. It sends the next one only after the webview reports the last was drawn.
 
@@ -362,6 +382,7 @@ Saving a setting changes only the keys whose value changed. Comments, the order 
 - **Identity test**, `src-tauri/tests/identity.rs`. It checks the product's name, that the code spells it only as `Twominal` or `twominal`, the lowercase identifiers, and that the logo stands alone (GEN-01 to GEN-03).
 - **Settings Store.** `src-tauri/src/settings/tests.rs` gives each test a configuration folder of its own, and covers loading, each kind of bad value, hand edits and saving (SET-02 to SET-05, AT-13). The store does not depend on Tauri, so it needs no window.
 - **App Shell.** `src-tauri/src/app/tests.rs` covers what needs no window: window titles and labels, what each menu item does, the shortcut on each OS, and the launcher's arguments, texts and hand-over, in a folder of the test's own. `src-tauri/tests/launcher.rs` runs the executable for what it answers without starting Tauri (GEN-05). The windows and menus themselves, and a window the launcher asks for, are checked by hand (MAINT-02).
+- **Session.** `crates/tab/src/session/tests.rs` starts `/bin/sh` on real pseudo-terminals and checks the bytes both ways, the environment, the directory, the size, the exit status, closing, and an exit while a background program holds the terminal (SW-01, SW-02, FISH-01, TERM-15, SEC-03). These run on macOS and Linux. The choice of locale and of PowerShell, and the waiter's rule for when to report the exit, are tested on every OS, but no shell has yet been started on Windows.
 - **Terminal Core.** A conformance suite that feeds byte streams and checks the screen (MAINT-03), and fuzz targets (REL-02). Both run with no window (ARC-03). #17.
 - **Tab tier.** The `tab` crate does not depend on Tauri, so the Command Line, key handling and the Renderer's choice of text runs are unit-tested without a window.
 - **Webview.** It has no logic of its own to unit-test. What it draws is checked by the acceptance scenarios (SRS §7) as documented manual tests (MAINT-02).

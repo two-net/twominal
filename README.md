@@ -4,7 +4,7 @@ A desktop terminal with a fish-style command line built in. [SRS.md](SRS.md) say
 
 Twominal is a Tauri v2 app. One Rust process holds all state and logic, and one OS webview per window draws. The webview code is plain HTML and ES modules (no bundler, no Node dependencies).
 
-Version 1.0 is being built. So far the Settings Store works, the App Shell opens windows and builds the native menus, the product has its name and logo, the `twominal` command opens windows, and the other components exist as a skeleton.
+Version 1.0 is being built. So far the Settings Store works, the App Shell opens windows and builds the native menus, the product has its name and logo, the `twominal` command opens windows, the Session runs the user's shell on a pseudo-terminal, and the other components exist as a skeleton. No window shows a shell yet: that comes with tabs.
 
 ## Layout
 
