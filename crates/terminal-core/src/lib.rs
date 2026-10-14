@@ -12,8 +12,9 @@
 //!
 //! It behaves as xterm does (TERM-01). vte splits the bytes into characters and control
 //! functions; `control.rs` says what each one does; `terminal.rs` does it to the cursor and
-//! the modes, and `screen.rs` to the rows. `report.rs` reads what shell integration reports.
-//! DESIGN.md §3 lists what is supported and what is ignored on purpose.
+//! the modes, and `screen.rs` to the rows. `width.rs` says how many cells a character takes
+//! (TERM-02). `report.rs` reads what shell integration reports. DESIGN.md §3 lists what is
+//! supported and what is ignored on purpose.
 //!
 //! Filled in by #16 (interpreter and screen model), #17 (conformance suite and fuzzing),
 //! #18 (Unicode), #19 (colors and attributes) and #26–#30.
@@ -35,6 +36,7 @@ mod screen;
 mod terminal;
 #[cfg(test)]
 mod tests;
+mod width;
 
 use alloc::boxed::Box;
 use alloc::vec::Vec;

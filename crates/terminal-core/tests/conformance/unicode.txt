@@ -1,0 +1,385 @@
+# Wide characters, combining marks and emoji (TERM-02).
+#
+# A character takes the cells libc's wcwidth gives it, as in xterm, so the grid agrees with what
+# programs count. A row here is the text of its cells: a wide character takes two columns, as in
+# a monospace font, and a zero-width character follows the character it joins, as it came.
+# xterm's behaviour is from its source: charproc.c (dotext, WrapLine, CASE_REP, the combining
+# path of doparsing) and util.c (WriteText, ClearRight, ClearLeft, InsertChar, DeleteChar).
+
+# Widths
+
+## A wide character takes two cells
+size 6x2
+send 日本
+screen
+|日本  |
+|      |
+cursor 1;5
+
+## Ambiguous characters take one cell, as xterm counts them by default
+# xterm's cjkWidth is off by default.
+size 6x1
+send αβ①─
+screen
+|αβ①─  |
+cursor 1;5
+
+## Fullwidth forms and emoji take two cells
+size 6x1
+send Ａ😀
+screen
+|Ａ😀  |
+cursor 1;5
+
+## A soft hyphen takes a cell, as wcwidth counts it
+size 4x1
+send a\xc2\xadb
+screen
+|a­b |
+cursor 1;4
+
+## A spacing vowel sign takes a cell, as wcwidth counts it
+# Tamil TA and the vowel sign AA, which unicode-width alone would make one cell wide.
+size 4x1
+send தா
+screen
+|தா  |
+cursor 1;3
+
+## A skin tone takes two cells of its own, as wcwidth counts it
+size 6x1
+send 👍🏽
+screen
+|👍🏽  |
+cursor 1;5
+
+## A flag takes a cell for each of its two letters
+size 4x1
+send 🇯🇵
+screen
+|🇯🇵  |
+cursor 1;3
+
+## VS16 joins the character before it and widens nothing
+# xterm's emojiWidth is off by default, so VS16 changes no width. xterm drops VS16; here it is
+# kept (DESIGN.md §3).
+size 4x1
+send ❤️x
+screen
+|❤️x  |
+cursor 1;3
+
+## A ZWJ sequence takes the cells of its parts
+# Each ZWJ joins the emoji before it. xterm discards ZWJ; here it is kept (DESIGN.md §3).
+size 8x1
+send 👨‍👩‍👧
+screen
+|👨‍👩‍👧  |
+cursor 1;7
+
+# Wrapping
+
+## A wide character filling the last two columns waits to wrap
+size 4x2
+send ab日
+screen
+|ab日|
+|    |
+cursor 1;4
+send x
+screen
+|ab日|>
+|x   |
+cursor 2;2
+
+## A wide character in the last column goes to the next row and leaves the column as it was
+# xterm's dotext forces a wrap, and WrapLine marks the row without writing the column.
+size 5x2
+send abcde\e[1;5H日
+screen
+|abcde|>
+|日   |
+cursor 2;3
+
+## Without autowrap a wide character in the last column is dropped
+# The pending wrap goes too, so the next character writes over the last column.
+size 5x1
+send \e[?7labcde日
+screen
+|abcde|
+cursor 1;5
+send x
+screen
+|abcdx|
+
+## Without autowrap each wide character is taken alone
+# xterm, given these in one read, would put 本 in the last two columns. Here each is taken as
+# xterm takes it in a read of its own: 日 fills them and 本 is dropped (DESIGN.md §3, ARC-03).
+size 4x1
+send \e[?7lab日本
+screen
+|ab日|
+
+## A wide character never fits on a screen one column wide
+size 1x2
+send 日x
+screen
+|x|
+| |
+cursor 1;1
+
+# Insert mode
+
+## Insert mode makes room for both cells of a wide character
+size 6x1
+send abcd\r\e[4h日
+screen
+|日abcd|
+cursor 1;3
+
+## Insert mode blanks a wide character it pushes half off the row
+# xterm's InsertChar clears a character that would lose its right half.
+size 4x1
+send ab日\r\e[4hx
+screen
+|xab |
+cursor 1;2
+
+# Zero-width characters
+
+## A combining mark joins the character before it
+size 4x1
+send e\xcc\x81x
+screen
+|éx  |
+cursor 1;3
+
+## Conjoining jamo join their wide leading consonant
+# Hangul vowels and final consonants take no cell, as wcwidth counts them.
+size 4x1
+send \xe1\x84\x80\xe1\x85\xa1\xe1\x86\xa8
+screen
+|각  |
+cursor 1;3
+
+## A mark joins the last column's character and keeps the wrap pending
+size 3x2
+send abc\xcc\x81d
+screen
+|abć|>
+|d  |
+cursor 2;2
+
+## A mark joins a wide character
+size 4x1
+send 日\xcc\x88x
+screen
+|日̈x |
+cursor 1;4
+
+## A cell keeps two marks and drops the rest
+# xterm's combiningChars is 2 by default.
+size 4x1
+send a\xcc\x81\xcc\x82\xcc\x83b
+screen
+|á̂b  |
+cursor 1;3
+
+## A mark after the cursor moved joins the character under the cursor
+# xterm's ResetWrap clears char_was_written, so the mark goes to the cursor's cell.
+size 4x1
+send ab\e[1;1H\xcc\x81
+screen
+|áb  |
+cursor 1;1
+send \r\xcc\x82
+screen
+|á̂b  |
+cursor 1;1
+
+## A mark after DECRC joins the character under the cursor
+# xterm's CursorRestore moves the cursor with CursorSet, whose ResetWrap clears char_was_written.
+size 4x1
+send \e7ab\e8\xcc\x81
+screen
+|áb  |
+cursor 1;1
+
+## A mark after a switch to the cleared alternate screen joins the cell under the cursor
+# xterm's mode 1049 clears the screen with ClearScreen, whose ResetWrap clears char_was_written.
+size 4x1
+send ab\e[?1049h\xcc\x81
+screen
+|   ́ |
+cursor 1;3
+
+## A mark on a wide character's right half joins the character
+size 4x1
+send 日\e[D\xcc\x81
+screen
+|日́  |
+cursor 1;2
+
+## A mark on a blank joins it and the cursor stays
+# xterm prints a mark in a cell never written to on its own, and moves on. Here every cell
+# holds at least a blank, so it joins it, as wcwidth expects (DESIGN.md §3).
+size 3x1
+send \xcc\x81
+screen
+| ́  |
+cursor 1;1
+
+## SGR between a character and its mark changes nothing
+size 4x1
+send e\e[1m\xcc\x81\e[m
+screen
+|é   |
+cursor 1;2
+
+## A mark after a tab joins the character before the tab
+# A tab leaves char_was_written, as it leaves a pending wrap.
+size 10x1
+send a\t\xcc\x81
+screen
+|á         |
+cursor 1;9
+
+## A mark after CBT joins the character before it
+# xterm's TabToPrevStop moves the cursor without a ResetWrap.
+size 12x1
+send \e[10Gab\e[Z\xcc\x81
+screen
+|         ab́ |
+cursor 1;9
+
+## Format characters xterm discards are discarded
+# The zero width space, a right-to-left override and the byte order mark.
+size 6x1
+send a\xe2\x80\x8bb\xe2\x80\xaec\xef\xbb\xbfd
+screen
+|abcd  |
+cursor 1;5
+
+## REP after a discarded format character repeats nothing
+size 4x1
+send a\xe2\x80\x8b\e[2b
+screen
+|a   |
+cursor 1;2
+
+# Writing over half of a wide character
+
+## A character over a wide character's left half blanks its right half
+size 4x1
+send 日\rx
+screen
+|x   |
+cursor 1;2
+
+## A character over a wide character's right half blanks its left half
+size 4x1
+send 日\e[2Gx
+screen
+| x  |
+cursor 1;3
+
+## A wide character over another's left half blanks that one's right half
+size 6x1
+send a日\r本
+screen
+|本    |
+cursor 1;3
+
+## BS moves a cell, onto a wide character's right half
+size 4x1
+send 日\bx
+screen
+| x  |
+cursor 1;3
+
+# Erasing, inserting and deleting half of a wide character
+
+## ECH on a wide character's right half erases all of it
+size 6x1
+send 日本\e[2G\e[X
+screen
+|  本  |
+cursor 1;2
+
+## EL 0 from a wide character's right half erases all of it
+size 6x1
+send 日本\e[2G\e[K
+screen
+|      |
+
+## EL 1 to a wide character's left half erases all of it
+size 6x1
+send 日本\e[3G\e[1K
+screen
+|      |
+
+## An erase that takes the last column through a wide character ends the wrap
+# The row stops wrapping when an erase reaches its last cell (DESIGN.md §3).
+size 4x2
+send ab日x\e[1;3H\e[X
+screen
+|ab  |
+|x   |
+
+## ICH on a wide character's right half blanks it
+size 6x1
+send 日本\e[2G\e[@
+screen
+|   本 |
+cursor 1;2
+
+## ICH blanks a wide character it pushes half off the row
+size 4x1
+send ab日\r\e[@
+screen
+| ab |
+cursor 1;1
+
+## DCH on a wide character's right half leaves a blank for its left half
+size 6x1
+send 日本\e[2G\e[P
+screen
+| 本   |
+cursor 1;2
+
+## DCH of a wide character's left half leaves a blank for its right half
+size 6x1
+send 日本\r\e[P
+screen
+| 本   |
+cursor 1;1
+
+# REP and the cursor
+
+## REP repeats a wide character, wrapping as printing would
+size 5x2
+send 日\e[2b
+screen
+|日日 |>
+|日   |
+cursor 2;3
+
+## REP repeats a character without its marks
+# xterm repeats lastchar, which a joined mark leaves as it was.
+size 4x1
+send e\xcc\x81\e[2b
+screen
+|éee |
+cursor 1;4
+
+## CPR counts cells
+size 6x1
+send 日本\e[6n
+reply \e[1;5R
+
+## Tab stops count cells
+size 10x1
+send 日\tx
+screen
+|日      x |
+cursor 1;10

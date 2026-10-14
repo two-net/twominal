@@ -9,6 +9,7 @@ use core::mem;
 
 use crate::report::Report;
 use crate::screen::{Cell, Screen};
+use crate::width::{discarded, width};
 use crate::{Event, Size};
 
 /// Where the cursor is, counted in cells from the top left of the screen.
@@ -255,6 +256,10 @@ pub(crate) struct Terminal {
     insert: bool,
     /// The last character printed, for REP to repeat. Any other control function forgets it.
     last: Option<char>,
+    /// Where the last character was written, until the cursor moves but by tabs: a zero-width
+    /// character joins it there. xterm's `char_was_written`, which its `ResetWrap` clears, and
+    /// `last_written_row` and `last_written_col`.
+    written: Option<(usize, usize)>,
     /// The nonce that marks a report of the shell integration.
     nonce: Option<Vec<u8>>,
     /// Replies and reports since the bytes were handed in.
@@ -282,6 +287,7 @@ impl Terminal {
             origin: false,
             insert: false,
             last: None,
+            written: None,
             nonce: nonce.map(|nonce| nonce.as_bytes().to_vec()),
             events: Vec::new(),
         }
@@ -341,33 +347,59 @@ impl Terminal {
 
     // Printing
 
-    /// Prints `char` at the cursor, in the character set in use.
+    /// Prints `char` at the cursor, in the character set in use. A zero-width character joins
+    /// the character before it instead, and a format character xterm discards is discarded.
     pub(crate) fn print_char(&mut self, char: char) {
         let char = self.charsets.sets[self.charsets.used].translate(char);
-        self.put(char);
-        self.last = Some(char);
+        match width(char) {
+            // Every character discarded has no width, so plain text is not looked up twice.
+            // xterm forgets the character REP would repeat.
+            0 if discarded(char) => self.forget_last(),
+            0 => self.join(char),
+            width => {
+                self.put(char, width);
+                self.last = Some(char);
+            }
+        }
     }
 
-    /// Prints the last character printed `count` more times (REP). xterm prints them all,
-    /// however many. Once a screenful and a row have been printed, every row the characters
-    /// reach is full of them, and from then on each row's worth printed leaves the screen as
-    /// it was, so a larger count is cut by whole rows to no more than that.
+    /// Prints the last character printed `count` more times (REP), without the zero-width
+    /// characters joined to it. xterm prints them all, however many. Once the characters have
+    /// reached the bottom of the region and scrolled every row they found there out of it, each
+    /// row's worth printed leaves the screen as it was, so a larger count is cut by whole rows
+    /// to no more than that: two screenfuls and a row. One screenful and a row would do for
+    /// characters that fill their rows, but a wide character on an odd width leaves the last
+    /// column of each row as it found it, and in insert mode pushes the row's first cell there.
     pub(crate) fn repeat(&mut self, count: usize) {
         let Some(char) = self.last else { return };
-        let enough = self.cols * (self.rows + 1);
+        let width = width(char);
+        // How many a row holds. None, for a wide character on a screen one column wide: it is
+        // dropped each time, and only the first time does a pending wrap.
+        let fit = self.cols / width;
+        if fit == 0 {
+            self.put(char, width);
+            return;
+        }
+        let enough = fit * (2 * self.rows + 1);
         let mut left = if count > enough {
-            enough + (count - enough) % self.cols
+            enough + (count - enough) % fit
         } else {
             count
         };
         while left > 0 {
             self.wrap();
             // As much of the run as fits in the row at once, so that in insert mode the row
-            // moves once, not for every character.
-            let run = left.min(self.cols - self.col);
-            self.make_room(run);
+            // moves once, not for every character. A wide character in the last column is put
+            // alone, to wrap or be dropped.
+            let run = left.min((self.cols - self.col) / width);
+            if run == 0 {
+                self.put(char, width);
+                left -= 1;
+                continue;
+            }
+            self.make_room(run * width);
             for _ in 0..run {
-                self.write(char);
+                self.write(char, width);
             }
             left -= run;
         }
@@ -379,13 +411,30 @@ impl Terminal {
 
     /// SUB: shows `␦` where a character was lost, as xterm does for a VT220 and later.
     pub(crate) fn substitute(&mut self) {
-        self.put('\u{2426}');
+        self.put('\u{2426}', 1);
     }
 
-    fn put(&mut self, char: char) {
+    /// Prints `char`, which takes `width` cells, at the cursor. A wide character in the last
+    /// column goes to the next row, as xterm does, and leaves the column as it was. Without
+    /// autowrap, or on a screen one column wide, it is dropped.
+    fn put(&mut self, char: char, width: usize) {
         self.wrap();
-        self.make_room(1);
-        self.write(char);
+        if self.col + width > self.cols {
+            if !self.autowrap || width > self.cols {
+                return;
+            }
+            self.pending = true;
+            self.wrap();
+        }
+        self.make_room(width);
+        self.write(char, width);
+    }
+
+    /// Joins the zero-width character `mark` to the character written last, until xterm would
+    /// forget it (see `written`), or else to the character under the cursor, as xterm does.
+    fn join(&mut self, mark: char) {
+        let (row, col) = self.written.unwrap_or((self.row, self.col));
+        self.screen_mut().join(row, col, mark);
     }
 
     /// Starts the next row if a wrap is pending and autowrap is on. Without autowrap the
@@ -407,23 +456,32 @@ impl Terminal {
         }
     }
 
-    /// Writes `char` under the cursor and moves it on: to the next column, or in the last one
-    /// to a pending wrap.
-    fn write(&mut self, char: char) {
+    /// Writes `char`, which takes `width` cells, under the cursor and moves it on: past the
+    /// character, or in the last column to a pending wrap. The cells must fit in the row.
+    fn write(&mut self, char: char, width: usize) {
         let (row, col) = (self.row, self.col);
-        self.screen_mut().write(row, col, Cell::new(char));
-        if col + 1 < self.cols {
-            self.col += 1;
+        self.screen_mut().write(row, col, char, width);
+        self.written = Some((row, col));
+        if col + width < self.cols {
+            self.col += width;
         } else {
+            self.col = self.cols - 1;
             self.pending = true;
         }
+    }
+
+    /// xterm's `ResetWrap`: cancels a pending wrap, and from now on a zero-width character joins
+    /// the character under the cursor, not the one written last.
+    fn reset_wrap(&mut self) {
+        self.pending = false;
+        self.written = None;
     }
 
     // Moving the cursor
 
     pub(crate) fn carriage_return(&mut self) {
         self.col = 0;
-        self.pending = false;
+        self.reset_wrap();
     }
 
     /// Moves the cursor left, and no further than the first column. From a pending wrap that
@@ -434,7 +492,7 @@ impl Terminal {
 
     /// Moves the cursor down a row, scrolling the region when it is on its bottom row (IND).
     pub(crate) fn index(&mut self) {
-        self.pending = false;
+        self.reset_wrap();
         if self.row == self.bottom {
             // On the primary screen, with the region at the top, the row that scrolls off
             // will go to the scrollback (#26).
@@ -446,7 +504,7 @@ impl Terminal {
 
     /// Moves the cursor up a row, scrolling the region down when it is on its top row (RI).
     pub(crate) fn reverse_index(&mut self) {
-        self.pending = false;
+        self.reset_wrap();
         if self.row == self.top {
             self.scroll_down(1);
         } else if self.row > 0 {
@@ -472,7 +530,7 @@ impl Terminal {
     pub(crate) fn move_up(&mut self, count: usize) {
         let limit = if self.row >= self.top { self.top } else { 0 };
         self.row = self.row.saturating_sub(count).max(limit);
-        self.pending = false;
+        self.reset_wrap();
     }
 
     /// CUD. The cursor stops at the bottom of the scrolling region if it starts inside it.
@@ -483,23 +541,23 @@ impl Terminal {
             self.rows - 1
         };
         self.row = self.row.saturating_add(count).min(limit);
-        self.pending = false;
+        self.reset_wrap();
     }
 
     pub(crate) fn move_forward(&mut self, count: usize) {
         self.col = self.col.saturating_add(count).min(self.cols - 1);
-        self.pending = false;
+        self.reset_wrap();
     }
 
     pub(crate) fn move_back(&mut self, count: usize) {
         self.col = self.col.saturating_sub(count);
-        self.pending = false;
+        self.reset_wrap();
     }
 
     /// Moves the cursor to column `col` of its row, counted from 0.
     pub(crate) fn set_col(&mut self, col: usize) {
         self.col = col.min(self.cols - 1);
-        self.pending = false;
+        self.reset_wrap();
     }
 
     /// Moves the cursor to row `row`, counted from 0, and from the top of the scrolling region
@@ -510,7 +568,7 @@ impl Terminal {
         } else {
             row.min(self.rows - 1)
         };
-        self.pending = false;
+        self.reset_wrap();
     }
 
     pub(crate) fn goto(&mut self, row: usize, col: usize) {
@@ -544,7 +602,9 @@ impl Terminal {
         }
     }
 
-    /// CBT: back to the tab stop before, or to the first column.
+    /// CBT: back to the tab stop before, or to the first column. The cursor leaves the last
+    /// column, so no wrap waits; but as after a tab, which xterm's CBT is like, a zero-width
+    /// character still joins the character written last.
     pub(crate) fn tab_backward(&mut self, count: usize) {
         self.pending = false;
         for _ in 0..count.min(self.cols) {
@@ -596,7 +656,7 @@ impl Terminal {
             2 => screen.erase_rows(0..rows),
             _ => return,
         }
-        self.pending = false;
+        self.reset_wrap();
     }
 
     /// EL: erases the cursor's row to the right of the cursor (0), to its left (1), or all of
@@ -610,28 +670,28 @@ impl Terminal {
             _ => return,
         };
         self.screen_mut().erase(row, cols);
-        self.pending = false;
+        self.reset_wrap();
     }
 
     /// ECH: erases `count` cells from the cursor on, without moving it.
     pub(crate) fn erase_chars(&mut self, count: usize) {
         let (row, col) = (self.row, self.col);
         self.screen_mut().erase(row, col..col.saturating_add(count));
-        self.pending = false;
+        self.reset_wrap();
     }
 
     /// ICH.
     pub(crate) fn insert_chars(&mut self, count: usize) {
         let (row, col) = (self.row, self.col);
         self.screen_mut().insert_cells(row, col, count);
-        self.pending = false;
+        self.reset_wrap();
     }
 
     /// DCH.
     pub(crate) fn delete_chars(&mut self, count: usize) {
         let (row, col) = (self.row, self.col);
         self.screen_mut().delete_cells(row, col, count);
-        self.pending = false;
+        self.reset_wrap();
     }
 
     /// IL: rows pushed past the bottom of the scrolling region are lost. Only inside it.
@@ -687,13 +747,13 @@ impl Terminal {
     /// DECALN: fills the screen with `E`, for aligning a CRT. Seldom used but by tests. As in
     /// xterm, the scrolling region becomes the whole screen and origin mode goes off.
     pub(crate) fn align(&mut self) {
-        self.screen_mut().fill(Cell::new('E'));
+        self.screen_mut().fill(Cell::new('E', 1));
         self.top = 0;
         self.bottom = self.rows - 1;
         self.origin = false;
         self.row = 0;
         self.col = 0;
-        self.pending = false;
+        self.reset_wrap();
     }
 
     // The cursor's memory
@@ -717,6 +777,8 @@ impl Terminal {
         let saved = self.saved[slot].unwrap_or_default();
         self.row = saved.row.min(self.rows - 1);
         self.col = saved.col.min(self.cols - 1);
+        // xterm moves the cursor with a ResetWrap, then gives the pending wrap back.
+        self.reset_wrap();
         self.pending = saved.pending && self.col == self.cols - 1;
         self.origin = saved.origin;
         self.charsets = saved.charsets;
@@ -755,6 +817,8 @@ impl Terminal {
             Mode::AlternateCleared => {
                 if !on && self.modes.alternate_screen {
                     self.alternate.erase_rows(0..self.rows);
+                    // xterm clears it with ClearScreen, which starts with a ResetWrap.
+                    self.reset_wrap();
                 }
                 self.modes.alternate_screen = on;
             }
@@ -764,6 +828,7 @@ impl Terminal {
                 self.save_cursor();
                 self.modes.alternate_screen = true;
                 self.alternate.erase_rows(0..self.rows);
+                self.reset_wrap();
             }
             Mode::AlternateSaved => {
                 self.modes.alternate_screen = false;
@@ -861,7 +926,7 @@ impl Terminal {
             .saturating_sub(from_top[alternate as usize])
             .min(rows - 1);
         self.col = self.col.min(cols - 1);
-        self.pending = false;
+        self.reset_wrap();
         for (saved, from_top) in self.saved.iter_mut().zip(from_top) {
             if let Some(saved) = saved {
                 saved.row = saved.row.saturating_sub(from_top).min(rows - 1);
@@ -893,13 +958,16 @@ impl Terminal {
         assert!(self.charsets.used < 4);
         for screen in [&self.primary, &self.alternate] {
             assert_eq!(screen.rows().len(), self.rows);
-            for row in screen.rows() {
-                assert_eq!(row.cells().len(), self.cols);
-            }
+            screen.check(self.cols);
         }
         for saved in self.saved.iter().flatten() {
             assert!(saved.row < self.rows && saved.col < self.cols, "{self:?}");
         }
+        if let Some((row, col)) = self.written {
+            assert!(row < self.rows && col < self.cols, "{self:?}");
+        }
+        // A zero-width character is joined, never printed on its own.
+        assert!(self.last.is_none_or(|char| width(char) > 0), "{self:?}");
     }
 }
 

@@ -48,6 +48,25 @@ send \e[2;2H\e7\e[3;3H\e[?1049l
 mode alternate_screen off
 cursor 2;2
 
+## A screen cleared on the switch forgets a pending wrap
+# xterm clears it with ClearScreen, which starts with ResetWrap: mode 1049 on the way in, and
+# 1047 on the way back. Restoring the cursor gives the wrap back, as xterm's CursorRestore does.
+size 4x2
+send abcd\e[?1049hx
+screen
+|   x|
+|    |
+cursor 1;4
+send \e[?1049ly
+screen
+|abcd|>
+|y   |
+send \e[H\e[2J\e[?1047habcd\e[?1047lx
+screen
+|   x|
+|    |
+cursor 1;4
+
 ## Mode 47 switches screens and clears nothing
 size 10x2
 send one\e[?47h\e[Htwo

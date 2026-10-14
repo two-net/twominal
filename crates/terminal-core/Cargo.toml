@@ -8,6 +8,9 @@ publish = false
 # Every dependency must be listed in DESIGN.md §2 first (ARC-06) and must not reach for
 # the interface, rendering or OS processes (ARC-02).
 [dependencies]
+# Exactly this version: `width.rs` corrects it where it differs from xterm, and was compared
+# with it. Compare again before raising it.
+unicode-width = { version = "=0.2.2", default-features = false }
 vte = { version = "0.15", default-features = false }
 
 # cargo-fuzz builds with `--cfg fuzzing`, which makes `fuzz.rs` public for the fuzz crate.

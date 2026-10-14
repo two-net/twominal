@@ -21,6 +21,10 @@
 //! mode bracketed_paste on                                 a field of `Modes`
 //! ```
 //!
+//! A row is the text of its cells. A wide character takes two columns of it, as it does in a
+//! monospace font, and its right half adds nothing. A zero-width character is written after the
+//! character it joins, as it came: `e` and U+0301, not `é`.
+//!
 //! `send` and `reply` take `\e`, `\a`, `\b`, `\t`, `\n`, `\r`, `\\` and `\xHH`; the rest is
 //! UTF-8 as written. No line may end in a space, so a trailing space is written `\x20`.
 //! Every reply must be checked: one left over at the end of a case fails it (SEC-05).
@@ -101,7 +105,7 @@ enum Kind {
 /// A row of the screen as a case draws it.
 #[derive(PartialEq)]
 struct Row {
-    chars: Vec<char>,
+    text: String,
     wrapped: bool,
 }
 
@@ -188,7 +192,7 @@ fn parse(file: &str, text: &str, problems: &mut Vec<String>) -> Vec<Case> {
                 let mut why = None;
                 for _ in 0..current.size.rows {
                     match lines.next() {
-                        Some((at, row)) => match parse_row(row, current.size.cols) {
+                        Some((at, row)) => match parse_row(row) {
                             Ok(row) => rows.push(row),
                             Err(error) => {
                                 why.get_or_insert(format!("row on line {at}: {error}"));
@@ -238,20 +242,21 @@ fn parse_cursor(text: &str) -> Option<(u16, u16)> {
     Some((row.parse().ok()?, col.parse().ok()?))
 }
 
-/// A row drawn as `|` and `cols` characters and `|`, then `>` if it wraps. A `|` inside the
-/// row is a character like any other, because the width is known.
-fn parse_row(text: &str, cols: u16) -> Result<Row, String> {
-    let chars: Vec<char> = text.chars().collect();
-    let width = usize::from(cols);
-    let wrapped = chars.len() == width + 3 && chars[width + 2] == '>';
-    let fits = chars.len() == width + 2 || wrapped;
-    if !fits || chars[0] != '|' || chars[width + 1] != '|' {
-        return Err(format!("{text:?} is not |{width} characters|"));
+/// A row drawn as `|`, its text and `|`, then `>` if it wraps. A `|` inside the row is a
+/// character like any other: only the last one ends it. How wide the text is depends on its
+/// characters, so it is not counted here; a row of the wrong width fails as the screen differs.
+fn parse_row(text: &str) -> Result<Row, String> {
+    let (inside, wrapped) = match text.strip_suffix("|>") {
+        Some(inside) => (inside, true),
+        None => (text.strip_suffix('|').unwrap_or(""), false),
+    };
+    match inside.strip_prefix('|') {
+        Some(inside) => Ok(Row {
+            text: inside.to_string(),
+            wrapped,
+        }),
+        None => Err(format!("{text:?} is not a row between two |")),
     }
-    Ok(Row {
-        chars: chars[1..=width].to_vec(),
-        wrapped,
-    })
 }
 
 /// The bytes `text` stands for.
@@ -411,7 +416,7 @@ fn screen(core: &TerminalCore) -> Vec<Row> {
         .rows()
         .iter()
         .map(|row| Row {
-            chars: row.cells().iter().map(|cell| cell.char()).collect(),
+            text: row.text(),
             wrapped: row.wrapped(),
         })
         .collect()
@@ -421,10 +426,7 @@ fn screen(core: &TerminalCore) -> Vec<Row> {
 fn draw(rows: &[Row]) -> String {
     let lines: Vec<String> = rows
         .iter()
-        .map(|row| {
-            let text: String = row.chars.iter().collect();
-            format!("|{text}|{}", if row.wrapped { ">" } else { "" })
-        })
+        .map(|row| format!("|{}|{}", row.text, if row.wrapped { ">" } else { "" }))
         .collect();
     lines.join("\n")
 }
@@ -472,13 +474,16 @@ fn escapes_read_back_as_written() {
 }
 
 #[test]
-fn rows_are_read_by_their_width() {
-    let row = parse_row("|a|b |>", 4).unwrap();
-    assert_eq!(row.chars, ['a', '|', 'b', ' ']);
+fn rows_are_read_between_their_bars() {
+    let row = parse_row("|a|b |>").unwrap();
+    assert_eq!(row.text, "a|b ");
     assert!(row.wrapped);
-    assert!(!parse_row("|ab  |", 4).unwrap().wrapped);
-    for bad in ["|abc|", "|abcde|", "abcd|", "|abcd|x", "|abcd"] {
-        assert!(parse_row(bad, 4).is_err(), "{bad}");
+    let row = parse_row("|日本||").unwrap();
+    assert_eq!(row.text, "日本|");
+    assert!(!row.wrapped);
+    assert_eq!(parse_row("||").unwrap().text, "");
+    for bad in ["abcd|", "|abcd|x", "|abcd", "|", "abcd|>"] {
+        assert!(parse_row(bad).is_err(), "{bad}");
     }
 }
 
@@ -499,7 +504,10 @@ fn what_cannot_be_read_is_a_problem() {
         ("## a\nsize 2x1\ncursor 1,1\n", "is not a position"),
         ("## a\nsize 2x1\nmode mouse_mode on\n", "is not one of"),
         ("## a\nsize 2x2\nscreen\n|ab|\n", "ends inside a screen"),
-        ("## a\nsize 2x1\nscreen\n|abc|\n", "is not |2 characters|"),
+        (
+            "## a\nsize 2x1\nscreen\n|ab\n",
+            "is not a row between two |",
+        ),
         ("## a\nsize 2x1\n", "checks nothing"),
     ] {
         let mut problems = Vec::new();

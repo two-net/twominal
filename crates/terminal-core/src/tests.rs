@@ -1,13 +1,15 @@
 //! The Terminal Core's own rules, which the conformance suite in `tests/conformance/` cannot
 //! see through the public interface: internal state, the reports of the shell integration,
-//! resizing, and the same state however the output is cut (ARC-03, REL-02, FISH-05, PERF-06).
-//! What a program sees of the screen is checked there (MAINT-03).
+//! resizing, the table of widths, and the same state however the output is cut (ARC-03,
+//! REL-02, FISH-05, PERF-06, TERM-02). What a program sees of the screen is checked there
+//! (MAINT-03).
 
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use alloc::{format, vec};
 
 use crate::fuzz::{self, Random};
+use crate::width::width;
 use crate::{Event, Report, Size, TerminalCore};
 
 /// A terminal of `cols` × `rows` that has interpreted `bytes`.
@@ -54,31 +56,50 @@ fn numbered(count: usize) -> Vec<u8> {
 #[test]
 fn rep_is_the_character_printed_again() {
     let text = b"abcdefghij\r\nklmnopqrst\r\nuvwxyz\x1b[2;3H";
-    for modes in [
-        &b""[..],
-        b"\x1b[4h",
-        b"\x1b[?7l",
-        b"\x1b[4h\x1b[?7l",
-        b"\x1b[2;3r",
-        // Below the region on the last row, and above it.
-        b"\x1b[2;3r\x1b[5;7H",
-        b"\x1b[3;4r\x1b[1;5H\x1b[4h",
+    // A wide character too: on an even width, on an odd one, whose last column it skips, and
+    // on a width of one, where it never fits.
+    for (cols, rows, char) in [
+        (8, 5, "a"),
+        (8, 5, "日"),
+        (7, 5, "日"),
+        (7, 3, "日"),
+        (1, 5, "日"),
     ] {
-        // Past a screenful and a row, 48 here, the core cuts the count by whole rows, where
-        // xterm prints them all. The state must not show it.
-        for count in [1, 2, 7, 8, 9, 23, 39, 47, 48, 49, 50, 55, 56, 57, 100, 333] {
-            let prefix = [&text[..], modes].concat();
-            let repeated = core(
-                8,
-                5,
-                &[&prefix[..], format!("a\x1b[{count}b").as_bytes()].concat(),
-            );
-            let printed = core(
-                8,
-                5,
-                &[&prefix[..], "a".repeat(count + 1).as_bytes()].concat(),
-            );
-            assert!(repeated.terminal == printed.terminal, "{modes:?} {count}");
+        for modes in [
+            &b""[..],
+            b"\x1b[4h",
+            b"\x1b[?7l",
+            b"\x1b[4h\x1b[?7l",
+            b"\x1b[2;3r",
+            // Below the region on the last row, and above it.
+            b"\x1b[2;3r\x1b[5;7H",
+            b"\x1b[3;4r\x1b[1;5H\x1b[4h",
+            // On a wide character's right half.
+            b"\x1b[H\xe6\x97\xa5\x1b[D",
+        ] {
+            // Past two screenfuls and a row, 88 for `a` here, the core cuts the count by whole
+            // rows, where xterm prints them all. The state must not show it.
+            let counts = [
+                1, 2, 7, 8, 9, 23, 26, 32, 33, 34, 39, 47, 48, 49, 50, 55, 56, 57, 87, 88, 89, 90,
+                95, 96, 97, 100, 333,
+            ];
+            for count in counts {
+                let prefix = [&text[..], modes].concat();
+                let repeated = core(
+                    cols,
+                    rows,
+                    &[&prefix[..], format!("{char}\x1b[{count}b").as_bytes()].concat(),
+                );
+                let printed = core(
+                    cols,
+                    rows,
+                    &[&prefix[..], char.repeat(count + 1).as_bytes()].concat(),
+                );
+                assert!(
+                    repeated.terminal == printed.terminal,
+                    "{cols}x{rows} {char} {modes:?} {count}"
+                );
+            }
         }
     }
 }
@@ -269,6 +290,18 @@ fn resizing_resets_the_region_and_extends_the_tab_stops() {
 }
 
 #[test]
+fn resizing_blanks_a_wide_character_it_cuts_in_two() {
+    let mut core = core(6, 2, "ab日本".as_bytes());
+    core.resize(Size { cols: 4, rows: 2 });
+    assert_eq!(rows(&core), ["ab日", ""]);
+    core.resize(Size { cols: 3, rows: 2 });
+    assert_eq!(rows(&core), ["ab", ""]);
+    let cells = core.screen().rows()[0].cells();
+    assert_eq!(cells[2].width(), 1);
+    core.terminal.check();
+}
+
+#[test]
 fn a_size_of_zero_is_one() {
     let mut core = TerminalCore::new(Size { cols: 0, rows: 0 }, None);
     assert_eq!(core.size(), Size { cols: 1, rows: 1 });
@@ -276,6 +309,40 @@ fn a_size_of_zero_is_one() {
     assert_eq!(rows(&core), ["c"]);
     core.resize(Size { cols: 0, rows: 3 });
     assert_eq!(core.size(), Size { cols: 1, rows: 3 });
+}
+
+// Widths (TERM-02)
+
+#[test]
+fn widths_are_xterms() {
+    for (char, cells) in [
+        ('a', 1),
+        ('日', 2),
+        ('😀', 2),
+        ('\u{1f3fd}', 2),
+        // Ambiguous, and a regional indicator, half a flag.
+        ('α', 1),
+        ('\u{1f1ef}', 1),
+        ('\u{301}', 0),
+        ('\u{200d}', 0),
+        ('\u{fe0f}', 0),
+        ('\u{1161}', 0),
+        // Where unicode-width alone would give another width.
+        ('\u{ad}', 1),
+        ('\u{bbe}', 1),
+        ('\u{17d8}', 1),
+        ('\u{3164}', 2),
+        ('\u{600}', 0),
+    ] {
+        assert_eq!(width(char), cells, "{char:?}");
+    }
+}
+
+#[test]
+fn no_character_is_wider_than_two_cells() {
+    for char in (0..=0x10_ffff).filter_map(char::from_u32) {
+        assert!(width(char) <= 2, "{char:?}");
+    }
 }
 
 // Deterministic, whatever the input (ARC-03, REL-02)
@@ -366,6 +433,13 @@ const PIECES: &[&[u8]] = &[
     b"\xc2\x9b",
     b"\xe2\x94\x80",
     b"\xf0\x9f\x98\x80",
+    b"\xe6\x97\xa5",
+    b"\xcc\x81",
+    b"\xe1\x85\xa1",
+    b"\xe2\x80\x8d",
+    b"\xef\xb8\x8f",
+    b"\xe2\x80\x8b",
+    b"\xc2\xad",
     b"\xff",
     b"\x1b\\",
     b"cwd;",
@@ -390,7 +464,8 @@ fn hostile(random: &mut Random, length: usize) -> Vec<u8> {
 
 /// Output with a little of everything, to cut in pieces.
 const SAMPLE: &[u8] =
-    b"hello\r\n\x1b[31mred\x1b[m \xe2\x94\x80 caf\xc3\xa9 \xc2\x85\x1b[2;5r\x1b[5H\n\n\n\
+    b"hello\r\n\x1b[31mred\x1b[m \xe2\x94\x80 caf\xc3\xa9 \xe6\x97\xa5\xe6\x9c\xac e\xcc\x81\xcc\x88\
+                       \xf0\x9f\x91\xa8\xe2\x80\x8d\xf0\x9f\x91\xa9 \xe2\x80\x8b\xe6\x97\xa5\xc2\x85\x1b[2;5r\x1b[5H\n\n\n\
                        \x1b]2222;n1;cwd;/tmp\x07\x1b[?1049hfull\x1b[6n\x1b[?1049l\x1b(0lqk\x1b(Bz\
                        \x1b[3b\tx\x1b[c\x1b]2222;n1;ready\x07\xd0\xb9 \xd0\xbc\xf0\x9f\x98\x80!";
 

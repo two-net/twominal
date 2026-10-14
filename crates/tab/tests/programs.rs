@@ -250,6 +250,38 @@ fn vim_shows_a_file_and_gives_the_screen_back() {
 }
 
 #[test]
+fn vim_puts_its_cursor_where_the_core_puts_wide_and_combined_text() {
+    let Some(vim) = installed("vim") else { return };
+    let home = Folder::new();
+    // Wide characters, combining marks as they came, and emoji (TERM-02). Had vim and the core
+    // counted a character's cells differently, vim's cursor would miss the bar ending a line.
+    let lines = ["日本語の文|", "cafe\u{301} nai\u{308}ve|", "😀 👍 x|"];
+    fs::write(home.0.join("wide.txt"), lines.join("\n") + "\n").unwrap();
+    let script = format!("'{vim}' -u NONE -N -n -i NONE wide.txt");
+    let mut vim = Terminal::run(&home.0, &vim, &["/bin/sh", "-c", &script], &[]);
+    vim.until("the file", |vim| {
+        vim.alternate() && vim.rows()[..3] == lines
+    });
+
+    for (row, col) in [(0, 10), (1, 10), (2, 7)] {
+        vim.keys(&format!("{}G$", row + 1));
+        vim.until("the cursor on the bar", |vim| {
+            let cursor = vim.core.cursor();
+            let cell = vim.core.screen().rows()[row].cells()[col];
+            (cursor.row, cursor.col) == (row as u16, col as u16) && cell.chars().eq(['|'])
+        });
+    }
+    // vim deletes the wide character from the screen too.
+    vim.keys("1G0x");
+    vim.until("the first character gone", |vim| {
+        vim.rows()[0] == "本語の文|"
+    });
+
+    vim.keys(":q!\r");
+    vim.until_exit();
+}
+
+#[test]
 fn less_pages_forward_and_back() {
     let Some(less) = installed("less") else {
         return;
