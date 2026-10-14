@@ -1,6 +1,6 @@
 # Twominal — Design
 
-**Version:** 0.7 · **Date:** 2026-10-14 · **Tracks:** [SRS](SRS.md) v0.6
+**Version:** 0.8 · **Date:** 2026-10-14 · **Tracks:** [SRS](SRS.md) v0.6
 
 > The SRS says what Twominal must do. This document says how it is built: the technology choices the SRS leaves open (C-1) and where each component of SRS §6 lives. Requirement IDs such as `ARC-02` are the SRS's. Where the two disagree, the SRS wins and this document is corrected.
 
@@ -239,7 +239,7 @@ The `twominal` command is the app's own executable (GEN-02, GEN-05). `src-tauri/
 - **What runs** is the Shell setting, the executable and its arguments as written. With the setting not set it is the user's default shell (SW-01):
   - On macOS and Linux that is `$SHELL`. With `$SHELL` not set it is the shell in the user's account entry, else `/bin/sh`. It starts as an interactive login shell, the way `login` starts one: with a `-` before its name, as in `-zsh`, so no argument has to be one that every shell understands.
   - On Windows it is PowerShell 7 if `pwsh.exe` is on the `PATH`, and otherwise the Windows PowerShell that ships with Windows.
-  - The Shell setting may name any executable, with any arguments, fish included (FISH-03, FISH-08). Which shells get shell integration, and passthrough for the others, comes with #15.
+  - The Shell setting may name any executable, with any arguments, fish included (FISH-03, FISH-08). Which shells get shell integration is in *Shell integration* below.
 - **A shell that cannot start** (FISH-02) is not a session. `Session::start` returns why, as one sentence the Tab shows as it is, and another shell to offer:
   - *Not found:* no file at the path given or, for a name with no folder in it, in no folder of the `PATH`. The sentence then names the folders and asks for the full path. An app opened from the macOS Dock has only `/usr/bin:/bin:/usr/sbin:/sbin`, which is the likeliest reason a shell installed elsewhere is missing.
   - *Cannot run:* a folder, a file that is not executable, or else the OS's own reason.
@@ -250,7 +250,7 @@ The `twominal` command is the app's own executable (GEN-02, GEN-05). `src-tauri/
   - The Tab shows the sentence as a notice over the terminal area (UI-02), with a button that opens the offered shell in the same tab. No other tab is touched. That comes with tabs (#31, #32).
 - **The environment** is Twominal's own, plus `TERM=xterm-256color`, `COLORTERM=truecolor`, `TERM_PROGRAM` and `TERM_PROGRAM_VERSION` (SW-02). The name and version are the ones the App Shell has from Tauri, handed down, so the name is still written once.
   - If none of `LC_ALL`, `LC_CTYPE` and `LANG` is set, which is usual for an app opened from the macOS Dock, the shell gets `LANG=C.UTF-8`: UTF-8, and nothing else changed from the defaults. A locale the user did set is kept, whatever it is.
-  - On Windows ConPTY already carries UTF-8. Telling PowerShell to read and write UTF-8 is an instruction to the shell at startup, so it comes with the PowerShell integration (#15).
+  - On Windows ConPTY already carries UTF-8. PowerShell is told to read and write it by its shell integration script, which is sent even with shell integration off.
 - **The directory** is the one the Tab is given, with `PWD` set to it, so a path through a symbolic link stays as it was typed. With none, the shell starts in the home directory and the `PWD` Twominal inherited is removed, so the shell works it out (FISH-01). A directory that has gone by then also means the home directory.
 - **Privileges.** The shell is a plain child of Twominal and runs as the user. Nothing in Twominal asks for more (SEC-03).
 - **Three threads** per session, so the tab's own thread never waits on the shell:
@@ -260,6 +260,36 @@ The `twominal` command is the app's own executable (GEN-02, GEN-05). `src-tauri/
 - **The exit comes after the last output.** The waiter reports it when the reader has reached the end, or has waited 100 ms with nothing to read. A program the shell left running in the background can keep the pseudo-terminal open, and then the end of the output may not come for as long as it runs. Whatever such a program writes later still arrives after the exit.
 - **The size** is the terminal area's rows and columns, given when the session starts and each time it changes (TERM-15). A size of zero is made one.
 - **Closing** the session hangs up the shell, as closing a terminal always has. On macOS and Linux that is `SIGHUP`, which the shell passes on to its jobs. Once the waiter has the shell's exit status the shell is not signalled again, because the OS may have given its process ID to another process. On Windows the shell is ended.
+
+#### Shell integration
+
+`crates/tab/src/session/integration.rs` decides which shells get shell integration and how each is given its script (FISH-04, ARC-05). The scripts are in `crates/tab/src/session/integration/` and are built into the executable.
+
+- **Which shells.** The shell is told by the file name of the program that runs, in any letter case and with or without `.exe`: `zsh`, `bash`, `pwsh` and `powershell`. Every other shell, sh and fish included, runs as it is, in passthrough (FISH-03, FISH-08).
+- **Which arguments.** A Shell setting with arguments gets integration only when they cannot change how the shell starts up: `-l`, `--login` and `-i` for zsh and bash, and `-NoLogo`, `-NoProfile`, `-Login`, `-l` and `-Interactive` for PowerShell. With any other argument, such as a command to run, the shell runs as written, without integration.
+- **No file of the user's is touched.** Each shell is told at startup where Twominal's script is, and the user's own files are read as usual, by the shell or by the script:
+
+| Shell | How it is started | How the user's files are read |
+|---|---|---|
+| zsh | `ZDOTDIR` names Twominal's folder, whose `.zshenv` is the script. The user's own `ZDOTDIR`, if any, goes in `twominal_zdotdir`. The arguments, and the `-zsh` of a login shell, stay as they were | The script first gives `ZDOTDIR` back, then reads the user's `.zshenv`. zsh then reads `.zprofile`, `.zshrc` and `.zlogin` from the user's `ZDOTDIR`, as always |
+| bash | `bash --rcfile <script>`, with `twominal_login=1` when a login shell was asked for: the default shell, or `-l` or `--login` | bash ignores `--rcfile` in a login shell, so the script reads the login files, in bash's own order: `/etc/profile`, then the first of `~/.bash_profile`, `~/.bash_login` and `~/.profile`. Otherwise `~/.bashrc` |
+| PowerShell | `-NoExit -EncodedCommand <script>`: UTF-16LE in base64, so it needs no file and no quoting | PowerShell reads the profiles itself, before the script runs |
+
+- **bash is not quite a login shell.** macOS ships bash 3.2, and it gives no way to add a script to a login shell: it ignores `--rcfile` there, and ignores `ENV` under `--posix`. So bash starts as an interactive shell that reads the login files itself. The user's files load as for a login shell, but `shopt login_shell` is off, `$0` is `bash` and `~/.bash_logout` is not read. A bash built to read a system `bashrc` before `--rcfile`, as on Debian and Ubuntu, may read it twice, because `/etc/profile` reads it too.
+- **The files.** zsh and bash need the script as a file: zsh finds its startup files only in a folder, and portable-pty cannot hand bash a pipe to read instead. The Session writes them into the folder `Start` gives it, the one only the user can open where the launcher's socket is (§7).
+  - They go in a folder of their own, named after what they hold. A file once written never changes, and two versions of Twominal never read each other's.
+  - Each is written beside its place and renamed into it, and only when it is missing or different, so a shell starting at the same moment never reads half a file.
+  - With no folder, or when writing fails, zsh and bash start without integration.
+- **Nothing is left behind.** The variables Twominal passes, `twominal_nonce`, `twominal_zdotdir` and `twominal_login`, are lowercase because they are identifiers (GEN-02). Each script reads them and removes them before the user's files run, so no command and no shell started from this one sees them.
+- **The reports.** Before each prompt, the script reports what changed since the last prompt, then that the shell is ready for a command (FISH-05). It runs from `precmd` in zsh, from `PROMPT_COMMAND` in bash and from a wrapped `prompt` function in PowerShell. §7 has the format.
+  - The first prompt reports everything, so the first `ready` is the first prompt (SPL-04).
+  - A continuation line (`PS2`) reports nothing, so the tab stays in passthrough while the shell asks for more (CMD-02).
+  - `$?` is kept, and the user's own prompt and hooks run as before. In zsh the hook moves itself to the end of `precmd_functions` at each prompt, so from the second prompt on `ready` comes after whatever other hooks write.
+  - PowerShell lists its cmdlets once, when PSReadLine says it is first idle, because listing them takes a tenth of a second or more. Without PSReadLine they are listed at the first prompt.
+- **The nonce.** Each session gets 128 random bits, from the standard library's `RandomState`, which the OS seeds. Every report carries them, and `Session::reports` hands them to the Tab for the Terminal Core (#16). Output that does not carry the nonce is not a report. So text that is only printed, such as a file shown with `cat`, a remote shell or a nested one, cannot fake `ready` and take keys away from a running program.
+- **Off.** With the Shell integration setting off (FISH-06), or a shell without integration, `Session::reports` is `None`. The features that need it then fall back: the tab stays in passthrough, a new tab starts in the home directory (TAB-03), there are no prompt jumps (VIM-12), and the splash waits for the first output (SPL-04). Each comes with its own issue. A shell with integration may still never report, if the user's configuration undoes it, so these features must also cope with a report that never comes.
+- **Versions.** The scripts use nothing newer than bash 3.2 and zsh 5.0, and PowerShell's runs in Windows PowerShell 5.1 and PowerShell 7. They are tested with bash 3.2.57, zsh 5.9 and PowerShell 7.6 on macOS. Windows PowerShell 5.1 waits for the first Windows build.
+- **Not yet.** With the command-line editor on, shell integration must also hide the shell's own prompt and take the finished line from the editor (CMD-01, CMD-04). That is added to these scripts with the editor.
 
 ### Tier 4: Terminal Core
 
@@ -333,10 +363,34 @@ No plugin system, no scripting engine and no network component (ARC-06).
 | Launcher socket and lock | `twominal.sock` and `twominal.lock`, in the user's own temporary folder on macOS and in `$XDG_RUNTIME_DIR` on Linux. A debug build's are `twominal-dev.sock` and `twominal-dev.lock` | One byte for the version of the exchange, then the directory's bytes. Neither file keeps anything |
 | Bundled font | `src/fonts/`, with its license (FONT-01) | The four JetBrains Mono styles |
 | Logo | `src/logo.svg`. The app icons in `src-tauri/icons/` are generated from it (GEN-03) | SVG, made of shapes only: no text, no style sheet, nothing loaded from elsewhere |
-| Shell integration | Inside the `tab` crate, as data of the Session | One script per shell, passed to the shell at startup. No user file is touched (FISH-04) |
+| Shell integration | The scripts are in `crates/tab/src/session/integration/`, built into the executable. zsh's and bash's are written to the launcher's folder, as `twominal-<hash of the scripts>/zsh/.zshenv` and `twominal-<hash of the scripts>/integration.bash`. PowerShell's goes on its command line | One script per shell, given to the shell at startup. No file of the user's is touched (FISH-04) |
 | Webview code | `src/` | Served as it is |
 
 Prior art in this repository: `origin/codex:src-tauri/shell-integration/` for integration that leaves the user's files alone.
+
+### Shell integration reports
+
+Each report of shell integration (FISH-05, §3) is one escape sequence:
+
+```
+ESC ] 2222 ; <nonce> ; <key> ; <value> BEL
+```
+
+- **2222** is Twominal's own OSC number. A terminal that does not know it ignores it.
+- **The nonce** is the session's. A sequence with any other nonce is not a report.
+- **The value** has every byte outside `!` to `~`, and every `%` and `;`, written as `%XX`, so it is printable ASCII and holds no `;`. A reader decodes every `%XX`.
+- **A list** is its names, each encoded, separated by single spaces.
+
+| Key | Value | Sent |
+|---|---|---|
+| `cwd` | The working directory. zsh's and bash's `$PWD`, kept as typed through symbolic links. PowerShell's `$PWD.ProviderPath`, and only in the file system | When it changed |
+| `path` | `PATH`, as the shell has it | When it changed |
+| `aliases` | The names of the aliases. zsh's include its global aliases | When they changed |
+| `functions` | The names of the functions, but Twominal's own | When they changed |
+| `cmdlets` | PowerShell only: the names of the cmdlets, which count as builtins (CMD-07, CMD-09) | Once, when PowerShell is first idle |
+| `ready` | None. The shell is ready for a command | Before each prompt, last |
+
+*When it changed* means since it was last sent, so the first prompt sends them all. A list can be long: a zsh with a plugin manager has a thousand functions or more, so a report can be tens of kilobytes, and the Terminal Core must take one that size (#16).
 
 ### The settings file
 
@@ -391,7 +445,9 @@ Saving a setting changes only the keys whose value changed. Comments, the order 
 - **Identity test**, `src-tauri/tests/identity.rs`. It checks the product's name, that the code spells it only as `Twominal` or `twominal`, the lowercase identifiers, and that the logo stands alone (GEN-01 to GEN-03).
 - **Settings Store.** `src-tauri/src/settings/tests.rs` gives each test a configuration folder of its own, and covers loading, each kind of bad value, hand edits and saving (SET-02 to SET-05, AT-13). The store does not depend on Tauri, so it needs no window.
 - **App Shell.** `src-tauri/src/app/tests.rs` covers what needs no window: window titles and labels, what each menu item does, the shortcut on each OS, and the launcher's arguments, texts and hand-over, in a folder of the test's own. `src-tauri/tests/launcher.rs` runs the executable for what it answers without starting Tauri (GEN-05). The windows and menus themselves, and a window the launcher asks for, are checked by hand (MAINT-02).
-- **Session.** `crates/tab/src/session/tests.rs` starts `/bin/sh` on real pseudo-terminals and checks the bytes both ways, the environment, the directory, the size, the exit status, closing, and an exit while a background program holds the terminal (SW-01, SW-02, FISH-01, TERM-15, SEC-03). It also checks a shell that cannot start: a Shell setting that names no file while another session keeps working, a name missing from the `PATH`, a file that is not executable, and a `$SHELL` that has gone (FISH-02, AT-16). These run on macOS and Linux. The choice of locale and of PowerShell, the waiter's rule for when to report the exit, how a program is looked for and why it cannot run, the offers and their wording are tested on every OS, but no shell has yet been started on Windows.
+- **Session.** `crates/tab/src/session/tests.rs` starts `/bin/sh` on real pseudo-terminals and checks the bytes both ways, the environment, the directory, the size, the exit status, closing, and an exit while a background program holds the terminal (SW-01, SW-02, FISH-01, TERM-15, SEC-03). It also checks a shell that cannot start: a Shell setting that names no file while another session keeps working, a name missing from the `PATH`, a file that is not executable, and a `$SHELL` that has gone (FISH-02, AT-16). These run on macOS and Linux.
+  - Shell integration is tested the same way (FISH-04 to FISH-06). zsh, bash and PowerShell start in a home folder of the test's own, with the user's files in it, and the tests check the reports, that the user's files are read in the usual order, and that the home folder is the same afterwards, file for file. Twominal's own folder, the variables it passes and the setting turned off are checked too. A test whose shell is not installed says so and passes. On macOS, `brew install powershell` installs PowerShell 7.
+  - The choice of locale and of PowerShell, the waiter's rule for when to report the exit, how a program is looked for and why it cannot run, the offers and their wording, and which shells get shell integration and what it adds to their command are tested on every OS, but no shell has yet been started on Windows.
 - **Terminal Core.** A conformance suite that feeds byte streams and checks the screen (MAINT-03), and fuzz targets (REL-02). Both run with no window (ARC-03). #17.
 - **Tab tier.** The `tab` crate does not depend on Tauri, so the Command Line, key handling and the Renderer's choice of text runs are unit-tested without a window.
 - **Webview.** It has no logic of its own to unit-test. What it draws is checked by the acceptance scenarios (SRS §7) as documented manual tests (MAINT-02).
@@ -408,6 +464,8 @@ Saving a setting changes only the keys whose value changed. Comments, the order 
 | A webview does not follow the OS reduced-motion setting | SW-04, ACC-01 | #40 | The App Shell reads the OS setting itself and passes it to the Animator |
 | A canvas cannot be read by screen readers | ACC-04 | #46 | The Renderer keeps a hidden text copy of the visible rows for them |
 | A dependency of the Terminal Core needs `std` | ARC-02 | #16 | Change this document first |
+| A user's configuration undoes shell integration, so no report comes | FISH-05 | Nothing can settle it | The features that need it fall back, as with the setting off (§3) |
+| Windows PowerShell 5.1 runs the integration script differently from PowerShell 7 | FISH-04 | The first Windows build | The script changes. It needs no file, so nothing else does |
 
 Twominal has so far been built and run only on macOS.
 

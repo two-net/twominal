@@ -14,8 +14,11 @@
 //! A shell that cannot start is reported with why, and with another shell the tab can offer
 //! instead (FISH-02).
 //!
-//! Filled in by #15 (shell integration).
+//! zsh, bash and PowerShell get shell integration, so that they report their working
+//! directory, their search path, their aliases and functions, and when they are ready for a
+//! command (FISH-04, FISH-05). It lives in [`integration`].
 
+mod integration;
 #[cfg(test)]
 mod tests;
 
@@ -58,6 +61,12 @@ pub struct Start {
     /// them as `TERM_PROGRAM` and `TERM_PROGRAM_VERSION` (SW-02).
     pub name: String,
     pub version: String,
+    /// Whether to apply shell integration: the Shell integration setting (FISH-06).
+    pub integration: bool,
+    /// A folder only the user can open, the one the launcher's socket is in (DESIGN.md §7).
+    /// bash and zsh read their shell integration from files the Session keeps there, so
+    /// without it they start without integration.
+    pub private: Option<PathBuf>,
 }
 
 /// Which shell a session runs.
@@ -223,6 +232,8 @@ pub struct Session {
     /// Set when the waiter has the shell's exit status. Its process ID may then belong to
     /// another process, so it is not signalled again.
     ended: Arc<AtomicBool>,
+    /// The nonce the shell integration's reports carry, if the shell has integration.
+    reports: Option<String>,
 }
 
 impl Session {
@@ -236,7 +247,20 @@ impl Session {
         start: Start,
         output: impl Fn(Output) + Send + Sync + 'static,
     ) -> Result<Self, Error> {
-        spawn(&start.shell, command(&start), start.size, Arc::new(output))
+        let mut command = command(&start);
+        let reports = integrate(&start, &mut command);
+        spawn(&start.shell, command, start.size, reports, Arc::new(output))
+    }
+
+    /// The nonce that every report of the shell integration carries (FISH-05). No output from
+    /// elsewhere can know it, so only what carries it is a report.
+    ///
+    /// `None` when the shell has no integration: the setting is off, Twominal has none for this
+    /// shell, or the Shell setting gives it arguments integration is not added to (FISH-03,
+    /// FISH-06). The features that need it then fall back. A shell with integration may still
+    /// never report, if the user's own configuration undoes it.
+    pub fn reports(&self) -> Option<&str> {
+        self.reports.as_deref()
     }
 
     /// Passes `bytes` to the shell, without waiting for the shell to read them.
@@ -286,6 +310,16 @@ fn command(start: &Start) -> CommandBuilder {
         None => command.env_remove("PWD"),
     }
     command
+}
+
+/// Applies shell integration to `command` if the setting asks for it (FISH-04, FISH-06), and
+/// returns the nonce its reports carry. A default shell that is [`refused`] is left as it is,
+/// so that it is explained, not replaced by another (FISH-02).
+fn integrate(start: &Start, command: &mut CommandBuilder) -> Option<String> {
+    if refused(command).is_some() {
+        return None;
+    }
+    integration::apply(command, start.integration, start.private.as_deref())
 }
 
 /// What runs for `shell`, before its environment and directory are set.
@@ -494,11 +528,12 @@ fn pty_size(size: Size) -> PtySize {
 }
 
 /// Starts `command`, which runs `shell`, on a new pseudo-terminal of `size`, with the
-/// session's threads.
+/// session's threads. `reports` is the nonce of the shell integration applied to `command`.
 fn spawn(
     shell: &Shell,
     command: CommandBuilder,
     size: Size,
+    reports: Option<String>,
     output: Sink,
 ) -> Result<Session, Error> {
     let not_started = |program, problem| {
@@ -563,6 +598,7 @@ fn spawn(
         input,
         killer,
         ended,
+        reports,
     })
 }
 

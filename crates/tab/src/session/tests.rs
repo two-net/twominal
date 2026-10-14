@@ -286,6 +286,355 @@ fn powershell_7_comes_first() {
     assert_eq!(powershell(None), PathBuf::from("powershell.exe"));
 }
 
+// Shell integration (FISH-04 to FISH-06).
+
+/// The opening of every report.
+const REPORT: &[u8] = b"\x1b]2222;";
+
+/// A report: its key, and its value decoded, when it has one.
+type Report = (String, Option<String>);
+
+/// The reports in `text` that carry `nonce`, in order. Each one must keep to the format: no
+/// byte outside `!` to `~` but the spaces between the names of a list.
+fn reports(text: &[u8], nonce: &str) -> Vec<Report> {
+    let mut found = Vec::new();
+    let mut rest = text;
+    while let Some(at) = rest
+        .windows(REPORT.len())
+        .position(|window| window == REPORT)
+    {
+        rest = &rest[at + REPORT.len()..];
+        let Some(end) = rest.iter().position(|&byte| byte == 0x07) else {
+            break;
+        };
+        let (body, after) = rest.split_at(end);
+        rest = &after[1..];
+        assert!(
+            body.iter().all(|byte| (b' '..=b'~').contains(byte)),
+            "a report holds only printable ASCII: {:?}",
+            String::from_utf8_lossy(body)
+        );
+        let mut fields = body.splitn(3, |&byte| byte == b';');
+        if fields.next() != Some(nonce.as_bytes()) {
+            continue;
+        }
+        let key = String::from_utf8_lossy(fields.next().unwrap_or_default()).into_owned();
+        found.push((key, fields.next().map(decode)));
+    }
+    found
+}
+
+/// A report's value, with each `%XX` read back as its byte.
+fn decode(value: &[u8]) -> String {
+    let mut bytes = Vec::new();
+    let mut rest = value;
+    while let Some((&byte, after)) = rest.split_first() {
+        match (byte, after) {
+            (b'%', [high, low, after @ ..]) => {
+                let hex = std::str::from_utf8(&[*high, *low]).unwrap().to_string();
+                bytes.push(u8::from_str_radix(&hex, 16).expect("two hex digits after %"));
+                rest = after;
+            }
+            _ => {
+                bytes.push(byte);
+                rest = after;
+            }
+        }
+    }
+    String::from_utf8(bytes).expect("a value is UTF-8")
+}
+
+/// The names in a list report.
+fn names(value: &str) -> Vec<&str> {
+    value.split(' ').filter(|name| !name.is_empty()).collect()
+}
+
+#[test]
+fn reports_are_read_back_as_written() {
+    let text = b"out\x1b]2222;n1;cwd;/a%20b%3Bc%25d%C3%A9\x07put\x1b]2222;n2;ready\x07\
+                 \x1b]2222;n1;aliases;ll la\x07\x1b]2222;n1;ready\x07";
+    assert_eq!(
+        reports(text, "n1"),
+        [
+            ("cwd".to_string(), Some("/a b;c%dé".to_string())),
+            ("aliases".to_string(), Some("ll la".to_string())),
+            ("ready".to_string(), None),
+        ]
+    );
+}
+
+#[test]
+fn shells_are_told_by_their_names() {
+    use integration::Kind;
+    let kind = |program: &str| Kind::of(OsStr::new(program));
+
+    assert_eq!(kind("zsh"), Some(Kind::Zsh));
+    assert_eq!(kind("/bin/zsh"), Some(Kind::Zsh));
+    assert_eq!(kind("/opt/homebrew/bin/bash"), Some(Kind::Bash));
+    assert_eq!(kind("pwsh"), Some(Kind::PowerShell));
+    assert_eq!(kind("PWSH.EXE"), Some(Kind::PowerShell));
+    assert_eq!(kind("powershell.exe"), Some(Kind::PowerShell));
+    assert_eq!(kind("PowerShell"), Some(Kind::PowerShell));
+    // These run in passthrough (FISH-03, FISH-08).
+    for other in [
+        "sh",
+        "/bin/sh",
+        "dash",
+        "fish",
+        "/opt/homebrew/bin/fish",
+        "cmd.exe",
+        "zsh5",
+    ] {
+        assert_eq!(kind(other), None, "{other}");
+    }
+}
+
+#[test]
+fn integration_is_added_only_to_arguments_that_leave_startup_alone() {
+    use integration::Kind;
+    let takes = |kind: Kind, arguments: &[&str]| {
+        let arguments: Vec<OsString> = arguments.iter().map(OsString::from).collect();
+        kind.takes(&arguments)
+    };
+
+    for kind in [Kind::Zsh, Kind::Bash] {
+        assert!(takes(kind, &[]));
+        assert!(takes(kind, &["-l"]));
+        assert!(takes(kind, &["--login", "-i"]));
+        assert!(!takes(kind, &["-c", "echo hello"]));
+        assert!(!takes(kind, &["script.sh"]));
+        assert!(!takes(kind, &["-f"]));
+        assert!(!takes(kind, &["--norc"]));
+    }
+    assert!(takes(Kind::PowerShell, &[]));
+    assert!(takes(
+        Kind::PowerShell,
+        &["-NoLogo", "-noprofile", "-LOGIN"]
+    ));
+    assert!(!takes(Kind::PowerShell, &["-Command", "Get-Date"]));
+    assert!(!takes(Kind::PowerShell, &["-File", "script.ps1"]));
+}
+
+#[test]
+fn powershell_is_given_its_script_encoded() {
+    // `-EncodedCommand` takes UTF-16LE, in base64.
+    assert_eq!(integration::encoded(""), "");
+    assert_eq!(integration::encoded("H"), "SAA=");
+    assert_eq!(integration::encoded("Hi"), "SABpAA==");
+    assert_eq!(integration::encoded("Hi!"), "SABpACEA");
+    assert_eq!(integration::encoded("é"), "6QA=");
+}
+
+#[test]
+fn every_session_has_a_nonce_of_its_own() {
+    let (one, two) = (integration::nonce(), integration::nonce());
+    assert_ne!(one, two);
+    for nonce in [one, two] {
+        assert_eq!(nonce.len(), 32, "{nonce}");
+        assert!(
+            nonce.bytes().all(|byte| byte.is_ascii_hexdigit()),
+            "{nonce}"
+        );
+    }
+}
+
+#[test]
+fn the_files_are_written_once_and_kept() {
+    let private = Folder::new();
+    let folder = integration::files(&private.0).unwrap();
+    let zshenv = folder.join("zsh").join(".zshenv");
+    let rcfile = folder.join("integration.bash");
+    let written = (fs::read(&zshenv).unwrap(), fs::read(&rcfile).unwrap());
+    assert!(String::from_utf8_lossy(&written.0).contains("ZDOTDIR"));
+    assert!(String::from_utf8_lossy(&written.1).contains("PROMPT_COMMAND"));
+
+    // The same folder again, with nothing left over from writing it.
+    assert_eq!(integration::files(&private.0).unwrap(), folder);
+    let mut entries: Vec<_> = fs::read_dir(&private.0)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .collect();
+    assert_eq!(entries, [folder.file_name().unwrap()]);
+    entries = fs::read_dir(&folder)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .collect();
+    entries.sort();
+    assert_eq!(entries, [OsStr::new("integration.bash"), OsStr::new("zsh")]);
+
+    // A file that no longer holds what it should is written again.
+    fs::write(&zshenv, "echo changed").unwrap();
+    integration::files(&private.0).unwrap();
+    assert_eq!(fs::read(&zshenv).unwrap(), written.0);
+}
+
+/// The Start a tab gives for `shell`, with shell integration on and `private` as its folder.
+fn integrated_start(shell: Shell, private: &Path) -> Start {
+    Start {
+        shell,
+        directory: None,
+        size: Size { cols: 80, rows: 24 },
+        name: "Twominal".to_string(),
+        version: "9.9.9".to_string(),
+        integration: true,
+        private: Some(private.to_path_buf()),
+    }
+}
+
+fn words(words: &[&str]) -> Shell {
+    Shell::Command(words.iter().map(|word| word.to_string()).collect())
+}
+
+#[test]
+fn zsh_is_pointed_at_twominals_zdotdir() {
+    let private = Folder::new();
+    let start = integrated_start(words(&["/bin/zsh", "-l"]), &private.0);
+    let folder = integration::files(&private.0).unwrap();
+
+    let mut command = command(&start);
+    command.env_remove("ZDOTDIR");
+    let nonce = integrate(&start, &mut command).expect("zsh has integration");
+    assert_eq!(command.get_env("twominal_nonce"), Some(OsStr::new(&nonce)));
+    assert_eq!(
+        command.get_env("ZDOTDIR"),
+        Some(folder.join("zsh").as_os_str())
+    );
+    assert_eq!(command.get_env("twominal_zdotdir"), None);
+    // Only the environment changes, so a login shell stays one.
+    assert_eq!(command.get_argv(), &["/bin/zsh", "-l"]);
+
+    // The user's own ZDOTDIR, for the script to give back.
+    let mut command = super::command(&start);
+    command.env("ZDOTDIR", "/home/someone/.config/zsh");
+    integrate(&start, &mut command).unwrap();
+    assert_eq!(
+        command.get_env("twominal_zdotdir"),
+        Some(OsStr::new("/home/someone/.config/zsh"))
+    );
+}
+
+#[test]
+fn bash_is_given_its_rcfile() {
+    let private = Folder::new();
+    let rcfile = integration::files(&private.0)
+        .unwrap()
+        .join("integration.bash");
+
+    // As the Shell setting, without -l: not a login shell.
+    let start = integrated_start(words(&["bash"]), &private.0);
+    let mut command = command(&start);
+    integrate(&start, &mut command).expect("bash has integration");
+    assert_eq!(
+        command.get_argv(),
+        &[
+            OsStr::new("bash"),
+            OsStr::new("--rcfile"),
+            rcfile.as_os_str()
+        ]
+    );
+    assert_eq!(command.get_env("twominal_login"), None);
+
+    // With -l, the script reads the login files.
+    let start = integrated_start(words(&["bash", "-l"]), &private.0);
+    let mut command = super::command(&start);
+    integrate(&start, &mut command).unwrap();
+    assert_eq!(
+        command.get_argv()[1..],
+        ["--rcfile", rcfile.to_str().unwrap()]
+    );
+    assert_eq!(command.get_env("twominal_login"), Some(OsStr::new("1")));
+}
+
+#[cfg(unix)]
+#[test]
+fn the_default_shell_gets_integration_as_a_login_shell() {
+    let private = Folder::new();
+    let start = integrated_start(Shell::Default, &private.0);
+
+    let mut command = command(&start);
+    command.env("SHELL", "/bin/bash");
+    integrate(&start, &mut command).expect("bash has integration");
+    assert_eq!(command.get_argv()[..2], ["/bin/bash", "--rcfile"]);
+    assert_eq!(command.get_env("twominal_login"), Some(OsStr::new("1")));
+
+    // zsh keeps its `-zsh`.
+    let mut command = super::command(&start);
+    command.env("SHELL", "/bin/zsh");
+    integrate(&start, &mut command).expect("zsh has integration");
+    assert!(command.is_default_prog());
+
+    // A default shell that cannot start is explained, not replaced (FISH-02).
+    let mut command = super::command(&start);
+    command.env("SHELL", private.0.join("bash"));
+    assert_eq!(integrate(&start, &mut command), None);
+    assert!(command.is_default_prog());
+}
+
+#[test]
+fn powershell_is_given_its_script_on_the_command_line() {
+    let start = integrated_start(words(&["pwsh", "-NoLogo"]), Path::new("/nowhere"));
+    let mut command = command(&start);
+    let nonce = integrate(&start, &mut command).expect("PowerShell has integration");
+    let argv = command.get_argv();
+    assert_eq!(argv[..3], ["pwsh", "-NoLogo", "-NoExit"]);
+    assert_eq!(argv[3], "-EncodedCommand");
+    assert!(argv[4].to_str().unwrap().len() > 1000);
+    assert_eq!(command.get_env("twominal_nonce"), Some(OsStr::new(&nonce)));
+
+    // With integration off, Windows still sends the script, which sets UTF-8 (SW-02), but
+    // no nonce, so nothing is reported.
+    let mut start = start;
+    start.integration = false;
+    let mut command = super::command(&start);
+    assert_eq!(integrate(&start, &mut command), None);
+    assert_eq!(command.get_argv().len() > 2, cfg!(windows));
+    assert_eq!(command.get_env("twominal_nonce"), None);
+}
+
+#[test]
+fn no_integration_leaves_the_command_as_it_was() {
+    let private = Folder::new();
+    let unchanged = |start: &Start| {
+        let mut command = command(start);
+        let before = (
+            command.get_argv().clone(),
+            command.get_env("ZDOTDIR").map(OsStr::to_os_string),
+        );
+        assert_eq!(integrate(start, &mut command), None);
+        assert_eq!(
+            (
+                command.get_argv().clone(),
+                command.get_env("ZDOTDIR").map(OsStr::to_os_string)
+            ),
+            before
+        );
+        assert_eq!(command.get_env("twominal_nonce"), None);
+    };
+
+    // The setting is off (FISH-06).
+    for shell in [words(&["zsh"]), words(&["bash"])] {
+        let mut start = integrated_start(shell, &private.0);
+        start.integration = false;
+        unchanged(&start);
+    }
+    // Twominal has no integration for the shell (FISH-03), or not with these arguments.
+    for shell in [
+        words(&["/bin/sh"]),
+        words(&["fish"]),
+        words(&["bash", "-c", "echo hello"]),
+        words(&["zsh", "-f"]),
+        words(&["pwsh", "-Command", "Get-Date"]),
+    ] {
+        unchanged(&integrated_start(shell, &private.0));
+    }
+    // zsh and bash read their integration from a file, which needs a folder.
+    for shell in [words(&["zsh"]), words(&["bash"])] {
+        let mut start = integrated_start(shell, &private.0);
+        start.private = None;
+        unchanged(&start);
+    }
+}
+
 /// The tests that start a shell.
 #[cfg(unix)]
 mod shells {
@@ -307,6 +656,8 @@ mod shells {
             size: SIZE,
             name: "Twominal".to_string(),
             version: "9.9.9".to_string(),
+            integration: false,
+            private: None,
         }
     }
 
@@ -324,7 +675,7 @@ mod shells {
         let (sink, output) = sink(16);
         let start = start_with(Some(shell), directory);
         let session =
-            spawn(&start.shell, command(&start), start.size, sink).expect("the shell starts");
+            spawn(&start.shell, command(&start), start.size, None, sink).expect("the shell starts");
         (session, output)
     }
 
@@ -392,7 +743,7 @@ mod shells {
         // Whichever shell the user has, the test runs `sh`, which is the same everywhere.
         command.env("SHELL", "/bin/sh");
         let (sink, output) = sink(16);
-        let session = spawn(&Shell::Default, command, SIZE, sink).expect("the shell starts");
+        let session = spawn(&Shell::Default, command, SIZE, None, sink).expect("the shell starts");
         session.write(b"echo \"[$0]\"\n".to_vec());
         until(&output, "[-sh]");
     }
@@ -452,7 +803,7 @@ mod shells {
         let script = "printf one; sleep 0.2; printf two; sleep 0.2; printf three";
         let start = start_with(Some(&["/bin/sh", "-c", script]), None);
         let _session =
-            spawn(&start.shell, command(&start), start.size, sink).expect("the shell starts");
+            spawn(&start.shell, command(&start), start.size, None, sink).expect("the shell starts");
         thread::sleep(Duration::from_secs(1));
 
         let (text, exit) = finish(&output);
@@ -512,7 +863,7 @@ mod shells {
     /// Starts `command`, which runs `shell`, and returns why it did not start.
     fn refusal(shell: &Shell, command: CommandBuilder) -> NotStarted {
         let (sink, _output) = sink(16);
-        match spawn(shell, command, SIZE, sink) {
+        match spawn(shell, command, SIZE, None, sink) {
             Err(Error::Shell(not_started)) => not_started,
             Err(Error::Session(error)) => panic!("the session failed: {error}"),
             Ok(_) => panic!("the shell started"),
@@ -614,5 +965,541 @@ mod shells {
         assert_eq!(command.get_env("SHELL"), None);
         assert!(Path::new(&command.get_shell()).is_file());
         assert_eq!(refused(&command), None);
+    }
+
+    // Shell integration with real shells (FISH-04 to FISH-06). Each test needs its shell, and
+    // says so when this machine does not have it.
+
+    /// Where `program` is installed, or `None`, with a note, when it is not.
+    fn installed(program: &str) -> Option<PathBuf> {
+        let path = env::var_os("PATH").unwrap_or_default();
+        let found = env::split_paths(&path)
+            .chain(["/bin", "/usr/bin", "/usr/local/bin", "/opt/homebrew/bin"].map(PathBuf::from))
+            .map(|folder| folder.join(program))
+            .find(|file| problem_at(file).is_none());
+        if found.is_none() {
+            eprintln!("{program} is not installed, so its shell integration is not tested");
+        }
+        found
+    }
+
+    /// The question .NET asks, at startup and at each prompt, about where the cursor is. A
+    /// terminal answers it, and here the test does.
+    const WHERE: &[u8] = b"\x1b[6n";
+
+    /// How a test writes a question to a shell.
+    #[derive(Clone, Copy)]
+    enum Syntax {
+        Posix,
+        PowerShell,
+    }
+
+    /// A shell started with shell integration, as a tab starts it, in a home folder of the
+    /// test's own.
+    struct Integrated {
+        session: Session,
+        output: Receiver<Output>,
+        /// Everything the shell has written.
+        text: Vec<u8>,
+        /// How many of the shell's questions about the cursor have been answered.
+        answered: usize,
+        /// How many `ready` reports the test has taken.
+        taken: usize,
+        nonce: String,
+        syntax: Syntax,
+    }
+
+    impl Integrated {
+        /// Starts `shell` in `home`, which is also its home folder, with `private` for the
+        /// integration's files. `change` changes the environment first.
+        fn start(
+            shell: Shell,
+            syntax: Syntax,
+            home: &Path,
+            private: &Path,
+            change: impl FnOnce(&mut CommandBuilder),
+        ) -> Self {
+            let mut start = start_with(None, Some(home.to_path_buf()));
+            start.shell = shell;
+            start.integration = true;
+            start.private = Some(private.to_path_buf());
+            let mut command = command(&start);
+            command.env("HOME", home);
+            command.env("PATH", "/usr/bin:/bin:/usr/sbin:/sbin");
+            command.env_remove("ZDOTDIR");
+            command.env_remove("XDG_CONFIG_HOME");
+            // PowerShell keeps its caches and history there. They are not the user's
+            // configuration, and out of the home folder they leave it as it was.
+            command.env("XDG_CACHE_HOME", private.join("cache"));
+            command.env("XDG_DATA_HOME", private.join("data"));
+            change(&mut command);
+
+            let reports = integrate(&start, &mut command);
+            let nonce = reports.clone().expect("the shell has shell integration");
+            let (sink, output) = sink(64);
+            let session =
+                spawn(&start.shell, command, start.size, reports, sink).expect("the shell starts");
+            Self {
+                session,
+                output,
+                text: Vec::new(),
+                answered: 0,
+                taken: 0,
+                nonce,
+                syntax,
+            }
+        }
+
+        /// Reads what the shell writes until `done` holds, and answers its questions about
+        /// the cursor on the way.
+        fn read_until(&mut self, what: &str, done: impl Fn(&Self) -> bool) {
+            while !done(self) {
+                match self.output.recv_timeout(PATIENCE) {
+                    Ok(Output::Bytes(bytes)) => self.take(bytes),
+                    other => panic!(
+                        "waiting for {what}, got {other:?} after {:?}",
+                        String::from_utf8_lossy(&self.text)
+                    ),
+                }
+            }
+        }
+
+        /// Keeps what the shell wrote, and answers its questions about the cursor.
+        fn take(&mut self, bytes: Vec<u8>) {
+            self.text.extend(bytes);
+            let asked = self
+                .text
+                .windows(WHERE.len())
+                .filter(|window| *window == WHERE)
+                .count();
+            for _ in self.answered..asked {
+                self.session.write(b"\x1b[1;1R".to_vec());
+            }
+            self.answered = asked;
+        }
+
+        fn reports(&self) -> Vec<Report> {
+            reports(&self.text, &self.nonce)
+        }
+
+        /// The reports after the last `ready` taken, up to and with the next.
+        fn next_ready(&mut self) -> Vec<Report> {
+            let taken = self.taken;
+            let readies = |reports: &[Report]| -> Vec<usize> {
+                (0..reports.len())
+                    .filter(|&i| reports[i].0 == "ready")
+                    .collect()
+            };
+            self.read_until("ready", |tab| readies(&tab.reports()).len() > taken);
+            self.taken += 1;
+            let reports = self.reports();
+            let at = readies(&reports);
+            let from = taken.checked_sub(1).map_or(0, |last| at[last] + 1);
+            let reports = reports[from..=at[taken]].to_vec();
+            for (key, value) in &reports {
+                assert_eq!(value.is_none(), key == "ready", "{key} {value:?}");
+            }
+            reports
+        }
+
+        /// Types `line`, then Enter.
+        fn type_line(&self, line: &str) {
+            self.session.write(format!("{line}\r").into_bytes());
+        }
+
+        /// What `expression` comes to in the shell, written in its syntax as it would be
+        /// inside double quotes. Takes the `ready` that follows.
+        fn ask(&mut self, expression: &str) -> String {
+            let from = self.text.len();
+            self.type_line(&match self.syntax {
+                Syntax::Posix => format!(r#"echo "<$((40 + 2))>{expression}</$((40 + 2))>""#),
+                Syntax::PowerShell => format!(r#""<$(40 + 2)>{expression}</$(40 + 2)>""#),
+            });
+            // What was typed is echoed, but only the shell can write 42.
+            let answer = |tab: &Self| {
+                let text = String::from_utf8_lossy(&tab.text[from..]).into_owned();
+                let start = text.find("<42>")? + "<42>".len();
+                let end = start + text[start..].find("</42>")?;
+                Some(text[start..end].to_string())
+            };
+            self.read_until(expression, |tab| answer(tab).is_some());
+            self.next_ready();
+            answer(self).unwrap()
+        }
+
+        /// Runs `line`, which fails, and checks that the user's own prompt shows that it did.
+        fn fails(&mut self, line: &str, prompt: &str) {
+            let from = self.text.len();
+            self.type_line(line);
+            self.next_ready();
+            self.read_until("the user's prompt", |tab| {
+                String::from_utf8_lossy(&tab.text[from..]).contains(prompt)
+            });
+        }
+
+        /// Ends the shell with `exit`, and returns how it ended.
+        fn exit(mut self) -> Exit {
+            self.type_line("exit 0");
+            loop {
+                match self.output.recv_timeout(PATIENCE).expect("the shell ends") {
+                    Output::Bytes(bytes) => self.take(bytes),
+                    Output::Exited(exit) => return exit.expect("the shell's exit status"),
+                }
+            }
+        }
+    }
+
+    /// The keys of `reports`, but the cmdlets, which PowerShell lists when it is idle.
+    fn keys(reports: &[Report]) -> Vec<&str> {
+        reports
+            .iter()
+            .map(|(key, _)| key.as_str())
+            .filter(|&key| key != "cmdlets")
+            .collect()
+    }
+
+    /// The value of the last `key` among `reports`.
+    fn value(reports: &[Report], key: &str) -> String {
+        reports
+            .iter()
+            .rev()
+            .find(|(found, _)| found == key)
+            .and_then(|(_, value)| value.clone())
+            .unwrap_or_else(|| panic!("no {key} report in {reports:?}"))
+    }
+
+    /// Every file under `folder`, with what it holds and when it last changed.
+    fn snapshot(folder: &Path) -> Vec<(PathBuf, Vec<u8>, std::time::SystemTime)> {
+        let mut files = Vec::new();
+        for entry in fs::read_dir(folder).unwrap() {
+            let path = entry.unwrap().path();
+            let metadata = fs::symlink_metadata(&path).unwrap();
+            if metadata.is_dir() {
+                files.extend(snapshot(&path));
+            } else {
+                files.push((
+                    path.clone(),
+                    fs::read(&path).unwrap(),
+                    metadata.modified().unwrap(),
+                ));
+            }
+        }
+        files.sort();
+        files
+    }
+
+    /// A home folder, and a folder in it whose name needs encoding in a report.
+    fn home() -> (Folder, PathBuf, PathBuf) {
+        let folder = Folder::new();
+        // Canonical, so the path the shell reports is the one the test expects, symbolic
+        // links or not.
+        let home = fs::canonicalize(&folder.0).unwrap();
+        let odd = home.join("a b;c%dé");
+        fs::create_dir(&odd).unwrap();
+        (folder, home, odd)
+    }
+
+    /// Writes the user's files in `home`: each `(name, text)`, in folders as the name says.
+    fn user_files(home: &Path, files: &[(&str, &str)]) {
+        for (name, text) in files {
+            let path = home.join(name);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, text).unwrap();
+        }
+    }
+
+    /// The user's zsh files. Each says it was read, and none saves history, so the shell
+    /// leaves the home folder as it was.
+    const ZSH_FILES: [(&str, &str); 4] = [
+        (".zshenv", "loaded+=(zshenv)\n"),
+        (".zprofile", "loaded+=(zprofile)\n"),
+        (
+            ".zshrc",
+            "loaded+=(zshrc)\n\
+             unset HISTFILE\n\
+             PROMPT='[user %?]%# '\n\
+             alias fixture-alias='echo fixture'\n\
+             fixture_function() { :; }\n\
+             user_precmd() { hooked=$(( hooked + 1 )); }\n\
+             precmd_functions+=(user_precmd)\n",
+        ),
+        (".zlogin", "loaded+=(zlogin)\n"),
+    ];
+
+    #[test]
+    fn zsh_reports_and_leaves_the_users_files_alone() {
+        let Some(zsh) = installed("zsh") else { return };
+        let (_folder, home, odd) = home();
+        let private = Folder::new();
+        user_files(&home, &ZSH_FILES);
+        let before = snapshot(&home);
+
+        // The default shell, as a login shell.
+        let mut tab = Integrated::start(
+            Shell::Default,
+            Syntax::Posix,
+            &home,
+            &private.0,
+            |command| {
+                command.env("SHELL", &zsh);
+                command.env("ODD_FOLDER", &odd);
+            },
+        );
+
+        // FISH-05: everything at the first prompt, then that it is ready.
+        let first = tab.next_ready();
+        assert_eq!(
+            keys(&first),
+            ["cwd", "path", "aliases", "functions", "ready"]
+        );
+        assert_eq!(value(&first, "cwd"), home.to_str().unwrap());
+        assert!(names(&value(&first, "aliases")).contains(&"fixture-alias"));
+        let functions = value(&first, "functions");
+        assert!(
+            names(&functions).contains(&"fixture_function"),
+            "{functions}"
+        );
+        assert!(!functions.contains("_twominal"), "{functions}");
+
+        // Then only what changed.
+        tab.type_line(r#"cd "$ODD_FOLDER" && alias twotest='echo hi'"#);
+        let second = tab.next_ready();
+        assert_eq!(keys(&second), ["cwd", "aliases", "ready"]);
+        assert_eq!(value(&second, "cwd"), odd.to_str().unwrap());
+        assert!(names(&value(&second, "aliases")).contains(&"twotest"));
+        assert_eq!(value(&first, "path"), tab.ask("$PATH"));
+
+        // FISH-04: the user's files are read as usual, in a login shell, with ZDOTDIR as the
+        // user left it. Their own prompt and hook still work, with $? as it was.
+        assert_eq!(tab.ask("${(j:,:)loaded}"), "zshenv,zprofile,zshrc,zlogin");
+        assert_eq!(tab.ask("$([[ -o login ]] && echo login)"), "login");
+        assert_eq!(tab.ask("${ZDOTDIR-unset}"), "unset");
+        assert_ne!(tab.ask("${hooked:-0}"), "0");
+        assert_eq!(tab.ask("$(env | grep -c '^twominal_')"), "0");
+        tab.fails("false", "[user 1]");
+
+        assert!(tab.exit().success());
+        assert_eq!(snapshot(&home), before, "the user's files are left alone");
+    }
+
+    #[test]
+    fn zsh_keeps_the_users_own_zdotdir() {
+        let Some(zsh) = installed("zsh") else { return };
+        let (_folder, home, _) = home();
+        let private = Folder::new();
+        let zdotdir = home.join(".config").join("zsh");
+        user_files(
+            &home,
+            &[
+                (".config/zsh/.zshenv", "loaded+=(zshenv)\n"),
+                (".config/zsh/.zshrc", "loaded+=(zshrc)\nunset HISTFILE\n"),
+            ],
+        );
+        let before = snapshot(&home);
+
+        let mut tab = Integrated::start(
+            Shell::Command(vec![zsh.to_str().unwrap().to_string()]),
+            Syntax::Posix,
+            &home,
+            &private.0,
+            |command| command.env("ZDOTDIR", &zdotdir),
+        );
+        tab.next_ready();
+        assert_eq!(tab.ask("${ZDOTDIR-unset}"), zdotdir.to_str().unwrap());
+        assert_eq!(tab.ask("${(j:,:)loaded}"), "zshenv,zshrc");
+        assert!(tab.exit().success());
+        assert_eq!(snapshot(&home), before);
+    }
+
+    /// The user's bash files, which say they were read, and save no history.
+    const BASH_FILES: [(&str, &str); 3] = [
+        (
+            ".bash_profile",
+            "loaded=\"${loaded}bash_profile,\"\n\
+             unset HISTFILE\n\
+             PS1='[user $?]\\$ '\n\
+             alias fixture-alias='echo fixture'\n\
+             fixture_function() { :; }\n\
+             PROMPT_COMMAND='hooked=$(( hooked + 1 ))'\n",
+        ),
+        (".bashrc", "loaded=\"${loaded}bashrc,\"\nunset HISTFILE\n"),
+        (".profile", "loaded=\"${loaded}profile,\"\n"),
+    ];
+
+    #[test]
+    fn bash_reports_and_leaves_the_users_files_alone() {
+        let Some(bash) = installed("bash") else {
+            return;
+        };
+        let (_folder, home, odd) = home();
+        let private = Folder::new();
+        user_files(&home, &BASH_FILES);
+        let before = snapshot(&home);
+
+        let mut tab = Integrated::start(
+            Shell::Default,
+            Syntax::Posix,
+            &home,
+            &private.0,
+            |command| {
+                command.env("SHELL", &bash);
+                command.env("ODD_FOLDER", &odd);
+            },
+        );
+
+        let first = tab.next_ready();
+        assert_eq!(
+            keys(&first),
+            ["cwd", "path", "aliases", "functions", "ready"]
+        );
+        assert_eq!(value(&first, "cwd"), home.to_str().unwrap());
+        assert!(names(&value(&first, "aliases")).contains(&"fixture-alias"));
+        let functions = value(&first, "functions");
+        assert!(
+            names(&functions).contains(&"fixture_function"),
+            "{functions}"
+        );
+        assert!(!functions.contains("_twominal"), "{functions}");
+
+        tab.type_line(r#"cd "$ODD_FOLDER" && alias twotest='echo hi'"#);
+        let second = tab.next_ready();
+        assert_eq!(keys(&second), ["cwd", "aliases", "ready"]);
+        assert_eq!(value(&second, "cwd"), odd.to_str().unwrap());
+        assert!(names(&value(&second, "aliases")).contains(&"twotest"));
+        assert_eq!(value(&first, "path"), tab.ask("$PATH"));
+
+        // A login shell's files, read in bash's own order: .bash_profile, and so not
+        // .bash_login, .profile or .bashrc.
+        assert_eq!(tab.ask("$loaded"), "bash_profile,");
+        assert_ne!(tab.ask("${hooked:-0}"), "0");
+        assert_eq!(tab.ask("$(env | grep -c '^twominal_')"), "0");
+        tab.fails("false", "[user 1]");
+
+        assert!(tab.exit().success());
+        assert_eq!(snapshot(&home), before, "the user's files are left alone");
+    }
+
+    #[test]
+    fn bash_that_is_not_a_login_shell_reads_bashrc() {
+        let Some(bash) = installed("bash") else {
+            return;
+        };
+        let (_folder, home, _) = home();
+        let private = Folder::new();
+        user_files(&home, &BASH_FILES);
+
+        let shell = Shell::Command(vec![bash.to_str().unwrap().to_string()]);
+        let mut tab = Integrated::start(shell, Syntax::Posix, &home, &private.0, |_| {});
+        tab.next_ready();
+        assert_eq!(tab.ask("$loaded"), "bashrc,");
+        assert!(tab.exit().success());
+    }
+
+    #[test]
+    fn powershell_reports_and_leaves_the_users_files_alone() {
+        let Some(pwsh) = installed("pwsh") else {
+            return;
+        };
+        let (_folder, home, odd) = home();
+        let private = Folder::new();
+        user_files(
+            &home,
+            &[(
+                ".config/powershell/Microsoft.PowerShell_profile.ps1",
+                "$global:loaded += @('profile')\n\
+                 Set-Alias fixture-alias Get-Date\n\
+                 function global:fixture_function {}\n\
+                 function global:prompt { \"[user $(if ($?) { 0 } else { 1 })]> \" }\n",
+            )],
+        );
+        let before = snapshot(&home);
+
+        let shell = Shell::Command(vec![pwsh.to_str().unwrap().to_string()]);
+        let mut tab = Integrated::start(shell, Syntax::PowerShell, &home, &private.0, |command| {
+            command.env("ODD_FOLDER", &odd);
+        });
+
+        let first = tab.next_ready();
+        assert_eq!(
+            keys(&first),
+            ["cwd", "path", "aliases", "functions", "ready"]
+        );
+        assert_eq!(value(&first, "cwd"), home.to_str().unwrap());
+        assert!(names(&value(&first, "aliases")).contains(&"fixture-alias"));
+        let functions = value(&first, "functions");
+        assert!(
+            names(&functions).contains(&"fixture_function"),
+            "{functions}"
+        );
+        assert!(!functions.contains("__twominal"), "{functions}");
+
+        // The cmdlets come once PowerShell is idle, so they never delay the first prompt.
+        assert!(!first.iter().any(|(key, _)| key == "cmdlets"));
+        tab.read_until("cmdlets", |tab| {
+            tab.reports().iter().any(|(key, _)| key == "cmdlets")
+        });
+        let cmdlets = value(&tab.reports(), "cmdlets");
+        assert!(names(&cmdlets).contains(&"Get-ChildItem"), "{cmdlets}");
+
+        tab.type_line("Set-Location -LiteralPath $env:ODD_FOLDER; Set-Alias twotest Get-Date");
+        let second = tab.next_ready();
+        assert_eq!(keys(&second), ["cwd", "aliases", "ready"]);
+        assert_eq!(value(&second, "cwd"), odd.to_str().unwrap());
+        assert!(names(&value(&second, "aliases")).contains(&"twotest"));
+        assert_eq!(value(&first, "path"), tab.ask("$env:PATH"));
+
+        assert_eq!(tab.ask("$($global:loaded -join ',')"), "profile");
+        assert_eq!(
+            tab.ask("$(@(Get-ChildItem Env: | Where-Object Name -like 'twominal*').Count)"),
+            "0"
+        );
+        tab.fails("Get-Item -LiteralPath /nowhere-at-all", "[user 1]> ");
+
+        assert!(tab.exit().success());
+        assert_eq!(snapshot(&home), before, "the user's files are left alone");
+    }
+
+    #[test]
+    fn with_integration_off_nothing_is_reported() {
+        let Some(zsh) = installed("zsh") else { return };
+        let (_folder, home, _) = home();
+        let private = Folder::new();
+        user_files(&home, &ZSH_FILES);
+
+        let mut start = start_with(Some(&[zsh.to_str().unwrap()]), Some(home.clone()));
+        start.private = Some(private.0.clone());
+        let mut command = command(&start);
+        command.env("HOME", &home);
+        command.env_remove("ZDOTDIR");
+        assert_eq!(integrate(&start, &mut command), None);
+        let (sink, output) = sink(16);
+        let session =
+            spawn(&start.shell, command, start.size, None, sink).expect("the shell starts");
+        assert_eq!(session.reports(), None);
+
+        // The user's files are still read.
+        session.write(b"echo \"<$((40 + 2))>${(j:,:)loaded}\"; exit\n".to_vec());
+        let (text, exit) = finish(&output);
+        assert!(text.contains("<42>zshenv,zshrc"), "{text:?}");
+        assert!(!text.contains("\x1b]2222;"), "{text:?}");
+        assert!(exit.success());
+    }
+
+    #[test]
+    fn sh_has_no_integration() {
+        let private = Folder::new();
+        let mut start = start_with(Some(&["/bin/sh"]), None);
+        start.integration = true;
+        start.private = Some(private.0.clone());
+        let mut command = command(&start);
+        assert_eq!(integrate(&start, &mut command), None);
+
+        let (sink, output) = sink(16);
+        let session =
+            spawn(&start.shell, command, start.size, None, sink).expect("the shell starts");
+        assert_eq!(session.reports(), None);
+        session.write(b"exit\n".to_vec());
+        let (text, _) = finish(&output);
+        assert!(!text.contains("\x1b]2222;"), "{text:?}");
     }
 }
