@@ -9,6 +9,6 @@ mod settings;
 mod tabs;
 mod theme;
 
-pub fn run() {
+pub fn run() -> std::process::ExitCode {
     app::run()
 }

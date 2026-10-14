@@ -1,6 +1,6 @@
 # Twominal — Design
 
-**Version:** 0.4 · **Date:** 2026-10-14 · **Tracks:** [SRS](SRS.md) v0.6
+**Version:** 0.5 · **Date:** 2026-10-14 · **Tracks:** [SRS](SRS.md) v0.6
 
 > The SRS says what Twominal must do. This document says how it is built: the technology choices the SRS leaves open (C-1) and where each component of SRS §6 lives. Requirement IDs such as `ARC-02` are the SRS's. Where the two disagree, the SRS wins and this document is corrected.
 
@@ -84,6 +84,7 @@ The table above and the dependency table in §2 are read by `src-tauri/tests/arc
 | Rust ⇄ webview | Tauri commands in; events and channels out | PERF-04, PERF-07 |
 | Settings file | TOML | SET-03, SET-04 |
 | Watching the settings file | One thread asks the OS for the file's modification time, four times a second. No watcher library | SET-04, ARC-06 |
+| Launcher hand-over | One Unix socket in a folder only the user can open, made with the standard library. No single-instance library | GEN-05, ARC-06, SEC-01 |
 | Animation | Web Animations API, started only by the Animator | ANIM-01 to ANIM-04, ARC-05 |
 | OS appearance | Tauri's window theme events | SW-03, THM-02 |
 | OS reduced motion | The `prefers-reduced-motion` media query | SW-04, ACC-01 |
@@ -114,6 +115,7 @@ The repository was reset to an empty Tauri v2 scaffold with a plain HTML fronten
 | A hand-written parser | `vte` is small, widely used and built for hostile input (REL-02) |
 | WebGL2 glyph atlas | Ligature shaping and font fallback become our code. Kept as the fallback in §9 |
 | One DOM element per row | Weakest on frame rate and on a pixel-exact grid (PERF-05, FONT-05) |
+| `tauri-plugin-single-instance` for the launcher | A dependency, and `zbus` with it on Linux. On macOS its socket is in the shared `/tmp` under a name anyone can guess. The second process starts Tauri before it hands over |
 
 ### Direct dependencies
 
@@ -140,7 +142,7 @@ Planned, and added by the issue that first needs each:
 
 ## 3. Components
 
-As of this version the Settings Store is built, and the App Shell opens windows, builds the native menus and gives the product its name and logo. Every other Rust home exists as a skeleton: types that say who owns what, and no behaviour. Of the webview homes only `src/app.js` exists. The others are created by their issues, at the paths in §1.
+As of this version the Settings Store is built, and the App Shell opens windows, builds the native menus, gives the product its name and logo and answers the `twominal` command. Every other Rust home exists as a skeleton: types that say who owns what, and no behaviour. Of the webview homes only `src/app.js` exists. The others are created by their issues, at the paths in §1.
 
 ### Tier 1: App Shell
 
@@ -156,7 +158,7 @@ As of this version the Settings Store is built, and the App Shell opens windows,
 
 - **Every window is alike.** There is no main window. A window's label is `window-1`, `window-2` and so on, and a label is never reused. The capability in `src-tauri/capabilities/default.json` names them all as `window-*`.
 - **The title** is the active tab's title, which the window's Tab Manager gives, or the product's name while no tab has one (GEN-04).
-- **A new window** (TAB-15) asked for from a menu is opened from a thread of its own, because on Windows the webview cannot be created from inside an event handler. On macOS it is placed a step down and right of the focused window. Elsewhere the OS places it.
+- **A new window** (TAB-15) asked for from a menu is opened from a thread of its own, because on Windows the webview cannot be created from inside an event handler. On macOS it is placed a step down and right of the focused window, or of the newest one when Twominal is not in front, as when the launcher asks. Elsewhere the OS places it.
 - **The last window.** On macOS Twominal keeps running with no window, and a click on its Dock icon opens one. On Linux and Windows closing the last window quits (TAB-07).
 - **The theme.** A theme chosen in the View menu is written through the Settings Store (THM-07). The App Shell hears that change as it hears any other, moves the check mark and gives every window the OS appearance the setting asks for: dark, light, or whatever the OS has. The palette is the Theme Manager's (#38).
 
@@ -174,6 +176,30 @@ The menus hold only what works. Each feature adds its own items (UI-05).
 - **On macOS** the menu bar belongs to the app. On Linux and Windows each window shows it.
 - **Off macOS no item takes a plain Ctrl+letter** (Appendix A). The OS's ready-made Edit items would take Ctrl+C from the shell, so there the Edit menu waits for #28.
 - **Off macOS, Close Window and Quit are Twominal's own items**, because Linux has no ready-made ones.
+
+#### Launcher
+
+The `twominal` command is the app's own executable (GEN-02, GEN-05). `src-tauri/src/app/launcher.rs` reads its arguments, and `src-tauri/src/app/socket.rs` hands a request to a Twominal that is already running.
+
+| Command | Does |
+|---|---|
+| `twominal` | Opens a new window. Its first tab starts in the home directory (FISH-01) |
+| `twominal DIRECTORY` | The same, with the first tab in that directory |
+| `twominal -h`, `--help` | Prints the usage |
+| `twominal -V`, `--version` | Prints the name and the version, the ones the About dialog shows |
+
+- **Arguments are read before Tauri starts.** So `--help`, `--version` and every problem need no display, and a command that hands over never shows a second Dock icon.
+- **The directory** is made absolute by the process that was given it, which knows what a relative path is relative to. No symbolic link is resolved, so the path stays as it was typed. With no directory the first tab starts in the home directory, not where the command was run. `twominal .` asks for that.
+- **A problem** is one line on the standard error, and no window opens. A path that is missing or not a directory ends with status 1. An option Twominal does not know, or a second directory, ends with status 2. `--` ends the options.
+- **One process.** If Twominal is running, the command hands it the directory and ends with status 0. The running Twominal opens the window and brings it to the front. If none is running, the command becomes the app and stays in the foreground, like any app started from a shell.
+- **The hand-over** is one Unix socket, made with the standard library (ARC-06). §7 says where it is.
+  - The folder must be one that only the user can open. With none, nothing is handed over and every command is its own process.
+  - Who is first is settled by a lock on a file beside the socket, held for as long as the process lives. The OS frees it when the process ends, however it ends. Only the holder removes an old socket and listens, so two commands started together cannot both become the app.
+  - The command sends one byte for the version of this exchange and then the directory, and waits for one byte back. The running Twominal opens the window only after that byte is sent, and a command that gets no answer in two seconds runs on its own. So one command opens one window.
+  - Only the directory travels. The window's shell gets the running Twominal's environment, not the caller's.
+  - A debug build has a socket of its own, so `cargo tauri dev` and an installed Twominal never answer for each other.
+- **The Tab Manager is given the directory** when the window is created, and starts the first tab there (#31).
+- **Not on Windows yet.** The standard library cannot listen on a named pipe, so there each command is its own process. A release build has no console there either, so `--help` prints nowhere. Both wait for the first Windows build.
 
 #### Identity
 
@@ -196,7 +222,7 @@ The menus hold only what works. Each feature adds its own items (UI-05).
 - **History Store.** Owns the shared command history and its file. It implements the history trait that the Command Line defines, and tabs hold it only as that trait (ARC-04). Must not store terminal output.
 - **Theme Manager.** Takes the Theme setting and the OS appearance, both passed in by the App Shell, and announces the palette. `src/theme.js` applies the announced palette to the page.
 - **Animator.** Lives in the webview, because that is where animations run and where the webview reports the OS reduced-motion setting. Views ask it to animate, and it decides how, or whether. Must not delay input or output.
-- **Tab Manager.** One per window. Holds a `tab::Handle` for each tab and nothing else, so it cannot reach into a tab's session or screen. `src/tabs.js` draws the tab bar.
+- **Tab Manager.** One per window. Of each tab it holds a `tab::Handle` and nothing else, so it cannot reach into a tab's session or screen. It is created with the directory its first tab starts in (FISH-01). `src/tabs.js` draws the tab bar.
 
 ### Tier 3: a tab
 
@@ -266,7 +292,7 @@ No plugin system, no scripting engine and no network component (ARC-06).
 
 - **Dependencies are closed.** A direct dependency that is not in the table in §2 fails the architecture test.
 - **The webview cannot go online.** The content security policy in `tauri.conf.json` allows the app's own files and the IPC scheme, and nothing else.
-- **Shipped builds listen on nothing.** The app's files are embedded and served to the webview through Tauri's own scheme. Only `cargo tauri dev` runs a local server, and that server is part of the Tauri CLI, not of Twominal.
+- **Shipped builds listen on no network port.** The app's files are embedded and served to the webview through Tauri's own scheme. Only `cargo tauri dev` runs a local server, and that server is part of the Tauri CLI, not of Twominal. The one thing Twominal listens on is the launcher's socket (§3): a file in a folder only the user can open, which no other machine can reach.
 - **Tauri brings network crates for phones only.** `Cargo.lock` lists `reqwest` and `hyper` because Tauri uses them on Android and iOS. They are not compiled for desktop: `cargo tree -i reqwest` prints nothing.
 
 ## 7. Files and formats
@@ -275,6 +301,7 @@ No plugin system, no scripting engine and no network component (ARC-06).
 |---|---|---|
 | Settings | `config.toml` in the OS configuration folder `twominal/`: `~/Library/Application Support` on macOS, `$XDG_CONFIG_HOME` or `~/.config` on Linux, `%APPDATA%` on Windows | TOML. One file (SET-03) |
 | Command history | `history` in the OS data folder `twominal/`: `~/Library/Application Support` on macOS, `$XDG_DATA_HOME` or `~/.local/share` on Linux, `%LOCALAPPDATA%` on Windows | Plain text, one command per line, a line break written as `\n` and a backslash as `\\`. Readable only by the user (SEC-02) |
+| Launcher socket and lock | `twominal.sock` and `twominal.lock`, in the user's own temporary folder on macOS and in `$XDG_RUNTIME_DIR` on Linux. A debug build's are `twominal-dev.sock` and `twominal-dev.lock` | One byte for the version of the exchange, then the directory's bytes. Neither file keeps anything |
 | Bundled font | `src/fonts/`, with its license (FONT-01) | The four JetBrains Mono styles |
 | Logo | `src/logo.svg`. The app icons in `src-tauri/icons/` are generated from it (GEN-03) | SVG, made of shapes only: no text, no style sheet, nothing loaded from elsewhere |
 | Shell integration | Inside the `tab` crate, as data of the Session | One script per shell, passed to the shell at startup. No user file is touched (FISH-04) |
@@ -334,7 +361,7 @@ Saving a setting changes only the keys whose value changed. Comments, the order 
 - **Architecture test**, `src-tauri/tests/architecture.rs`. It reads the two marked tables in this document and checks the code against them (§10).
 - **Identity test**, `src-tauri/tests/identity.rs`. It checks the product's name, that the code spells it only as `Twominal` or `twominal`, the lowercase identifiers, and that the logo stands alone (GEN-01 to GEN-03).
 - **Settings Store.** `src-tauri/src/settings/tests.rs` gives each test a configuration folder of its own, and covers loading, each kind of bad value, hand edits and saving (SET-02 to SET-05, AT-13). The store does not depend on Tauri, so it needs no window.
-- **App Shell.** `src-tauri/src/app/tests.rs` covers what needs no window: window titles and labels, what each menu item does, and the shortcut on each OS. The windows and menus themselves are checked by hand (MAINT-02).
+- **App Shell.** `src-tauri/src/app/tests.rs` covers what needs no window: window titles and labels, what each menu item does, the shortcut on each OS, and the launcher's arguments, texts and hand-over, in a folder of the test's own. `src-tauri/tests/launcher.rs` runs the executable for what it answers without starting Tauri (GEN-05). The windows and menus themselves, and a window the launcher asks for, are checked by hand (MAINT-02).
 - **Terminal Core.** A conformance suite that feeds byte streams and checks the screen (MAINT-03), and fuzz targets (REL-02). Both run with no window (ARC-03). #17.
 - **Tab tier.** The `tab` crate does not depend on Tauri, so the Command Line, key handling and the Renderer's choice of text runs are unit-tested without a window.
 - **Webview.** It has no logic of its own to unit-test. What it draws is checked by the acceptance scenarios (SRS §7) as documented manual tests (MAINT-02).

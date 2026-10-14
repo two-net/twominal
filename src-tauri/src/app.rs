@@ -15,13 +15,23 @@
 //! The product's name is read from Tauri, which has it from `tauri.conf.json` (GEN-01).
 //! DESIGN.md §3 says where the name, the identifiers and the logo are kept.
 //!
-//! Filled in by #12 (launcher) and #41 (splash).
+//! The `twominal` command is this executable. Its arguments are read in `app/launcher.rs`,
+//! before Tauri starts, and `app/socket.rs` hands a command to the Twominal that is already
+//! running (GEN-05).
+//!
+//! Filled in by #41 (splash).
 
+mod launcher;
 mod menu;
+#[cfg(unix)]
+mod socket;
 #[cfg(test)]
 mod tests;
 
+use std::env;
 use std::fmt::Display;
+use std::path::PathBuf;
+use std::process::ExitCode;
 use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::thread;
 
@@ -32,6 +42,7 @@ use crate::settings::{Change, Notice, SettingsStore, Theme};
 use crate::tabs::TabManager;
 use crate::theme::ThemeManager;
 
+use launcher::{Command, Start};
 use menu::{Action, Menus};
 
 /// Tells a page what is wrong with the configuration now: every notice, as text. An empty
@@ -112,12 +123,23 @@ fn appearance(theme: Theme) -> Option<tauri::Theme> {
     }
 }
 
-/// Opens a window, with a Tab Manager of its own (TAB-15).
-fn open_window(handle: &tauri::AppHandle) -> tauri::Result<()> {
+/// Opens a window, with a Tab Manager of its own (TAB-15). Its first tab starts in
+/// `directory`, or with none in the home directory (FISH-01).
+fn open_window(
+    handle: &tauri::AppHandle,
+    directory: Option<PathBuf>,
+) -> tauri::Result<tauri::WebviewWindow> {
     let app = handle.state::<App>();
+    let label = app.windows().next_label();
+    if cfg!(debug_assertions) {
+        match &directory {
+            Some(directory) => eprintln!("twominal: window {label} in {}", directory.display()),
+            None => eprintln!("twominal: window {label} in the home directory"),
+        }
+    }
     let window = Window {
-        label: app.windows().next_label(),
-        tabs: TabManager::new(),
+        label,
+        tabs: TabManager::new(directory),
     };
     let page = tauri::WebviewUrl::App("index.html".into());
     let mut builder = tauri::WebviewWindowBuilder::new(handle, &window.label, page)
@@ -128,20 +150,21 @@ fn open_window(handle: &tauri::AppHandle) -> tauri::Result<()> {
         builder = builder.position(x, y);
     }
     // The list is not locked while the window is built: building it sends events.
-    builder.build()?;
+    let built = builder.build()?;
     app.windows().open.push(window);
-    Ok(())
+    Ok(built)
 }
 
 /// Where a new window goes on macOS: a step down and right of the focused one, so that it
-/// does not hide it. Elsewhere, and with no window focused, the OS places it.
+/// does not hide it. When Twominal is not in front, as when the launcher asks, the step is
+/// from the newest window. Elsewhere, and with no window open, the OS places it.
 fn cascade(handle: &tauri::AppHandle) -> Option<(f64, f64)> {
     if !cfg!(target_os = "macos") {
         return None;
     }
-    let focused = focused(handle)?;
-    let scale = focused.scale_factor().ok()?;
-    let at = focused.outer_position().ok()?.to_logical::<f64>(scale);
+    let from = focused(handle).or_else(|| newest(handle))?;
+    let scale = from.scale_factor().ok()?;
+    let at = from.outer_position().ok()?.to_logical::<f64>(scale);
     Some((at.x + STEP, at.y + STEP))
 }
 
@@ -151,6 +174,19 @@ fn focused(handle: &tauri::AppHandle) -> Option<tauri::WebviewWindow> {
         .webview_windows()
         .into_values()
         .find(|window| window.is_focused().unwrap_or(false))
+}
+
+/// The window that was opened last and is still open.
+fn newest(handle: &tauri::AppHandle) -> Option<tauri::WebviewWindow> {
+    let label = handle.state::<App>().windows().open.last()?.label.clone();
+    handle.get_webview_window(&label)
+}
+
+/// The launcher asked for a window, from a command in another process (GEN-05).
+fn asked(handle: &tauri::AppHandle, directory: Option<PathBuf>) {
+    // Building a window puts it before Twominal's others. Twominal itself comes to the front
+    // only when the window is given the focus.
+    report(open_window(handle, directory).and_then(|window| window.set_focus()));
 }
 
 /// A window is gone, and its tabs with it.
@@ -163,7 +199,7 @@ fn closed(handle: &tauri::AppHandle, label: &str) {
 #[cfg(target_os = "macos")]
 fn reopened(handle: &tauri::AppHandle) {
     if handle.state::<App>().windows().open.is_empty() {
-        report(open_window(handle));
+        report(open_window(handle, None).map(drop));
     }
 }
 
@@ -179,7 +215,7 @@ fn menu_chosen(handle: &tauri::AppHandle, event: tauri::menu::MenuEvent) {
             let handle = handle.clone();
             let opening = thread::Builder::new()
                 .name("window".to_string())
-                .spawn(move || report(open_window(&handle)));
+                .spawn(move || report(open_window(&handle, None).map(drop)));
             report(opening.map(drop));
         }
         Action::CloseWindow => {
@@ -247,11 +283,38 @@ fn report<E: Display>(done: Result<(), E>) {
     }
 }
 
-pub fn run() {
+pub fn run() -> ExitCode {
+    let context = tauri::generate_context!();
+
+    // The launcher comes first. What it can answer by itself needs no Tauri, and a command
+    // that a running Twominal takes never becomes a second app.
+    let package = context.package_info();
+    let version = package.version.to_string();
+    let directory = match launcher::read(env::args_os().skip(1)) {
+        Ok(Command::Open(directory)) => directory,
+        Ok(Command::Help) => {
+            println!("{}", launcher::help(&package.name, &version));
+            return ExitCode::SUCCESS;
+        }
+        Ok(Command::Version) => {
+            println!("{}", launcher::version(&package.name, &version));
+            return ExitCode::SUCCESS;
+        }
+        Err(problem) => {
+            eprintln!("{}", problem.message());
+            return ExitCode::from(problem.status());
+        }
+    };
+    let claim = match launcher::start(directory.as_deref()) {
+        Start::HandedOver => return ExitCode::SUCCESS,
+        Start::First(claim) => Some(claim),
+        Start::Alone => None,
+    };
+
     tauri::Builder::default()
         // The menus are Twominal's own from the start.
         .enable_macos_default_menu(false)
-        .setup(|app| {
+        .setup(move |app| {
             let handle = app.handle().clone();
             let settings = SettingsStore::open(app.path().config_dir().ok(), {
                 let handle = handle.clone();
@@ -274,12 +337,17 @@ pub fn run() {
             });
             handle.set_menu(menu)?;
             handle.set_theme(appearance(theme));
-            open_window(&handle)?;
+            open_window(&handle, directory)?;
+            // Last, when everything a window needs is there. Commands that came sooner have
+            // waited at the socket.
+            if let Some(claim) = claim {
+                report(claim.serve(move |directory| asked(&handle, directory)));
+            }
             Ok(())
         })
         .on_menu_event(menu_chosen)
         .invoke_handler(tauri::generate_handler![app_ready])
-        .build(tauri::generate_context!())
+        .build(context)
         .expect("Twominal could not start")
         .run(|handle, event| match event {
             tauri::RunEvent::WindowEvent {
@@ -296,4 +364,5 @@ pub fn run() {
             tauri::RunEvent::Reopen { .. } => reopened(handle),
             _ => {}
         });
+    ExitCode::SUCCESS
 }

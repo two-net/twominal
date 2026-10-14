@@ -8,16 +8,25 @@
 //!
 //! Filled in by #31 (open, close, switch), #32 (closing), #33 (reordering) and #34 (titles).
 
+use std::path::PathBuf;
+
 /// The tabs of one window, in tab-bar order.
 pub struct TabManager {
     #[expect(dead_code, reason = "read by #31")]
     tabs: Vec<tab::Handle>,
+    /// Where the first tab starts. `None` is the home directory (FISH-01).
+    #[expect(dead_code, reason = "read by #31")]
+    directory: Option<PathBuf>,
 }
 
 impl TabManager {
-    /// A window's tabs before any is opened.
-    pub fn new() -> Self {
-        Self { tabs: Vec::new() }
+    /// A window's tabs before any is opened. The first one will start in `directory`: the one
+    /// given to the launcher, or with none the home directory (FISH-01).
+    pub fn new(directory: Option<PathBuf>) -> Self {
+        Self {
+            tabs: Vec::new(),
+            directory,
+        }
     }
 
     /// The active tab's title, for the window's title bar (GEN-04). No tab has a title
