@@ -1,0 +1,534 @@
+# Colors and text attributes: SGR (TERM-03 to TERM-05). Each expectation is what xterm's
+# CASE_SGR and parse_extended_colors do, but for the underline's styles and color, which are
+# kitty's, and the other deviations DESIGN.md §3 lists, which the comments name.
+
+## SGR 30 to 37 color the text with the palette's first eight colors
+size 8x1
+style a foreground 0
+style b foreground 1
+style c foreground 2
+style d foreground 3
+style e foreground 4
+style f foreground 5
+style g foreground 6
+style h foreground 7
+send \e[30ma\e[31mb\e[32mc\e[33md\e[34me\e[35mf\e[36mg\e[37mh
+styles
+|abcdefgh|
+
+## SGR 90 to 97 color the text with the palette's bright eight
+size 8x1
+style a foreground 8
+style b foreground 9
+style c foreground 10
+style d foreground 11
+style e foreground 12
+style f foreground 13
+style g foreground 14
+style h foreground 15
+send \e[90ma\e[91mb\e[92mc\e[93md\e[94me\e[95mf\e[96mg\e[97mh
+styles
+|abcdefgh|
+
+## SGR 40 to 47 color the background with the palette's first eight colors
+size 8x1
+style a background 0
+style b background 1
+style c background 2
+style d background 3
+style e background 4
+style f background 5
+style g background 6
+style h background 7
+send \e[40ma\e[41mb\e[42mc\e[43md\e[44me\e[45mf\e[46mg\e[47mh
+styles
+|abcdefgh|
+
+## SGR 100 to 107 color the background with the palette's bright eight
+# xterm's AIX colors, which it is built with.
+size 8x1
+style a background 8
+style b background 9
+style c background 10
+style d background 11
+style e background 12
+style f background 13
+style g background 14
+style h background 15
+send \e[100ma\e[101mb\e[102mc\e[103md\e[104me\e[105mf\e[106mg\e[107mh
+styles
+|abcdefgh|
+
+## SGR 39 and 49 give back the default colors
+size 4x1
+style r foreground 1 background 2
+style f foreground 1
+send \e[31;42mx\e[49my\e[39mz
+styles
+|rf..|
+
+## SGR 38;5 and 48;5 take any color of the palette
+size 4x1
+style a foreground 9
+style b foreground 196
+style c background 16
+style d background 255
+send \e[38;5;9ma\e[38;5;196mb\e[39;48;5;16mc\e[48;5;255md
+styles
+|abcd|
+
+## A color of the palette can be written in sub-parameters
+# ctlseqs: CSI 38 : 5 : Ps m. xterm also takes the next parameter's: CSI 38 ; 5 : Ps m.
+size 3x1
+style a foreground 9
+style b background 200
+send \e[38:5:9ma\e[m\e[48:5:200mb\e[m\e[38;5:9mc
+styles
+|aba|
+
+## SGR 38;2 and 48;2 take a 24-bit color
+size 2x1
+style a foreground #ff8000
+style b foreground #ff8000 background #010203
+send \e[38;2;255;128;0ma\e[48;2;1;2;3mb
+styles
+|ab|
+
+## A 24-bit color can be written in sub-parameters, with or without the color space
+# ctlseqs: CSI 38 : 2 : Pi : Pr : Pg : Pb m, where Pi is the color space. xterm takes three
+# numbers alone as the color, and with four or more skips the first.
+size 5x1
+style a foreground #0a0b0c
+style b background #010203
+send \e[38:2:10:11:12ma\e[m\e[38:2::10:11:12mb\e[m\e[38:2:0:10:11:12mc\e[m\e[38;2:10:11:12md
+send \e[m\e[48:2::1:2:3me
+styles
+|aaaab|
+
+## A color with a number missing is ignored
+size 3x1
+send a\e[38;5mb\e[48;2;1;2mc
+styles
+|...|
+
+## A color out of range is ignored, and the parameters it takes are used up
+# xterm's parse_extended_colors takes them, whatever their values, before it checks them.
+size 3x1
+style b bold
+send \e[38;5;256;1ma\e[m\e[38;2;256;0;0;1mb\e[m\e[48:5:300;1mc
+styles
+|bbb|
+
+## A kind of color other than 2 and 5 uses up only itself
+# xterm takes the 7 as the kind, which needs no numbers, and the 1 is bold.
+size 1x1
+style b bold
+send \e[38;7;1mx
+styles
+|b|
+
+## A parameter with sub-parameters it does not take is ignored
+# xterm's CASE_SGR skips it: only 38 and 48 take sub-parameters there, and here 4 and 58 too.
+size 2x1
+style i italic
+send \e[1:2;3mx\e[m\e[31:1my
+styles
+|i.|
+
+## SGR 1, 2, 3, 4, 7, 8 and 9 turn on the attributes
+size 7x1
+style a bold
+style b dim
+style c italic
+style d underline single
+style e inverse
+style f hidden
+style g strikethrough
+send \e[1ma\e[m\e[2mb\e[m\e[3mc\e[m\e[4md\e[m\e[7me\e[m\e[8mf\e[m\e[9mg
+styles
+|abcdefg|
+
+## SGR 22, 23, 24, 27, 28 and 29 turn them off, 22 both bold and dim
+size 7x1
+style a bold dim italic underline single strikethrough inverse hidden
+style b italic underline single strikethrough inverse hidden
+style c underline single strikethrough inverse hidden
+style d strikethrough inverse hidden
+style e strikethrough hidden
+style f strikethrough
+send \e[1;2;3;4;7;8;9ma\e[22mb\e[23mc\e[24md\e[27me\e[28mf\e[29mg
+styles
+|abcdef.|
+
+## SGR 0 and SGR with no parameter give back the default style
+size 3x1
+style r bold underline single foreground 1 background 2 underline-color 3
+send \e[1;4;31;42;58;5;3ma\e[0mb\e[1;31m\e[mc
+styles
+|r..|
+
+## An empty parameter is 0
+size 2x1
+style i italic
+send \e[1;;3mx\e[1;mx
+styles
+|i.|
+
+## Several attributes and colors at once
+size 1x1
+style a bold italic underline single foreground 3 background 4
+send \e[1;3;4;33;44mx
+styles
+|a|
+
+## SGR 4 with a sub-parameter chooses the underline's style
+# kitty's, as DESIGN.md §3 says: xterm ignores SGR 4 with a sub-parameter.
+size 6x1
+style a underline single
+style b underline double
+style c underline curly
+style d underline dotted
+style e underline dashed
+send \e[4:0mx\e[4:1ma\e[4:2mb\e[4:3mc\e[4:4md\e[4:5me
+styles
+|.abcde|
+
+## SGR 21 underlines twice
+size 1x1
+style b underline double
+send \e[21mx
+styles
+|b|
+
+## An underline has one style, the last one set
+# Where xterm keeps 4 and 21 apart, as DESIGN.md §3 says.
+size 3x1
+style a underline single
+style b underline double
+style c underline curly
+send \e[21;4ma\e[4:3;21mb\e[4;4:3mc
+styles
+|abc|
+
+## An underline style kitty does not number changes nothing
+size 2x1
+style c underline curly
+send \e[4:3ma\e[4:9mb
+styles
+|cc|
+
+## SGR 24 ends any underline
+size 2x1
+style c underline curly
+send \e[4:3ma\e[24mb
+styles
+|c.|
+
+## SGR 4;3 is underlined and italic, not curly
+size 1x1
+style a italic underline single
+send \e[4;3mx
+styles
+|a|
+
+## SGR 58 colors the underline, written as 38 colors the text
+# kitty's, as DESIGN.md §3 says.
+size 5x1
+style a underline single underline-color 1
+style b underline single underline-color #010203
+send \e[4;58;5;1ma\e[58:5:1ma\e[58;2;1;2;3mb\e[58:2::1:2:3mb\e[58:2:1:2:3mb
+styles
+|aabbb|
+
+## SGR 58 alone does not underline, and SGR 59 gives the underline the text's color
+size 2x1
+style a underline-color 9
+style b underline single
+send \e[58;5;9ma\e[59;4mb
+styles
+|ab|
+
+## Blink is ignored
+# Output never animates (ANIM-05, ANIM-07), as DESIGN.md §3 says. xterm blinks.
+size 3x1
+style b bold
+send \e[5ma\e[6mb\e[1;25mc
+styles
+|..b|
+
+## SGR numbers not listed change nothing
+# Fonts, proportional spacing, frames, overlines and ideogram marks among them.
+size 1x1
+send \e[10;11;20;26;51;52;53;60;73;200mx
+styles
+|.|
+
+## The style goes on across lines, wraps and cursor moves
+size 3x3
+style r foreground 1
+send \e[31mabcd\r\ne\e[3;3Hf
+styles
+|rrr|
+|r..|
+|r.r|
+
+## Both cells of a wide character take its style
+size 4x1
+style r bold foreground 1
+send \e[1;31m日\e[mx
+screen
+|日x |
+styles
+|rr..|
+
+## A mark leaves the style of the character it joins
+size 2x1
+style r foreground 1
+send \e[31me\e[32m\xcc\x81
+styles
+|r.|
+
+## REP repeats the character in its style
+size 4x1
+style r underline single foreground 1
+send \e[4;31mx\e[2b
+styles
+|rrr.|
+
+## SUB shows its mark in the style in use
+size 1x1
+style r foreground 1
+send \e[31m\x1a
+styles
+|r|
+
+## A tab colors none of the cells it passes over
+size 10x1
+style b background 4
+send \e[44m\tx
+styles
+|........b.|
+
+## EL fills what it erases with the background in use
+# xterm's ClearCells blanks in the colors in use, and xterm-256color tells programs so (bce).
+size 4x3
+style b background 4
+send abcd\r\nefgh\r\nijkl\e[2;2H\e[44m\e[K
+screen
+|abcd|
+|e   |
+|ijkl|
+styles
+|....|
+|.bbb|
+|....|
+
+## EL 1 and EL 2 fill with it too
+size 4x2
+style b background 4
+send abcd\r\nefgh\e[1;2H\e[44m\e[1K\e[2;3H\e[2K
+styles
+|bb..|
+|bbbb|
+
+## Erasing keeps the colors in use, but none of the attributes
+# xterm's ClearCells keeps FG_COLOR and BG_COLOR, and nothing else.
+size 4x1
+style r bold underline single inverse foreground 1 background 4
+style c foreground 1 background 4
+send \e[1;4;7;31;44mab\e[K
+styles
+|rrcc|
+
+## After SGR 49 a blank keeps only the foreground
+size 2x1
+style f foreground 1
+send \e[31;44mab\e[49m\e[1K
+styles
+|ff|
+
+## ED fills with the background in use, below, above and all of the screen
+size 4x3
+style b background 4
+style p background 5
+send abcd\r\nefgh\r\nijkl\e[2;2H\e[44m\e[J
+styles
+|....|
+|.bbb|
+|bbbb|
+send \e[1J
+styles
+|bbbb|
+|bbbb|
+|bbbb|
+send \e[45m\e[2J
+styles
+|pppp|
+|pppp|
+|pppp|
+
+## ECH fills with the background in use
+size 4x1
+style b background 4
+send abcd\e[1;2H\e[44m\e[2X
+styles
+|.bb.|
+
+## ICH inserts blanks in the background in use
+size 4x1
+style b background 4
+send abcd\e[1;2H\e[44m\e[2@
+screen
+|a  b|
+styles
+|.bb.|
+
+## DCH fills the end of the row with the background in use
+size 4x1
+style b background 4
+send abcd\e[1;2H\e[44m\e[2P
+screen
+|ad  |
+styles
+|..bb|
+
+## IL inserts rows in the background in use
+size 2x3
+style b background 4
+send ab\r\ncd\r\nef\e[2H\e[44m\e[L
+screen
+|ab|
+|  |
+|cd|
+styles
+|..|
+|bb|
+|..|
+
+## DL brings rows in at the bottom in the background in use
+size 2x3
+style b background 4
+send ab\r\ncd\r\nef\e[2H\e[44m\e[M
+styles
+|..|
+|..|
+|bb|
+
+## SU and SD bring rows in in the background in use
+size 2x3
+style b background 4
+style p background 5
+send ab\r\ncd\r\nef\e[44m\e[S
+styles
+|..|
+|..|
+|bb|
+send \e[45m\e[2T
+styles
+|pp|
+|pp|
+|..|
+
+## A line feed on the bottom row brings a row in in the background in use
+size 2x2
+style b background 4
+send ab\r\ncd\e[44m\n
+screen
+|cd|
+|  |
+styles
+|..|
+|bb|
+
+## RI on the top row brings a row in in the background in use
+size 2x2
+style b background 4
+send ab\r\ncd\e[H\e[44m\eM
+screen
+|  |
+|ab|
+styles
+|bb|
+|..|
+
+## The alternate screen is cleared in the background in use
+size 2x2
+style b background 4
+send ab\e[44m\e[?1049h
+styles
+|bb|
+|bb|
+send \e[?1049l
+styles
+|..|
+|..|
+
+## Writing over half a wide character blanks the other half in the background in use
+size 4x1
+style b background 4
+send 日本\e[1;2H\e[44mx
+screen
+| x本|
+styles
+|bb..|
+
+## DECSC saves the style and DECRC gives it back
+size 3x1
+style r bold foreground 1
+send \e[1;31m\e7\e[mab\e8\e[2Cc
+styles
+|..r|
+
+## DECRC with nothing saved gives the default style
+size 2x1
+send \e[1;31m\e8x
+styles
+|..|
+
+## Mode 1048 saves and restores the style as DECSC and DECRC do
+size 2x1
+style r foreground 1
+send \e[31m\e[?1048h\e[mx\e[?1048l\e[Cy
+styles
+|.r|
+
+## Mode 1049 gives back the style it saved
+size 2x2
+style r foreground 1
+send \e[31m\e[?1049h\e[32mx\e[?1049ly
+styles
+|r.|
+|..|
+
+## The style stays when the screen switches without saving
+# Mode 47 saves nothing, and there is one style for both screens, as in xterm.
+size 2x1
+style r foreground 1
+send \e[31m\e[?47hx\e[?47ly
+styles
+|.r|
+
+## DECSTR gives back the default style and leaves the screen's
+# The VT510 resets the whole rendition. xterm's DECSTR leaves dim, crossed-out and
+# double-underlined text on, as DESIGN.md §3 says.
+size 2x1
+style r dim underline double strikethrough foreground 1 background 2
+send \e[2;9;21;31;42mx\e[!py
+styles
+|r.|
+
+## RIS gives back the default style
+size 2x1
+send \e[1;31;44m\e[2Jx\ecy
+styles
+|..|
+
+## DECALN fills with E in the default style, and the style in use keeps only its colors
+# xterm's DECALN calls resetRendition, which keeps the colors, and fills without them.
+size 3x1
+style c foreground 1 background 4
+send \e[1;4;31;44mab\e#8\e[1;3Hx
+screen
+|EEx|
+styles
+|..c|

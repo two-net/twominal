@@ -4,12 +4,15 @@
 //! and this file does it. Every change to the rows goes through the methods here, so the
 //! Renderer can learn what changed (#22) and the scrollback can take the rows that scroll off
 //! (#26), each in one place. None of them leaves half a wide character: a change to one of its
-//! cells blanks both, as xterm does.
+//! cells blanks both, as xterm does. What a change blanks with is handed to it, because xterm
+//! blanks in the colors in use, and those are `terminal.rs`'s.
 
 use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
 use core::ops::Range;
+
+use crate::style::Style;
 
 /// How many zero-width characters a cell keeps, as xterm keeps by default (its
 /// `combiningChars`). More are dropped.
@@ -19,9 +22,9 @@ const MARKS: usize = 2;
 /// building it: `None` is not zero, and building it costs a call for each character printed.
 const NO_MARKS: [Option<char>; MARKS] = [None; MARKS];
 
-/// One cell of the grid: a character, and the zero-width characters joined to it, such as
-/// combining marks. A wide character takes two cells, and the second, its right half, holds
-/// nothing of its own. Until #19 a cell holds no colors or attributes.
+/// One cell of the grid: a character, the zero-width characters joined to it, such as
+/// combining marks, and the style it is drawn in. A wide character takes two cells, and the
+/// second, its right half, holds nothing of its own but the style.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Cell {
     char: char,
@@ -29,22 +32,32 @@ pub struct Cell {
     marks: [Option<char>; MARKS],
     /// 1, 2 for a wide character, or 0 for its right half.
     width: u8,
+    style: Style,
 }
 
 impl Cell {
-    /// What an erased cell holds.
-    pub(crate) const BLANK: Self = Self::new(' ', 1);
+    /// What a new screen holds, and the cells a resize adds.
+    pub(crate) const BLANK: Self = Self::blank(Style::PLAIN);
 
-    /// The right half of a wide character.
-    const RIGHT_HALF: Self = Self::new(' ', 0);
-
-    /// A cell holding `char`, which takes `width` cells: 1, or 2 for a wide character.
-    pub(crate) const fn new(char: char, width: usize) -> Self {
+    /// A cell holding `char` in `style`, which takes `width` cells: 1, or 2 for a wide
+    /// character.
+    pub(crate) const fn new(char: char, width: usize, style: Style) -> Self {
         Self {
             char,
             marks: NO_MARKS,
             width: width as u8,
+            style,
         }
+    }
+
+    /// An empty cell in `style`.
+    pub(crate) const fn blank(style: Style) -> Self {
+        Self::new(' ', 1, style)
+    }
+
+    /// The right half of a wide character drawn in `style`.
+    const fn right_half(style: Style) -> Self {
+        Self::new(' ', 0, style)
     }
 
     /// The cell's text: its character and the zero-width characters joined to it. A wide
@@ -58,6 +71,12 @@ impl Cell {
     /// the next cell, or 0 for that right half.
     pub fn width(&self) -> usize {
         usize::from(self.width)
+    }
+
+    /// The colors and attributes the cell is drawn in. A wide character's right half has the
+    /// character's.
+    pub fn style(&self) -> &Style {
+        &self.style
     }
 }
 
@@ -76,8 +95,8 @@ impl Row {
         }
     }
 
-    fn clear(&mut self) {
-        self.cells.fill(Cell::BLANK);
+    fn clear(&mut self, blank: Cell) {
+        self.cells.fill(blank);
         self.wrapped = false;
     }
 
@@ -96,11 +115,11 @@ impl Row {
         self.cells.iter().flat_map(Cell::chars).collect()
     }
 
-    /// Blanks the wide character that has a cell on each side of the boundary before `col`, if
-    /// there is one, before a change on one side would leave it in halves.
-    fn blank_across(&mut self, col: usize) {
+    /// Blanks with `blank` the wide character that has a cell on each side of the boundary
+    /// before `col`, if there is one, before a change on one side would leave it in halves.
+    fn blank_across(&mut self, col: usize, blank: Cell) {
         if self.cells.get(col).is_some_and(|cell| cell.width == 0) {
-            self.cells[col - 1..=col].fill(Cell::BLANK);
+            self.cells[col - 1..=col].fill(blank);
         }
     }
 }
@@ -124,16 +143,17 @@ impl Screen {
         &self.rows
     }
 
-    /// Writes `char` in `col` of `row`, taking `width` cells: 1, or 2 for a wide character,
-    /// whose right half is the next cell. Both must be in the row. A wide character written over
-    /// in part is blanked.
-    pub(crate) fn write(&mut self, row: usize, col: usize, char: char, width: usize) {
+    /// Writes `cell` in `col` of `row`, and the right half of a wide character in the next
+    /// cell. Both must be in the row. A wide character written over in part is blanked with
+    /// `blank`.
+    pub(crate) fn write(&mut self, row: usize, col: usize, cell: Cell, blank: Cell) {
         let row = &mut self.rows[row];
-        row.blank_across(col);
-        row.blank_across(col + width);
-        row.cells[col] = Cell::new(char, width);
+        let width = cell.width();
+        row.blank_across(col, blank);
+        row.blank_across(col + width, blank);
+        row.cells[col] = cell;
         if width == 2 {
-            row.cells[col + 1] = Cell::RIGHT_HALF;
+            row.cells[col + 1] = Cell::right_half(cell.style);
         }
     }
 
@@ -151,26 +171,26 @@ impl Screen {
         self.rows[row].wrapped = wrapped;
     }
 
-    /// Blanks the cells `cols` of `row`, and the whole of a wide character they hold half of.
-    /// Blanking to the end of the row ends any wrap there.
-    pub(crate) fn erase(&mut self, row: usize, cols: Range<usize>) {
+    /// Blanks with `blank` the cells `cols` of `row`, and the whole of a wide character they
+    /// hold half of. Blanking to the end of the row ends any wrap there.
+    pub(crate) fn erase(&mut self, row: usize, cols: Range<usize>, blank: Cell) {
         let row = &mut self.rows[row];
         let end = cols.end.min(row.cells.len());
         let start = cols.start.min(end);
         // The last cell may be the right half of a wide character the erase takes whole.
         let reach = end + usize::from(row.cells.get(end).is_some_and(|cell| cell.width == 0));
-        row.blank_across(start);
-        row.blank_across(end);
-        row.cells[start..end].fill(Cell::BLANK);
+        row.blank_across(start, blank);
+        row.blank_across(end, blank);
+        row.cells[start..end].fill(blank);
         if reach == row.cells.len() {
             row.wrapped = false;
         }
     }
 
-    /// Blanks every cell of `rows`.
-    pub(crate) fn erase_rows(&mut self, rows: Range<usize>) {
+    /// Blanks every cell of `rows` with `blank`.
+    pub(crate) fn erase_rows(&mut self, rows: Range<usize>, blank: Cell) {
         for row in &mut self.rows[rows] {
-            row.clear();
+            row.clear(blank);
         }
     }
 
@@ -182,64 +202,65 @@ impl Screen {
         }
     }
 
-    /// Moves the cells from `col` on `count` places right, blanking the cells they leave.
-    /// Cells pushed past the end of the row are lost, and so is a wide character pushed half
-    /// past it, or one `col` is the right half of.
-    pub(crate) fn insert_cells(&mut self, row: usize, col: usize, count: usize) {
+    /// Moves the cells from `col` on `count` places right, blanking with `blank` the cells
+    /// they leave. Cells pushed past the end of the row are lost, and so is a wide character
+    /// pushed half past it, or one `col` is the right half of.
+    pub(crate) fn insert_cells(&mut self, row: usize, col: usize, count: usize, blank: Cell) {
         let row = &mut self.rows[row];
         let count = count.min(row.cells.len() - col);
-        row.blank_across(col);
-        row.blank_across(row.cells.len() - count);
+        row.blank_across(col, blank);
+        row.blank_across(row.cells.len() - count, blank);
         let cells = &mut row.cells[col..];
         cells.rotate_right(count);
-        cells[..count].fill(Cell::BLANK);
+        cells[..count].fill(blank);
     }
 
     /// Removes `count` cells from `col` on, moving the rest left and blanking the end of the
-    /// row. A wide character with one half removed leaves a blank for the other. The line no
-    /// longer reaches the end of the row, so it no longer wraps.
-    pub(crate) fn delete_cells(&mut self, row: usize, col: usize, count: usize) {
+    /// row with `blank`. A wide character with one half removed leaves a blank for the other.
+    /// The line no longer reaches the end of the row, so it no longer wraps.
+    pub(crate) fn delete_cells(&mut self, row: usize, col: usize, count: usize, blank: Cell) {
         let row = &mut self.rows[row];
         let count = count.min(row.cells.len() - col);
-        row.blank_across(col);
-        row.blank_across(col + count);
+        row.blank_across(col, blank);
+        row.blank_across(col + count, blank);
         let cells = &mut row.cells[col..];
         cells.rotate_left(count);
         let kept = cells.len() - count;
-        cells[kept..].fill(Cell::BLANK);
+        cells[kept..].fill(blank);
         row.wrapped = false;
     }
 
-    /// Moves the rows of `region` up by `count`, with blank rows coming in at its bottom. The
-    /// rows that go past its top are lost. Each row keeps whether it wraps.
-    pub(crate) fn scroll_up(&mut self, region: Range<usize>, count: usize) {
+    /// Moves the rows of `region` up by `count`, with rows of `blank` coming in at its bottom.
+    /// The rows that go past its top are lost. Each row keeps whether it wraps.
+    pub(crate) fn scroll_up(&mut self, region: Range<usize>, count: usize, blank: Cell) {
         let rows = &mut self.rows[region];
         let count = count.min(rows.len());
         rows.rotate_left(count);
         let kept = rows.len() - count;
         for row in &mut rows[kept..] {
-            row.clear();
+            row.clear(blank);
         }
     }
 
-    /// Moves the rows of `region` down by `count`, with blank rows coming in at its top. The
-    /// rows that go past its bottom are lost.
-    pub(crate) fn scroll_down(&mut self, region: Range<usize>, count: usize) {
+    /// Moves the rows of `region` down by `count`, with rows of `blank` coming in at its top.
+    /// The rows that go past its bottom are lost.
+    pub(crate) fn scroll_down(&mut self, region: Range<usize>, count: usize, blank: Cell) {
         let rows = &mut self.rows[region];
         let count = count.min(rows.len());
         rows.rotate_right(count);
         for row in &mut rows[..count] {
-            row.clear();
+            row.clear(blank);
         }
     }
 
     /// Makes the screen `cols` wide and `rows` high, without reflowing (#26). Rows are cut or
-    /// padded with blanks, and a wide character cut in two is blanked. With fewer rows, rows go
+    /// padded with blanks, in the default style since no program asked for them, and a wide
+    /// character cut in two is blanked. With fewer rows, rows go
     /// from the top only as far as needed to keep row `keep` on the screen, and the rest from
     /// the bottom. Returns how many went from the top.
     pub(crate) fn resize(&mut self, cols: usize, rows: usize, keep: usize) -> usize {
         for row in &mut self.rows {
-            row.blank_across(cols);
+            row.blank_across(cols, Cell::BLANK);
             row.cells.resize(cols, Cell::BLANK);
         }
         let from_top = (keep + 1).saturating_sub(rows).min(self.rows.len());
@@ -248,7 +269,8 @@ impl Screen {
         from_top
     }
 
-    /// Panics if a row is not `cols` wide or holds half a wide character.
+    /// Panics if a row is not `cols` wide or holds half a wide character, or a right half
+    /// whose style is not its character's.
     #[cfg(any(test, fuzzing))]
     pub(crate) fn check(&self, cols: usize) {
         for row in &self.rows {
@@ -256,7 +278,10 @@ impl Screen {
             for (col, cell) in row.cells.iter().enumerate() {
                 let follows_wide = col > 0 && row.cells[col - 1].width == 2;
                 assert_eq!(cell.width == 0, follows_wide, "column {col} of {row:?}");
-                assert!(cell.width != 0 || *cell == Cell::RIGHT_HALF, "{row:?}");
+                assert!(
+                    cell.width != 0 || *cell == Cell::right_half(row.cells[col - 1].style),
+                    "{row:?}"
+                );
             }
             assert!(
                 row.cells.last().is_none_or(|cell| cell.width < 2),

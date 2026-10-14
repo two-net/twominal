@@ -1,7 +1,7 @@
 //! The Terminal Core's own rules, which the conformance suite in `tests/conformance/` cannot
 //! see through the public interface: internal state, the reports of the shell integration,
 //! resizing, the table of widths, and the same state however the output is cut (ARC-03,
-//! REL-02, FISH-05, PERF-06, TERM-02). What a program sees of the screen is checked there
+//! REL-02, FISH-05, PERF-06, TERM-02, TERM-03). What a program sees of the screen is checked there
 //! (MAINT-03).
 
 use alloc::string::{String, ToString};
@@ -10,7 +10,7 @@ use alloc::{format, vec};
 
 use crate::fuzz::{self, Random};
 use crate::width::width;
-use crate::{Event, Report, Size, TerminalCore};
+use crate::{Color, Event, Report, Size, TerminalCore};
 
 /// A terminal of `cols` × `rows` that has interpreted `bytes`.
 fn core(cols: u16, rows: u16, bytes: &[u8]) -> TerminalCore {
@@ -74,6 +74,8 @@ fn rep_is_the_character_printed_again() {
             // Below the region on the last row, and above it.
             b"\x1b[2;3r\x1b[5;7H",
             b"\x1b[3;4r\x1b[1;5H\x1b[4h",
+            // In a style, whose background the rows that scroll in take.
+            b"\x1b[1;4;38;5;9;44m",
             // On a wide character's right half.
             b"\x1b[H\xe6\x97\xa5\x1b[D",
         ] {
@@ -106,12 +108,13 @@ fn rep_is_the_character_printed_again() {
 
 #[test]
 fn ris_leaves_what_a_new_terminal_has() {
-    // The region, the tab stops, the character sets, the saved cursors and the other screen
-    // too, which `resets.txt` sees only in part.
+    // The region, the tab stops, the character sets, the style, the saved cursors and the
+    // other screen too, which `resets.txt` and `styles.txt` see only in part.
     let mut core = core(
         10,
         3,
-        b"text\x1b[2;3r\x1b[?25l\x1b[?2004h\x1b[?1000h\x1b[3g\x1b(0\x1b7\x1b[?1049hfull",
+        b"\x1b[1;4:3;38;5;9;48;2;1;2;3;58:5:4mtext\x1b[2;3r\x1b[?25l\x1b[?2004h\x1b[?1000h\x1b[3g\
+          \x1b(0\x1b7\x1b[?1049hfull",
     );
     core.interpret(b"\x1bc");
     assert!(core.terminal == self::core(10, 3, b"").terminal);
@@ -302,6 +305,24 @@ fn resizing_blanks_a_wide_character_it_cuts_in_two() {
 }
 
 #[test]
+fn resizing_pads_with_the_default_style() {
+    // The window changed the size, not the program, so what it adds or cuts has no colors.
+    let mut core = core(3, 1, "\x1b[44m\x1b[2Ja日".as_bytes());
+    core.resize(Size { cols: 4, rows: 2 });
+    let background = |core: &TerminalCore, row: usize, col: usize| {
+        core.screen().rows()[row].cells()[col].style().background
+    };
+    assert_eq!(background(&core, 0, 0), Color::Palette(4));
+    assert_eq!(background(&core, 0, 2), Color::Palette(4));
+    assert_eq!(background(&core, 0, 3), Color::Default);
+    assert_eq!(background(&core, 1, 0), Color::Default);
+    core.resize(Size { cols: 2, rows: 2 });
+    assert_eq!(rows(&core), ["a", ""]);
+    assert_eq!(background(&core, 0, 1), Color::Default);
+    core.terminal.check();
+}
+
+#[test]
 fn a_size_of_zero_is_one() {
     let mut core = TerminalCore::new(Size { cols: 0, rows: 0 }, None);
     assert_eq!(core.size(), Size { cols: 1, rows: 1 });
@@ -374,6 +395,13 @@ const PIECES: &[&[u8]] = &[
     b"6",
     b"9",
     b"25",
+    b"38;5;",
+    b"48;2;",
+    b"38:2::",
+    b"58:5:",
+    b"4:3",
+    b"255",
+    b"256",
     b"47",
     b"1049",
     b"1047",
@@ -464,7 +492,8 @@ fn hostile(random: &mut Random, length: usize) -> Vec<u8> {
 
 /// Output with a little of everything, to cut in pieces.
 const SAMPLE: &[u8] =
-    b"hello\r\n\x1b[31mred\x1b[m \xe2\x94\x80 caf\xc3\xa9 \xe6\x97\xa5\xe6\x9c\xac e\xcc\x81\xcc\x88\
+    b"hello\r\n\x1b[31mred\x1b[m \x1b[1;38;5;196;48:2::1:2:3;4:3;58;2;9;8;7mstyled\x1b[44m\x1b[K\
+                       \x1b[0m\r\n\xe2\x94\x80 caf\xc3\xa9 \xe6\x97\xa5\xe6\x9c\xac e\xcc\x81\xcc\x88\
                        \xf0\x9f\x91\xa8\xe2\x80\x8d\xf0\x9f\x91\xa9 \xe2\x80\x8b\xe6\x97\xa5\xc2\x85\x1b[2;5r\x1b[5H\n\n\n\
                        \x1b]2222;n1;cwd;/tmp\x07\x1b[?1049hfull\x1b[6n\x1b[?1049l\x1b(0lqk\x1b(Bz\
                        \x1b[3b\tx\x1b[c\x1b]2222;n1;ready\x07\xd0\xb9 \xd0\xbc\xf0\x9f\x98\x80!";

@@ -9,9 +9,9 @@
 //! these are never answered: the window title and icon label reports (`CSI 20 t`, `CSI 21 t`),
 //! the answerback to ENQ, and every device control string, DECRQSS and XTGETTCAP among them.
 //!
-//! Left to their own issues: SGR (#19), the cursor's shape (#25), the bell, titles and the
-//! other operating system commands (#27). The kitty keyboard protocol's `CSI ? u` is not
-//! answered, so programs know it is not there (#20).
+//! Left to their own issues: the cursor's shape (#25), the bell, titles and the other operating
+//! system commands (#27). The kitty keyboard protocol's `CSI ? u` is not answered, so programs
+//! know it is not there (#20).
 
 use alloc::format;
 
@@ -106,7 +106,7 @@ impl Perform for Terminal {
         if ignore {
             return;
         }
-        // Only SGR gives sub-parameters a meaning (#19).
+        // Only SGR gives sub-parameters a meaning.
         if action != 'm' && params.iter().any(|param| param.len() > 1) {
             return;
         }
@@ -163,6 +163,7 @@ impl Perform for Terminal {
                     }
                 }
             }
+            ([], 'm') => self.select_style(params.iter()),
             ([], 'n') => match arg(0) {
                 5 => self.reply(STATUS_OK.to_vec()),
                 6 => {

@@ -1,4 +1,4 @@
-//! Real programs, shown by the Terminal Core (TERM-01, TERM-06).
+//! Real programs, shown by the Terminal Core (TERM-01 to TERM-04, TERM-06).
 //!
 //! Each test starts a program on a pseudo-terminal through the Session, as a tab does, and
 //! passes what it writes to a Terminal Core, which answers its queries. The Tab will do that
@@ -19,7 +19,7 @@ use std::time::{Duration, Instant};
 use std::{env, fs};
 
 use tab::session::{Output, Session, Shell, Start};
-use terminal_core::{Event, Size, TerminalCore};
+use terminal_core::{Color, Event, Size, Style, TerminalCore, Underline};
 
 /// How long a test waits for a program before it fails.
 const PATIENCE: Duration = Duration::from_secs(10);
@@ -282,6 +282,64 @@ fn vim_puts_its_cursor_where_the_core_puts_wide_and_combined_text() {
 }
 
 #[test]
+fn vim_draws_in_the_colors_and_attributes_it_asks_for() {
+    let Some(vim) = installed("vim") else { return };
+    let home = Folder::new();
+    fs::write(home.0.join("notes.txt"), "alpha\nbeta\n").unwrap();
+    // 24-bit colors and attributes (TERM-03, TERM-04). vim paints the background by erasing,
+    // since xterm-256color says the terminal erases in the background in use (bce).
+    let mut vim = Terminal::run(
+        &home.0,
+        &vim,
+        &[
+            &vim,
+            "-u",
+            "NONE",
+            "-N",
+            "-n",
+            "-i",
+            "NONE",
+            "--cmd",
+            "set termguicolors",
+            "-c",
+            "highlight Normal guifg=#c0c0c0 guibg=#203040",
+            "-c",
+            "highlight NonText guifg=#ff8000 cterm=bold,italic,underline gui=bold,italic,underline",
+            "notes.txt",
+        ],
+        &[],
+    );
+    let normal = Style {
+        foreground: Color::Rgb(0xc0, 0xc0, 0xc0),
+        background: Color::Rgb(0x20, 0x30, 0x40),
+        ..Style::default()
+    };
+    let tilde = Style {
+        foreground: Color::Rgb(0xff, 0x80, 0x00),
+        bold: true,
+        italic: true,
+        underline: Underline::Single,
+        ..normal
+    };
+    vim.until("the file in its colors", |vim| {
+        let rows = vim.core.screen().rows();
+        let painted = rows.iter().all(|row| {
+            row.cells()
+                .iter()
+                .all(|cell| cell.style().background == normal.background)
+        });
+        vim.alternate()
+            && vim.rows()[..3] == ["alpha", "beta", "~"]
+            && painted
+            && *rows[0].cells()[0].style() == normal
+            && *rows[2].cells()[0].style() == tilde
+    });
+
+    vim.keys(":q!\r");
+    vim.until_exit();
+}
+
+#[test]
 fn less_pages_forward_and_back() {
     let Some(less) = installed("less") else {
         return;
@@ -379,6 +437,9 @@ fn git_log_pages_through_less_on_the_primary_screen() {
     });
     assert!(!log.alternate(), "{}", log.dump());
     assert!(log.rows()[0].starts_with("commit "), "{}", log.dump());
+    // git writes the commit's line in yellow, and less passes it through (TERM-03).
+    let commit = log.core.screen().rows()[0].cells()[0];
+    assert_eq!(commit.style().foreground, Color::Palette(3), "{commit:?}");
 
     log.keys("q");
     log.until_exit();

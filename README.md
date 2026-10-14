@@ -4,7 +4,7 @@ A desktop terminal with a fish-style command line built in. [SRS.md](SRS.md) say
 
 Twominal is a Tauri v2 app. One Rust process holds all state and logic, and one OS webview per window draws. The webview code is plain HTML and ES modules (no bundler, no Node dependencies).
 
-Version 1.0 is being built. So far the Settings Store works, the App Shell opens windows and builds the native menus, the product has its name and logo, the `twominal` command opens windows, the Session runs the user's shell on a pseudo-terminal with shell integration for zsh, bash and PowerShell, the Terminal Core interprets what it writes as xterm does, wide characters, combining marks and emoji included, and the other components exist as a skeleton. No window shows a shell yet: that comes with tabs.
+Version 1.0 is being built. So far the Settings Store works, the App Shell opens windows and builds the native menus, the product has its name and logo, the `twominal` command opens windows, the Session runs the user's shell on a pseudo-terminal with shell integration for zsh, bash and PowerShell, the Terminal Core interprets what it writes as xterm does, wide characters, combining marks, emoji, colors and text styles included, and the other components exist as a skeleton. No window shows a shell yet: that comes with tabs.
 
 ## Layout
 
@@ -39,7 +39,7 @@ The Terminal Core is fuzzed with cargo-fuzz, which needs the nightly toolchain. 
 rustup toolchain install nightly
 cargo install cargo-fuzz
 cd crates/terminal-core
-cargo +nightly fuzz run interpret -- -dict=fuzz/terminal.dict -timeout=5 -max_len=16384 -max_total_time=1800
+cargo +nightly fuzz run interpret -- -dict=fuzz/terminal.dict -timeout=5 -max_len=16384 -max_total_time=1800 -rss_limit_mb=4096
 cargo +nightly fuzz run split -s none -- -dict=fuzz/terminal.dict -timeout=5 -max_len=16384 -max_total_time=1800
 ```
 

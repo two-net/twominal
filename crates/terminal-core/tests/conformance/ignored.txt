@@ -1,14 +1,17 @@
 # What is ignored (REL-02): whatever DESIGN.md §3 does not list, as ECMA-48 asks. Each case
 # prints a before and the rest after, and nothing else may change.
 
-## SGR waits for colors and attributes
-# #19.
+## SGR with an intermediate is not SGR
+# xterm's modifyOtherKeys and its query, for #20.
 size 10x2
-send a\e[1;31mb\e[38:2::255:0:0mc\e[>4;1md\e[?4me\e[m
+send a\e[>4;1mb\e[?4mc
 screen
-|abcde     |
+|abc       |
 |          |
-cursor 1;6
+styles
+|..........|
+|..........|
+cursor 1;4
 
 ## The kitty keyboard protocol is not there
 # #20. Its query is not answered, so programs know.

@@ -1,14 +1,16 @@
 //! The terminal's state beside its rows: the cursor, the scrolling region, the tab stops, the
-//! character sets and the modes, and the operations of TERM-06 that use them.
+//! character sets, the style and the modes, and the operations of TERM-06 that use them.
 //!
 //! xterm is the model (TERM-01). There is one cursor, and it stays where it is when the screen
-//! switches. Each screen keeps a saved cursor of its own.
+//! switches. Each screen keeps a saved cursor of its own. There is one style too, which
+//! characters are printed in and whose colors every blank keeps.
 
 use alloc::vec::Vec;
 use core::mem;
 
 use crate::report::Report;
 use crate::screen::{Cell, Screen};
+use crate::style::Style;
 use crate::width::{discarded, width};
 use crate::{Event, Size};
 
@@ -222,6 +224,7 @@ struct Saved {
     pending: bool,
     origin: bool,
     charsets: Charsets,
+    style: Style,
 }
 
 /// Everything the Terminal Core knows but the parser's state. The parser drives it through
@@ -248,6 +251,8 @@ pub(crate) struct Terminal {
     /// Whether each column has a tab stop.
     tabs: Vec<bool>,
     charsets: Charsets,
+    /// What characters are printed in, as SGR last set it (TERM-03 to TERM-05).
+    style: Style,
     modes: Modes,
     autowrap: bool,
     /// Rows are counted from the top of the scrolling region, and the cursor stays inside it
@@ -282,6 +287,7 @@ impl Terminal {
             bottom: rows - 1,
             tabs: (0..cols).map(default_stop).collect(),
             charsets: Charsets::default(),
+            style: Style::PLAIN,
             modes: Modes::default(),
             autowrap: true,
             origin: false,
@@ -451,16 +457,18 @@ impl Terminal {
     /// In insert mode, moves the rest of the row right to make room for `count` characters.
     fn make_room(&mut self, count: usize) {
         if self.insert {
-            let (row, col) = (self.row, self.col);
-            self.screen_mut().insert_cells(row, col, count);
+            let (row, col, blank) = (self.row, self.col, self.blank());
+            self.screen_mut().insert_cells(row, col, count, blank);
         }
     }
 
-    /// Writes `char`, which takes `width` cells, under the cursor and moves it on: past the
-    /// character, or in the last column to a pending wrap. The cells must fit in the row.
+    /// Writes `char`, which takes `width` cells, under the cursor in the style in use, and
+    /// moves the cursor on: past the character, or in the last column to a pending wrap. The
+    /// cells must fit in the row.
     fn write(&mut self, char: char, width: usize) {
-        let (row, col) = (self.row, self.col);
-        self.screen_mut().write(row, col, char, width);
+        let (row, col, blank) = (self.row, self.col, self.blank());
+        let cell = Cell::new(char, width, self.style);
+        self.screen_mut().write(row, col, cell, blank);
         self.written = Some((row, col));
         if col + width < self.cols {
             self.col += width;
@@ -468,6 +476,12 @@ impl Terminal {
             self.col = self.cols - 1;
             self.pending = true;
         }
+    }
+
+    /// What a change blanks cells with: a space in the colors in use, without the attributes,
+    /// as xterm's `ClearCells` blanks them. `xterm-256color` tells programs so (`bce`).
+    fn blank(&self) -> Cell {
+        Cell::blank(self.style.colors())
     }
 
     /// xterm's `ResetWrap`: cancels a pending wrap, and from now on a zero-width character joins
@@ -643,17 +657,18 @@ impl Terminal {
     /// row included in the first two. The scrollback (3) is #26's.
     pub(crate) fn erase_display(&mut self, which: usize) {
         let (row, col, rows, cols) = (self.row, self.col, self.rows, self.cols);
+        let blank = self.blank();
         let screen = self.screen_mut();
         match which {
             0 => {
-                screen.erase(row, col..cols);
-                screen.erase_rows(row + 1..rows);
+                screen.erase(row, col..cols, blank);
+                screen.erase_rows(row + 1..rows, blank);
             }
             1 => {
-                screen.erase_rows(0..row);
-                screen.erase(row, 0..col + 1);
+                screen.erase_rows(0..row, blank);
+                screen.erase(row, 0..col + 1, blank);
             }
-            2 => screen.erase_rows(0..rows),
+            2 => screen.erase_rows(0..rows, blank),
             _ => return,
         }
         self.reset_wrap();
@@ -669,36 +684,38 @@ impl Terminal {
             2 => 0..cols,
             _ => return,
         };
-        self.screen_mut().erase(row, cols);
+        let blank = self.blank();
+        self.screen_mut().erase(row, cols, blank);
         self.reset_wrap();
     }
 
     /// ECH: erases `count` cells from the cursor on, without moving it.
     pub(crate) fn erase_chars(&mut self, count: usize) {
-        let (row, col) = (self.row, self.col);
-        self.screen_mut().erase(row, col..col.saturating_add(count));
+        let (row, col, blank) = (self.row, self.col, self.blank());
+        self.screen_mut()
+            .erase(row, col..col.saturating_add(count), blank);
         self.reset_wrap();
     }
 
     /// ICH.
     pub(crate) fn insert_chars(&mut self, count: usize) {
-        let (row, col) = (self.row, self.col);
-        self.screen_mut().insert_cells(row, col, count);
+        let (row, col, blank) = (self.row, self.col, self.blank());
+        self.screen_mut().insert_cells(row, col, count, blank);
         self.reset_wrap();
     }
 
     /// DCH.
     pub(crate) fn delete_chars(&mut self, count: usize) {
-        let (row, col) = (self.row, self.col);
-        self.screen_mut().delete_cells(row, col, count);
+        let (row, col, blank) = (self.row, self.col, self.blank());
+        self.screen_mut().delete_cells(row, col, count, blank);
         self.reset_wrap();
     }
 
     /// IL: rows pushed past the bottom of the scrolling region are lost. Only inside it.
     pub(crate) fn insert_lines(&mut self, count: usize) {
         if self.inside_region() {
-            let region = self.row..self.bottom + 1;
-            self.screen_mut().scroll_down(region, count);
+            let (region, blank) = (self.row..self.bottom + 1, self.blank());
+            self.screen_mut().scroll_down(region, count, blank);
             self.carriage_return();
         }
     }
@@ -706,22 +723,22 @@ impl Terminal {
     /// DL: rows come in blank at the bottom of the scrolling region. Only inside it.
     pub(crate) fn delete_lines(&mut self, count: usize) {
         if self.inside_region() {
-            let region = self.row..self.bottom + 1;
-            self.screen_mut().scroll_up(region, count);
+            let (region, blank) = (self.row..self.bottom + 1, self.blank());
+            self.screen_mut().scroll_up(region, count, blank);
             self.carriage_return();
         }
     }
 
     /// SU, and IND on the bottom row of the scrolling region.
     pub(crate) fn scroll_up(&mut self, count: usize) {
-        let region = self.top..self.bottom + 1;
-        self.screen_mut().scroll_up(region, count);
+        let (region, blank) = (self.top..self.bottom + 1, self.blank());
+        self.screen_mut().scroll_up(region, count, blank);
     }
 
     /// SD, and RI on the top row of the scrolling region.
     pub(crate) fn scroll_down(&mut self, count: usize) {
-        let region = self.top..self.bottom + 1;
-        self.screen_mut().scroll_down(region, count);
+        let (region, blank) = (self.top..self.bottom + 1, self.blank());
+        self.screen_mut().scroll_down(region, count, blank);
     }
 
     fn inside_region(&self) -> bool {
@@ -745,9 +762,11 @@ impl Terminal {
     }
 
     /// DECALN: fills the screen with `E`, for aligning a CRT. Seldom used but by tests. As in
-    /// xterm, the scrolling region becomes the whole screen and origin mode goes off.
+    /// xterm, the `E`s have the default style, the style in use keeps only its colors, the
+    /// scrolling region becomes the whole screen and origin mode goes off.
     pub(crate) fn align(&mut self) {
-        self.screen_mut().fill(Cell::new('E', 1));
+        self.screen_mut().fill(Cell::new('E', 1, Style::PLAIN));
+        self.style = self.style.colors();
         self.top = 0;
         self.bottom = self.rows - 1;
         self.origin = false;
@@ -767,11 +786,12 @@ impl Terminal {
             pending: self.pending,
             origin: self.origin,
             charsets: self.charsets,
+            style: self.style,
         });
     }
 
     /// DECRC, from the slot of the screen being shown. With nothing saved there, the cursor
-    /// goes home with ASCII and origin mode off.
+    /// goes home with ASCII, the default style and origin mode off.
     pub(crate) fn restore_cursor(&mut self) {
         let slot = self.modes.alternate_screen as usize;
         let saved = self.saved[slot].unwrap_or_default();
@@ -782,6 +802,7 @@ impl Terminal {
         self.pending = saved.pending && self.col == self.cols - 1;
         self.origin = saved.origin;
         self.charsets = saved.charsets;
+        self.style = saved.style;
     }
 
     // Character sets
@@ -794,6 +815,13 @@ impl Terminal {
     /// Prints in G0 to G3, by `which`: SI, SO, LS2 and LS3.
     pub(crate) fn shift(&mut self, which: usize) {
         self.charsets.used = which;
+    }
+
+    // The style
+
+    /// SGR, with the parameters and sub-parameters of each of `params`.
+    pub(crate) fn select_style<'a>(&mut self, params: impl IntoIterator<Item = &'a [u16]>) {
+        self.style.select(params);
     }
 
     // Modes
@@ -816,7 +844,8 @@ impl Terminal {
             Mode::Alternate => self.modes.alternate_screen = on,
             Mode::AlternateCleared => {
                 if !on && self.modes.alternate_screen {
-                    self.alternate.erase_rows(0..self.rows);
+                    let blank = self.blank();
+                    self.alternate.erase_rows(0..self.rows, blank);
                     // xterm clears it with ClearScreen, which starts with a ResetWrap.
                     self.reset_wrap();
                 }
@@ -827,7 +856,8 @@ impl Terminal {
             Mode::AlternateSaved if on => {
                 self.save_cursor();
                 self.modes.alternate_screen = true;
-                self.alternate.erase_rows(0..self.rows);
+                let blank = self.blank();
+                self.alternate.erase_rows(0..self.rows, blank);
                 self.reset_wrap();
             }
             Mode::AlternateSaved => {
@@ -882,7 +912,9 @@ impl Terminal {
 
     /// DECSTR, as xterm does it: the modes a program may have left behind go back to their
     /// defaults, autowrap included, but what is on the screen and where the cursor is stay.
-    /// The screen being shown forgets its saved cursor; the other keeps its own.
+    /// The screen being shown forgets its saved cursor; the other keeps its own. The style goes
+    /// back to the default whole, as the VT510's does, where xterm's leaves dim, crossed-out and
+    /// double-underlined text on.
     pub(crate) fn soft_reset(&mut self) {
         self.modes.cursor_visible = true;
         self.modes.application_cursor = false;
@@ -893,6 +925,7 @@ impl Terminal {
         self.top = 0;
         self.bottom = self.rows - 1;
         self.charsets = Charsets::default();
+        self.style = Style::PLAIN;
         self.saved[self.modes.alternate_screen as usize] = None;
     }
 

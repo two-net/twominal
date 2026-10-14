@@ -28,6 +28,8 @@ colon=":"
 p_big="65535"
 p_huge="99999999"
 p_many="1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1"
+p_256=";5;"
+p_rgb=";2;"
 
 # Modes
 m_alt47="?47h"
@@ -71,6 +73,14 @@ decxcpr="\x1b[?6n"
 rep="\x1b[3b"
 sgr="\x1b[1;31m"
 sgr_sub="\x1b[38:2::255:0:0m"
+sgr_reset="\x1b[m"
+sgr_256="\x1b[38;5;196m"
+sgr_256_sub="\x1b[48:5:16m"
+sgr_rgb="\x1b[48;2;1;2;3m"
+sgr_rgb_next="\x1b[38;2:1:2:3m"
+sgr_curly="\x1b[4:3m"
+sgr_underline_color="\x1b[58:2::1:2:3m"
+sgr_out_of_range="\x1b[38;5;256;1m"
 title="\x1b]0;title\x07"
 
 # Finals of CSI

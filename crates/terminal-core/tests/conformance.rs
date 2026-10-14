@@ -19,11 +19,23 @@
 //! cursor 2;2                                              counted from 1, as CUP counts
 //! reply \e[?62;22c                                        the next reply not yet checked
 //! mode bracketed_paste on                                 a field of `Modes`
+//! style r bold foreground 1                               `r` stands for this style below
+//! styles                                                  every row again, a letter for the
+//! |rr..|                                                  style of each cell
+//! |....|
+//! |....|
 //! ```
 //!
 //! A row is the text of its cells. A wide character takes two columns of it, as it does in a
 //! monospace font, and its right half adds nothing. A zero-width character is written after the
 //! character it joins, as it came: `e` and U+0301, not `é`.
+//!
+//! A row of styles has a letter for each cell, a wide character's right half included. `.` is
+//! the default style, and `a` to `z` the styles the case named before with `style`. A style is
+//! what it names and the default in the rest, in these words: `bold`, `dim`, `italic`,
+//! `underline` and one of `single`, `double`, `curly`, `dotted` and `dashed`, `strikethrough`,
+//! `inverse`, `hidden`, and `foreground`, `background` or `underline-color` and a color, which is
+//! a number of the palette from 0 to 255 or `#rrggbb`.
 //!
 //! `send` and `reply` take `\e`, `\a`, `\b`, `\t`, `\n`, `\r`, `\\` and `\xHH`; the rest is
 //! UTF-8 as written. No line may end in a space, so a trailing space is written `\x20`.
@@ -35,7 +47,7 @@ use std::collections::{BTreeSet, VecDeque};
 use std::fs;
 use std::path::Path;
 
-use terminal_core::{Event, Modes, MouseTracking, Size, TerminalCore};
+use terminal_core::{Color, Event, Modes, MouseTracking, Size, Style, TerminalCore, Underline};
 
 #[test]
 fn every_case_passes() {
@@ -86,6 +98,8 @@ struct Case {
     line: usize,
     name: String,
     size: Size,
+    /// The styles its letters stand for, as `style` named them.
+    letters: Vec<(char, Style)>,
     steps: Vec<Step>,
 }
 
@@ -97,6 +111,7 @@ struct Step {
 enum Kind {
     Send(Vec<u8>),
     Screen(Vec<Row>),
+    Styles(Vec<Vec<Style>>),
     Cursor(u16, u16),
     Reply(Vec<u8>),
     Mode(String, String),
@@ -144,6 +159,7 @@ fn parse(file: &str, text: &str, problems: &mut Vec<String>) -> Vec<Case> {
                 line,
                 name: name.to_string(),
                 size: Size { cols: 0, rows: 0 },
+                letters: Vec::new(),
                 steps: Vec::new(),
             });
             continue;
@@ -173,6 +189,13 @@ fn parse(file: &str, text: &str, problems: &mut Vec<String>) -> Vec<Case> {
                     continue;
                 }
                 None => Err(format!("{rest:?} is not a size such as 80x24")),
+            },
+            "style" => match parse_letter(rest, &current.letters) {
+                Ok(letter) => {
+                    current.letters.push(letter);
+                    continue;
+                }
+                Err(why) => Err(why),
             },
             "send" if rest.is_empty() => Err("`send` with nothing to send".to_string()),
             "send" => unescape(rest).map(Kind::Send),
@@ -204,6 +227,26 @@ fn parse(file: &str, text: &str, problems: &mut Vec<String>) -> Vec<Case> {
                     }
                 }
                 why.map_or(Ok(Kind::Screen(rows)), Err)
+            }
+            "styles" if rest.is_empty() => {
+                let mut rows = Vec::new();
+                let mut why = None;
+                for _ in 0..current.size.rows {
+                    match lines.next() {
+                        Some((at, row)) => {
+                            match parse_styles(row, current.size.cols, &current.letters) {
+                                Ok(row) => rows.push(row),
+                                Err(error) => {
+                                    why.get_or_insert(format!("row on line {at}: {error}"));
+                                }
+                            }
+                        }
+                        None => {
+                            why.get_or_insert("the file ends inside the styles".to_string());
+                        }
+                    }
+                }
+                why.map_or(Ok(Kind::Styles(rows)), Err)
             }
             _ => Err(format!("{keyword:?} is not something a case can say")),
         };
@@ -257,6 +300,143 @@ fn parse_row(text: &str) -> Result<Row, String> {
         }),
         None => Err(format!("{text:?} is not a row between two |")),
     }
+}
+
+/// The letter `style` names and the style it stands for, from `r bold foreground 1`. A letter
+/// is named once.
+fn parse_letter(text: &str, letters: &[(char, Style)]) -> Result<(char, Style), String> {
+    let (letter, words) = text.split_once(' ').unwrap_or((text, ""));
+    let mut chars = letter.chars();
+    let letter = match (chars.next(), chars.next()) {
+        (Some(letter @ 'a'..='z'), None) => letter,
+        _ => return Err(format!("{letter:?} is not a letter from a to z")),
+    };
+    if letters.iter().any(|(named, _)| *named == letter) {
+        return Err(format!("a second style named {letter}"));
+    }
+    Ok((letter, parse_style(words)?))
+}
+
+/// The style `text` says, in the words the start of this file lists.
+fn parse_style(text: &str) -> Result<Style, String> {
+    if text.is_empty() {
+        return Err("a style that names nothing; the default style is `.`".to_string());
+    }
+    let mut style = Style::default();
+    let mut words = text.split(' ');
+    while let Some(word) = words.next() {
+        match word {
+            "bold" => style.bold = true,
+            "dim" => style.dim = true,
+            "italic" => style.italic = true,
+            "strikethrough" => style.strikethrough = true,
+            "inverse" => style.inverse = true,
+            "hidden" => style.hidden = true,
+            "underline" => {
+                style.underline = match words.next() {
+                    Some("single") => Underline::Single,
+                    Some("double") => Underline::Double,
+                    Some("curly") => Underline::Curly,
+                    Some("dotted") => Underline::Dotted,
+                    Some("dashed") => Underline::Dashed,
+                    other => {
+                        return Err(format!(
+                            "underline {other:?} is not single, double, curly, dotted or dashed"
+                        ))
+                    }
+                }
+            }
+            "foreground" => style.foreground = parse_color(words.next())?,
+            "background" => style.background = parse_color(words.next())?,
+            "underline-color" => style.underline_color = parse_color(words.next())?,
+            _ => return Err(format!("{word:?} is not part of a style")),
+        }
+    }
+    Ok(style)
+}
+
+/// A color of the palette from 0 to 255, or `#rrggbb`.
+fn parse_color(text: Option<&str>) -> Result<Color, String> {
+    let color = text.and_then(|text| match text.strip_prefix('#') {
+        Some(hex) if hex.len() == 6 && hex.bytes().all(|byte| byte.is_ascii_hexdigit()) => {
+            let component = |at: usize| u8::from_str_radix(&hex[at..at + 2], 16).ok();
+            Some(Color::Rgb(component(0)?, component(2)?, component(4)?))
+        }
+        Some(_) => None,
+        None => text.parse().ok().map(Color::Palette),
+    });
+    color.ok_or(format!(
+        "{text:?} is not a color: a number from 0 to 255, or #rrggbb"
+    ))
+}
+
+/// A row of styles drawn as `|`, a letter for each of the `cols` cells, and `|`.
+fn parse_styles(text: &str, cols: u16, letters: &[(char, Style)]) -> Result<Vec<Style>, String> {
+    let inside = text
+        .strip_prefix('|')
+        .and_then(|inside| inside.strip_suffix('|'))
+        .ok_or(format!("{text:?} is not a row of styles between two |"))?;
+    let styles = inside
+        .chars()
+        .map(|letter| match letter {
+            '.' => Ok(Style::default()),
+            letter => letters
+                .iter()
+                .find(|(named, _)| *named == letter)
+                .map(|(_, style)| *style)
+                .ok_or(format!("{letter:?} is no style the case names")),
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    if styles.len() != usize::from(cols) {
+        return Err(format!("{} cells on a screen {cols} wide", styles.len()));
+    }
+    Ok(styles)
+}
+
+/// `style` in the words a case names it with: what it has but the default.
+fn describe(style: &Style) -> String {
+    let mut words: Vec<String> = Vec::new();
+    for (on, word) in [
+        (style.bold, "bold"),
+        (style.dim, "dim"),
+        (style.italic, "italic"),
+    ] {
+        if on {
+            words.push(word.to_string());
+        }
+    }
+    let underline = match style.underline {
+        Underline::None => None,
+        Underline::Single => Some("single"),
+        Underline::Double => Some("double"),
+        Underline::Curly => Some("curly"),
+        Underline::Dotted => Some("dotted"),
+        Underline::Dashed => Some("dashed"),
+    };
+    words.extend(underline.map(|underline| format!("underline {underline}")));
+    for (on, word) in [
+        (style.strikethrough, "strikethrough"),
+        (style.inverse, "inverse"),
+        (style.hidden, "hidden"),
+    ] {
+        if on {
+            words.push(word.to_string());
+        }
+    }
+    for (name, color) in [
+        ("foreground", style.foreground),
+        ("background", style.background),
+        ("underline-color", style.underline_color),
+    ] {
+        match color {
+            Color::Default => {}
+            Color::Palette(index) => words.push(format!("{name} {index}")),
+            Color::Rgb(red, green, blue) => {
+                words.push(format!("{name} #{red:02x}{green:02x}{blue:02x}"))
+            }
+        }
+    }
+    words.join(" ")
 }
 
 /// The bytes `text` stands for.
@@ -372,6 +552,16 @@ fn run(case: &Case, bytewise: bool) -> Vec<(usize, String)> {
                     ));
                 }
             }
+            Kind::Styles(expected) => {
+                let actual = styles(&core);
+                if &actual != expected {
+                    problem(format!(
+                        "the styles differ\nexpected\n{}\ngot\n{}",
+                        draw_styles(expected, &case.letters),
+                        draw_styles(&actual, &case.letters)
+                    ));
+                }
+            }
             Kind::Cursor(row, col) => {
                 let cursor = core.cursor();
                 let actual = (cursor.row + 1, cursor.col + 1);
@@ -420,6 +610,52 @@ fn screen(core: &TerminalCore) -> Vec<Row> {
             wrapped: row.wrapped(),
         })
         .collect()
+}
+
+fn styles(core: &TerminalCore) -> Vec<Vec<Style>> {
+    core.screen()
+        .rows()
+        .iter()
+        .map(|row| row.cells().iter().map(|cell| *cell.style()).collect())
+        .collect()
+}
+
+/// `rows` of styles as a case draws them, with the case's `letters`. Each style no letter
+/// stands for gets a capital, and is said in words after the rows.
+fn draw_styles(rows: &[Vec<Style>], letters: &[(char, Style)]) -> String {
+    let mut others: Vec<Style> = Vec::new();
+    let mut lines = Vec::new();
+    for row in rows {
+        let mut line = String::from("|");
+        for style in row {
+            let named = letters.iter().find(|(_, named)| named == style);
+            line.push(match named {
+                _ if *style == Style::default() => '.',
+                Some((letter, _)) => *letter,
+                None => {
+                    let at = others.iter().position(|other| other == style);
+                    capital(at.unwrap_or_else(|| {
+                        others.push(*style);
+                        others.len() - 1
+                    }))
+                }
+            });
+        }
+        line.push('|');
+        lines.push(line);
+    }
+    for (at, style) in others.iter().enumerate() {
+        lines.push(format!("{} is {}", capital(at), describe(style)));
+    }
+    lines.join("\n")
+}
+
+/// `A` for the first style no letter stands for, `B` for the second, and `?` past `Z`.
+fn capital(at: usize) -> char {
+    u8::try_from(at)
+        .ok()
+        .filter(|&at| at < 26)
+        .map_or('?', |at| char::from(b'A' + at))
 }
 
 /// `rows` as a case draws them.
@@ -474,6 +710,48 @@ fn escapes_read_back_as_written() {
 }
 
 #[test]
+fn styles_read_back_as_written() {
+    let style =
+        parse_style("bold underline curly foreground 1 background #0a0b0c underline-color 255")
+            .unwrap();
+    assert_eq!(
+        style,
+        Style {
+            bold: true,
+            underline: Underline::Curly,
+            foreground: Color::Palette(1),
+            background: Color::Rgb(10, 11, 12),
+            underline_color: Color::Palette(255),
+            ..Style::default()
+        }
+    );
+    for words in [
+        "bold dim italic underline single strikethrough inverse hidden",
+        "underline double",
+        "underline dotted",
+        "underline dashed foreground 0",
+        "foreground #ff8000 background 16 underline-color #000000",
+    ] {
+        let style = parse_style(words).unwrap();
+        assert_eq!(describe(&style), words);
+        assert_eq!(parse_style(&describe(&style)).unwrap(), style);
+    }
+    for bad in [
+        "",
+        "blink",
+        "underline",
+        "underline wavy",
+        "foreground",
+        "foreground 256",
+        "foreground #12345",
+        "foreground #12345g",
+        "background red",
+    ] {
+        assert!(parse_style(bad).is_err(), "{bad}");
+    }
+}
+
+#[test]
 fn rows_are_read_between_their_bars() {
     let row = parse_row("|a|b |>").unwrap();
     assert_eq!(row.text, "a|b ");
@@ -509,6 +787,24 @@ fn what_cannot_be_read_is_a_problem() {
             "is not a row between two |",
         ),
         ("## a\nsize 2x1\n", "checks nothing"),
+        ("## a\nsize 2x1\nstyle R bold\n", "is not a letter"),
+        ("## a\nsize 2x1\nstyle rr bold\n", "is not a letter"),
+        ("## a\nsize 2x1\nstyle r blink\n", "is not part of a style"),
+        ("## a\nsize 2x1\nstyle r\n", "names nothing"),
+        (
+            "## a\nsize 2x1\nstyle r bold\nstyle r dim\n",
+            "a second style named r",
+        ),
+        (
+            "## a\nsize 2x1\nstyles\n|.x|\n",
+            "is no style the case names",
+        ),
+        (
+            "## a\nsize 2x1\nstyles\n|...|\n",
+            "3 cells on a screen 2 wide",
+        ),
+        ("## a\nsize 2x2\nstyles\n|..|\n", "ends inside the styles"),
+        ("## a\nsize 2x1\nstyles\n..\n", "is not a row of styles"),
     ] {
         let mut problems = Vec::new();
         let cases = parse("f.txt", text, &mut problems);
@@ -535,6 +831,14 @@ fn a_case_fails_where_it_is_not_met() {
         "f.txt:8: a: expected mode newline on, got mode newline off",
     ];
     assert_eq!(problems, expected);
+
+    // Styles, with one no letter stands for.
+    let text = "## c\nsize 3x1\nstyle r foreground 1\nsend \\e[31ma\\e[1mb\nstyles\n|rr.|\n";
+    let cases = parse("f.txt", text, &mut Vec::new());
+    assert_eq!(
+        check("f.txt", &cases[0]),
+        ["f.txt:5: c: the styles differ\nexpected\n|rr.|\ngot\n|rA.|\nA is bold foreground 1"]
+    );
 
     // A reply no line checks.
     let cases = parse("f.txt", "## b\nsize 3x1\nsend \\e[5n\n", &mut Vec::new());
