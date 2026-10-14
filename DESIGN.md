@@ -1,6 +1,6 @@
 # Twominal — Design
 
-**Version:** 0.6 · **Date:** 2026-10-14 · **Tracks:** [SRS](SRS.md) v0.6
+**Version:** 0.7 · **Date:** 2026-10-14 · **Tracks:** [SRS](SRS.md) v0.6
 
 > The SRS says what Twominal must do. This document says how it is built: the technology choices the SRS leaves open (C-1) and where each component of SRS §6 lives. Requirement IDs such as `ARC-02` are the SRS's. Where the two disagree, the SRS wins and this document is corrected.
 
@@ -237,8 +237,17 @@ The `twominal` command is the app's own executable (GEN-02, GEN-05). `src-tauri/
 `crates/tab/src/session.rs` starts one shell on one pseudo-terminal, through `portable-pty`. The Tab gives it what to start, and a function to call with what the shell writes and with how it ended.
 
 - **What runs** is the Shell setting, the executable and its arguments as written. With the setting not set it is the user's default shell (SW-01):
-  - On macOS and Linux that is `$SHELL`, else the shell in the user's account entry, else `/bin/sh`. It starts as an interactive login shell, the way `login` starts one: with a `-` before its name, as in `-zsh`, so no argument has to be one that every shell understands.
+  - On macOS and Linux that is `$SHELL`. With `$SHELL` not set it is the shell in the user's account entry, else `/bin/sh`. It starts as an interactive login shell, the way `login` starts one: with a `-` before its name, as in `-zsh`, so no argument has to be one that every shell understands.
   - On Windows it is PowerShell 7 if `pwsh.exe` is on the `PATH`, and otherwise the Windows PowerShell that ships with Windows.
+  - The Shell setting may name any executable, with any arguments, fish included (FISH-03, FISH-08). Which shells get shell integration, and passthrough for the others, comes with #15.
+- **A shell that cannot start** (FISH-02) is not a session. `Session::start` returns why, as one sentence the Tab shows as it is, and another shell to offer:
+  - *Not found:* no file at the path given or, for a name with no folder in it, in no folder of the `PATH`. The sentence then names the folders and asks for the full path. An app opened from the macOS Dock has only `/usr/bin:/bin:/usr/sbin:/sbin`, which is the likeliest reason a shell installed elsewhere is missing.
+  - *Cannot run:* a folder, a file that is not executable, or else the OS's own reason.
+  - On macOS and Linux a `$SHELL` that cannot run is a shell that cannot start. portable-pty alone would put the account's shell or `/bin/sh` in its place without a word, so a user whose login shell was a fish they have since removed would get `sh` and no explanation. With `$SHELL` not set the default is the account's shell, as before.
+  - **The offer.** For the Shell setting, the default shell, or the OS's own shell when the default would not start either. For the default, the OS's own shell: on macOS and Linux the shell in the user's account entry, else `/bin/sh`, as a login shell; on Windows `cmd.exe`. For the OS's own shell, nothing, so the offers end.
+  - A pseudo-terminal or a thread that cannot be made is a different error, with nothing to offer: another shell would fare no better.
+  - A shell that starts and then exits with an error has started. Its exit is reported like any other (TAB-06, #32).
+  - The Tab shows the sentence as a notice over the terminal area (UI-02), with a button that opens the offered shell in the same tab. No other tab is touched. That comes with tabs (#31, #32).
 - **The environment** is Twominal's own, plus `TERM=xterm-256color`, `COLORTERM=truecolor`, `TERM_PROGRAM` and `TERM_PROGRAM_VERSION` (SW-02). The name and version are the ones the App Shell has from Tauri, handed down, so the name is still written once.
   - If none of `LC_ALL`, `LC_CTYPE` and `LANG` is set, which is usual for an app opened from the macOS Dock, the shell gets `LANG=C.UTF-8`: UTF-8, and nothing else changed from the defaults. A locale the user did set is kept, whatever it is.
   - On Windows ConPTY already carries UTF-8. Telling PowerShell to read and write UTF-8 is an instruction to the shell at startup, so it comes with the PowerShell integration (#15).
@@ -382,7 +391,7 @@ Saving a setting changes only the keys whose value changed. Comments, the order 
 - **Identity test**, `src-tauri/tests/identity.rs`. It checks the product's name, that the code spells it only as `Twominal` or `twominal`, the lowercase identifiers, and that the logo stands alone (GEN-01 to GEN-03).
 - **Settings Store.** `src-tauri/src/settings/tests.rs` gives each test a configuration folder of its own, and covers loading, each kind of bad value, hand edits and saving (SET-02 to SET-05, AT-13). The store does not depend on Tauri, so it needs no window.
 - **App Shell.** `src-tauri/src/app/tests.rs` covers what needs no window: window titles and labels, what each menu item does, the shortcut on each OS, and the launcher's arguments, texts and hand-over, in a folder of the test's own. `src-tauri/tests/launcher.rs` runs the executable for what it answers without starting Tauri (GEN-05). The windows and menus themselves, and a window the launcher asks for, are checked by hand (MAINT-02).
-- **Session.** `crates/tab/src/session/tests.rs` starts `/bin/sh` on real pseudo-terminals and checks the bytes both ways, the environment, the directory, the size, the exit status, closing, and an exit while a background program holds the terminal (SW-01, SW-02, FISH-01, TERM-15, SEC-03). These run on macOS and Linux. The choice of locale and of PowerShell, and the waiter's rule for when to report the exit, are tested on every OS, but no shell has yet been started on Windows.
+- **Session.** `crates/tab/src/session/tests.rs` starts `/bin/sh` on real pseudo-terminals and checks the bytes both ways, the environment, the directory, the size, the exit status, closing, and an exit while a background program holds the terminal (SW-01, SW-02, FISH-01, TERM-15, SEC-03). It also checks a shell that cannot start: a Shell setting that names no file while another session keeps working, a name missing from the `PATH`, a file that is not executable, and a `$SHELL` that has gone (FISH-02, AT-16). These run on macOS and Linux. The choice of locale and of PowerShell, the waiter's rule for when to report the exit, how a program is looked for and why it cannot run, the offers and their wording are tested on every OS, but no shell has yet been started on Windows.
 - **Terminal Core.** A conformance suite that feeds byte streams and checks the screen (MAINT-03), and fuzz targets (REL-02). Both run with no window (ARC-03). #17.
 - **Tab tier.** The `tab` crate does not depend on Tauri, so the Command Line, key handling and the Renderer's choice of text runs are unit-tested without a window.
 - **Webview.** It has no logic of its own to unit-test. What it draws is checked by the acceptance scenarios (SRS §7) as documented manual tests (MAINT-02).

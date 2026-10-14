@@ -1,5 +1,5 @@
-//! Tests of the Session (SW-01, SW-02, FISH-01, TERM-15, SEC-03). Those that start a shell
-//! run `/bin/sh` on a real pseudo-terminal, so they are for macOS and Linux.
+//! Tests of the Session (SW-01, SW-02, FISH-01, FISH-02, TERM-15, SEC-03). Those that start a
+//! shell run `/bin/sh` on a real pseudo-terminal, so they are for macOS and Linux.
 
 use std::fs;
 use std::sync::atomic::AtomicUsize;
@@ -97,6 +97,181 @@ fn the_exit_waits_for_the_last_output() {
     assert!(started.elapsed() >= GRACE, "{:?}", started.elapsed());
 }
 
+/// Makes the file at `path` executable, as a program must be on macOS and Linux.
+fn make_executable(path: &Path) {
+    fs::write(path, "").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+}
+
+#[test]
+fn the_shell_setting_names_the_shell() {
+    let words = vec!["/bin/zsh".to_string(), "-l".to_string()];
+    assert_eq!(Shell::from(Some(words.clone())), Shell::Command(words));
+    assert_eq!(Shell::from(None), Shell::Default);
+    assert_eq!(Shell::from(Some(Vec::new())), Shell::Default);
+}
+
+#[test]
+fn a_missing_program_is_not_found() {
+    let (first, second) = (Folder::new(), Folder::new());
+    let path = env::join_paths([&first.0, &second.0]).unwrap();
+    let problem = |program: &str| problem(OsStr::new(program), Some(&path), None, &first.0);
+    let not_found = |searched: &[&PathBuf]| Problem::NotFound {
+        searched: searched.iter().map(|folder| folder.to_path_buf()).collect(),
+    };
+
+    assert_eq!(problem("fish"), Some(not_found(&[&first.0, &second.0])));
+    // A path is looked for there, and nowhere else.
+    let missing = second.0.join("fish");
+    assert_eq!(problem(missing.to_str().unwrap()), Some(not_found(&[])));
+    assert_eq!(problem("bin/fish"), Some(not_found(&[])));
+    // With no `PATH` there is nowhere to look.
+    assert_eq!(
+        super::problem(OsStr::new("fish"), None, None, &first.0),
+        Some(not_found(&[]))
+    );
+}
+
+#[test]
+fn a_program_that_is_there_is_found() {
+    let (first, second) = (Folder::new(), Folder::new());
+    let path = env::join_paths([&first.0, &second.0]).unwrap();
+    let problem = |program: &str| problem(OsStr::new(program), Some(&path), None, &first.0);
+
+    make_executable(&second.0.join("fish"));
+    assert_eq!(problem("fish"), None);
+    let full = second.0.join("fish");
+    assert_eq!(problem(full.to_str().unwrap()), None);
+    // A relative path is relative to the shell's directory.
+    fs::create_dir(first.0.join("bin")).unwrap();
+    make_executable(&first.0.join("bin").join("zsh"));
+    assert_eq!(problem("bin/zsh"), None);
+    assert_eq!(problem("./bin/zsh"), None);
+}
+
+#[test]
+fn a_folder_cannot_run() {
+    let folder = Folder::new();
+    fs::create_dir(folder.0.join("fish")).unwrap();
+    let path = env::join_paths([&folder.0]).unwrap();
+    let cannot = Some(Problem::CannotRun("it is a folder".to_string()));
+
+    assert_eq!(
+        problem(OsStr::new("fish"), Some(&path), None, &folder.0),
+        cannot
+    );
+    let full = folder.0.join("fish");
+    assert_eq!(problem(full.as_os_str(), None, None, &folder.0), cannot);
+}
+
+#[cfg(unix)]
+#[test]
+fn a_file_that_is_not_executable_cannot_run() {
+    let (first, second) = (Folder::new(), Folder::new());
+    fs::write(first.0.join("fish"), "").unwrap();
+    let cannot = Some(Problem::CannotRun("it is not executable".to_string()));
+
+    let path = env::join_paths([&first.0]).unwrap();
+    assert_eq!(
+        problem(OsStr::new("fish"), Some(&path), None, &first.0),
+        cannot
+    );
+    let full = first.0.join("fish");
+    assert_eq!(problem(full.as_os_str(), None, None, &first.0), cannot);
+
+    // One that can run, further along `PATH`, is the one the OS starts.
+    make_executable(&second.0.join("fish"));
+    let path = env::join_paths([&first.0, &second.0]).unwrap();
+    assert_eq!(
+        problem(OsStr::new("fish"), Some(&path), None, &first.0),
+        None
+    );
+}
+
+#[test]
+fn windows_names_are_tried_with_each_extension() {
+    let names = |extensions: Option<&str>| {
+        super::names(OsStr::new("pwsh"), extensions.map(OsStr::new))
+            .map(|name| name.into_string().unwrap())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(names(None), ["pwsh"]);
+    assert_eq!(
+        names(Some(".COM;.EXE;;.BAT")),
+        ["pwsh", "pwsh.COM", "pwsh.EXE", "pwsh.BAT"]
+    );
+
+    let folder = Folder::new();
+    make_executable(&folder.0.join("pwsh.EXE"));
+    let path = env::join_paths([&folder.0]).unwrap();
+    let extensions = OsStr::new(".COM;.EXE");
+    let found = problem(OsStr::new("pwsh"), Some(&path), Some(extensions), &folder.0);
+    assert_eq!(found, None);
+}
+
+#[test]
+fn a_shell_that_did_not_start_offers_another() {
+    // The OS's own shell is the last, so the offers never go round in a circle.
+    assert_eq!(Shell::Fallback.instead(), None);
+
+    let offer = Shell::Default.instead().unwrap();
+    assert_eq!(offer.shell, Shell::Fallback);
+    assert_eq!(offer.program, program(&Shell::Fallback).get_shell());
+
+    // The Shell setting gives way to the default shell, unless that would not start either.
+    let offer = Shell::Command(vec!["fish".to_string()]).instead().unwrap();
+    if refused(&program(&Shell::Default)).is_none() {
+        assert_eq!(offer.shell, Shell::Default);
+        assert_eq!(offer.program, name(&program(&Shell::Default)));
+    } else {
+        assert_eq!(offer.shell, Shell::Fallback);
+    }
+}
+
+#[test]
+fn says_why_a_shell_did_not_start() {
+    let said = |program: &str, problem| {
+        NotStarted {
+            program: program.to_string(),
+            problem,
+            instead: None,
+        }
+        .to_string()
+    };
+    let not_found = |searched: &[&str]| Problem::NotFound {
+        searched: searched.iter().map(PathBuf::from).collect(),
+    };
+
+    assert_eq!(
+        said("/opt/homebrew/bin/fish", not_found(&[])),
+        "The shell /opt/homebrew/bin/fish was not found."
+    );
+    assert_eq!(
+        said(
+            "fish",
+            not_found(&["/usr/bin", "/bin", "/usr/sbin", "/sbin"])
+        ),
+        "The shell fish was not found in /usr/bin, /bin, /usr/sbin or /sbin. \
+         Write its full path in the Shell setting."
+    );
+    assert_eq!(
+        said("fish", not_found(&["/usr/bin", "/bin"])),
+        "The shell fish was not found in /usr/bin or /bin. Write its full path in the Shell setting."
+    );
+    assert_eq!(
+        said("fish", not_found(&["/usr/bin"])),
+        "The shell fish was not found in /usr/bin. Write its full path in the Shell setting."
+    );
+    assert_eq!(
+        said("/etc", Problem::CannotRun("it is a folder".to_string())),
+        "The shell /etc could not be started: it is a folder."
+    );
+}
+
 #[test]
 fn powershell_7_comes_first() {
     let (empty, with_pwsh) = (Folder::new(), Folder::new());
@@ -125,8 +300,9 @@ mod shells {
     };
 
     fn start_with(shell: Option<&[&str]>, directory: Option<PathBuf>) -> Start {
+        let words = shell.map(|words| words.iter().map(|word| word.to_string()).collect());
         Start {
-            shell: shell.map(|words| words.iter().map(|word| word.to_string()).collect()),
+            shell: Shell::from(words),
             directory,
             size: SIZE,
             name: "Twominal".to_string(),
@@ -147,7 +323,8 @@ mod shells {
     fn run_in(shell: &[&str], directory: Option<PathBuf>) -> (Session, Receiver<Output>) {
         let (sink, output) = sink(16);
         let start = start_with(Some(shell), directory);
-        let session = spawn(command(&start), start.size, sink).expect("the shell starts");
+        let session =
+            spawn(&start.shell, command(&start), start.size, sink).expect("the shell starts");
         (session, output)
     }
 
@@ -215,7 +392,7 @@ mod shells {
         // Whichever shell the user has, the test runs `sh`, which is the same everywhere.
         command.env("SHELL", "/bin/sh");
         let (sink, output) = sink(16);
-        let session = spawn(command, SIZE, sink).expect("the shell starts");
+        let session = spawn(&Shell::Default, command, SIZE, sink).expect("the shell starts");
         session.write(b"echo \"[$0]\"\n".to_vec());
         until(&output, "[-sh]");
     }
@@ -274,7 +451,8 @@ mod shells {
         let (sink, output) = sink(1);
         let script = "printf one; sleep 0.2; printf two; sleep 0.2; printf three";
         let start = start_with(Some(&["/bin/sh", "-c", script]), None);
-        let _session = spawn(command(&start), start.size, sink).expect("the shell starts");
+        let _session =
+            spawn(&start.shell, command(&start), start.size, sink).expect("the shell starts");
         thread::sleep(Duration::from_secs(1));
 
         let (text, exit) = finish(&output);
@@ -329,5 +507,112 @@ mod shells {
             "{:?}",
             closed.elapsed()
         );
+    }
+
+    /// Starts `command`, which runs `shell`, and returns why it did not start.
+    fn refusal(shell: &Shell, command: CommandBuilder) -> NotStarted {
+        let (sink, _output) = sink(16);
+        match spawn(shell, command, SIZE, sink) {
+            Err(Error::Shell(not_started)) => not_started,
+            Err(Error::Session(error)) => panic!("the session failed: {error}"),
+            Ok(_) => panic!("the shell started"),
+        }
+    }
+
+    #[test]
+    fn a_shell_setting_that_names_no_file_is_explained() {
+        // AT-16: the other tabs keep working.
+        let (other, output) = run(&["/bin/sh"]);
+
+        let folder = Folder::new();
+        let missing = folder.0.join("fish");
+        let start = start_with(Some(&[missing.to_str().unwrap(), "-l"]), None);
+        let refused = refusal(&start.shell, command(&start));
+        assert_eq!(refused.program, missing.to_str().unwrap());
+        assert_eq!(refused.problem, Problem::NotFound { searched: vec![] });
+        let offered = refused.instead.expect("another shell is offered").shell;
+        assert!(
+            matches!(offered, Shell::Default | Shell::Fallback),
+            "{offered:?}"
+        );
+
+        other.write(b"echo $((40 + 2))\n".to_vec());
+        until(&output, "42");
+    }
+
+    #[test]
+    fn says_where_a_shell_was_looked_for() {
+        let folder = Folder::new();
+        let start = start_with(Some(&["fish"]), None);
+        let mut command = command(&start);
+        command.env("PATH", &folder.0);
+        let refused = refusal(&start.shell, command);
+        assert_eq!(refused.program, "fish");
+        assert_eq!(
+            refused.problem,
+            Problem::NotFound {
+                searched: vec![folder.0.clone()]
+            }
+        );
+    }
+
+    #[test]
+    fn a_shell_that_cannot_run_is_explained() {
+        let folder = Folder::new();
+        let file = folder.0.join("fish");
+        fs::write(&file, "").unwrap();
+        let start = start_with(Some(&[file.to_str().unwrap()]), None);
+        let refused = refusal(&start.shell, command(&start));
+        assert_eq!(
+            refused.problem,
+            Problem::CannotRun("it is not executable".to_string())
+        );
+    }
+
+    #[test]
+    fn a_missing_default_shell_is_explained_not_replaced() {
+        // The user's login shell was a fish that has since been removed. portable-pty alone
+        // would start `/bin/sh` in its place, and say nothing.
+        let folder = Folder::new();
+        let missing = folder.0.join("fish");
+        let mut command = command(&start_with(None, None));
+        command.env("SHELL", &missing);
+        let refused = refusal(&Shell::Default, command);
+        assert_eq!(refused.program, missing.to_str().unwrap());
+        assert_eq!(refused.problem, Problem::NotFound { searched: vec![] });
+        let offer = refused.instead.expect("another shell is offered");
+        assert_eq!(offer.shell, Shell::Fallback);
+        assert!(Path::new(&offer.program).is_file(), "{}", offer.program);
+    }
+
+    #[test]
+    fn the_default_shell_is_checked_before_it_starts() {
+        let mut command = program(&Shell::Default);
+        command.env("SHELL", "/bin/sh");
+        assert_eq!(refused(&command), None);
+        command.env("SHELL", "");
+        assert_eq!(refused(&command), None);
+        command.env("SHELL", "/");
+        let folder = Some((
+            "/".to_string(),
+            Problem::CannotRun("it is a folder".to_string()),
+        ));
+        assert_eq!(refused(&command), folder);
+
+        // A shell the Shell setting names is started, and the OS says what is wrong with it.
+        let mut command = program(&Shell::Command(vec!["/bin/sh".to_string()]));
+        command.env("SHELL", "/");
+        assert_eq!(refused(&command), None);
+    }
+
+    #[test]
+    fn the_os_shell_is_a_login_shell_found_without_shell() {
+        // It is the account's own shell, which differs from machine to machine, so it is not
+        // started here.
+        let command = program(&Shell::Fallback);
+        assert!(command.is_default_prog());
+        assert_eq!(command.get_env("SHELL"), None);
+        assert!(Path::new(&command.get_shell()).is_file());
+        assert_eq!(refused(&command), None);
     }
 }

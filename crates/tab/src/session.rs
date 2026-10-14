@@ -11,20 +11,23 @@
 //! reader, a writer and a waiter. DESIGN.md §3 says what runs, with which environment, and
 //! when the end of a shell is reported.
 //!
-//! Filled in by #14 (other shells) and #15 (shell integration).
+//! A shell that cannot start is reported with why, and with another shell the tab can offer
+//! instead (FISH-02).
+//!
+//! Filled in by #15 (shell integration).
 
 #[cfg(test)]
 mod tests;
 
-use std::env;
-use std::ffi::OsStr;
+use std::ffi::{OsStr, OsString};
 use std::io::{self, Read, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::thread;
 use std::time::{Duration, Instant};
+use std::{env, fmt, fs, iter};
 
 use portable_pty::{native_pty_system, Child, ChildKiller, CommandBuilder, MasterPty, PtySize};
 use terminal_core::Size;
@@ -45,9 +48,8 @@ const GRACE: Duration = Duration::from_millis(100);
 
 /// What a session is started with. All of it comes from the layers above, through the Tab.
 pub struct Start {
-    /// The Shell setting: the executable and its arguments, or `None` for the user's default
-    /// shell (SW-01).
-    pub shell: Option<Vec<String>>,
+    /// The shell to run: the Shell setting, or a shell offered when one did not start.
+    pub shell: Shell,
     /// Where the shell starts, or `None` for the home directory (FISH-01).
     pub directory: Option<PathBuf>,
     /// The size of the terminal area.
@@ -56,6 +58,121 @@ pub struct Start {
     /// them as `TERM_PROGRAM` and `TERM_PROGRAM_VERSION` (SW-02).
     pub name: String,
     pub version: String,
+}
+
+/// Which shell a session runs.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Shell {
+    /// The user's default shell (SW-01).
+    Default,
+    /// The OS's own shell, offered when the default cannot start (FISH-02). On macOS and
+    /// Linux it is the shell in the user's account entry, else `/bin/sh`, started as a login
+    /// shell like the default. On Windows it is `cmd.exe`.
+    Fallback,
+    /// The Shell setting: the executable and its arguments, as written (FISH-03).
+    Command(Vec<String>),
+}
+
+impl From<Option<Vec<String>>> for Shell {
+    /// The Shell setting's value. Not set, or with no executable, it is the default shell.
+    fn from(setting: Option<Vec<String>>) -> Self {
+        match setting {
+            Some(words) if !words.is_empty() => Self::Command(words),
+            _ => Self::Default,
+        }
+    }
+}
+
+impl Shell {
+    /// The shell to offer when this one did not start (FISH-02). The Shell setting gives way
+    /// to the default shell, or to the OS's own when the default would not start either, and
+    /// the default to the OS's own. Nothing comes after the OS's own, so the offers never go
+    /// round in a circle.
+    fn instead(&self) -> Option<Offer> {
+        let shell = match self {
+            Self::Command(_) if refused(&program(&Self::Default)).is_none() => Self::Default,
+            Self::Command(_) | Self::Default => Self::Fallback,
+            Self::Fallback => return None,
+        };
+        let program = name(&program(&shell));
+        Some(Offer { shell, program })
+    }
+}
+
+/// Why a session did not start.
+#[derive(Debug)]
+pub enum Error {
+    /// The shell could not be started (FISH-02). Another shell may work.
+    Shell(NotStarted),
+    /// The pseudo-terminal or one of the session's threads could not be made. Another shell
+    /// would fare no better.
+    Session(io::Error),
+}
+
+impl From<io::Error> for Error {
+    fn from(error: io::Error) -> Self {
+        Self::Session(error)
+    }
+}
+
+/// A shell that could not be started, and what the tab can offer instead (FISH-02). Shown as
+/// it is written, it is one sentence that says what went wrong.
+#[derive(Debug)]
+pub struct NotStarted {
+    /// What was to run: the executable as the Shell setting writes it, or the default shell.
+    pub program: String,
+    pub problem: Problem,
+    /// Another shell found on the system, or `None` when there is nothing left to offer.
+    pub instead: Option<Offer>,
+}
+
+/// What kept a shell from starting.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Problem {
+    /// There is no such program. `searched` holds the folders of `PATH` it was looked for in,
+    /// and is empty when the program was given as a path.
+    NotFound { searched: Vec<PathBuf> },
+    /// The program is there, but cannot run. Says why, in the OS's words when only the OS
+    /// knows.
+    CannotRun(String),
+}
+
+/// A shell the tab can offer to open instead of one that did not start (FISH-02).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Offer {
+    pub shell: Shell,
+    /// What it runs, to name it to the user.
+    pub program: String,
+}
+
+impl fmt::Display for NotStarted {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "The shell {} ", self.program)?;
+        match &self.problem {
+            Problem::NotFound { searched } if searched.is_empty() => write!(f, "was not found."),
+            // On macOS an app opened from the Dock has a short `PATH`, which is the likeliest
+            // reason for a shell to be missing.
+            Problem::NotFound { searched } => write!(
+                f,
+                "was not found in {}. Write its full path in the Shell setting.",
+                either(searched)
+            ),
+            Problem::CannotRun(why) => write!(f, "could not be started: {why}."),
+        }
+    }
+}
+
+/// `folders` as a list to choose from: `a`, `a or b`, `a, b or c`.
+fn either(folders: &[PathBuf]) -> String {
+    let names: Vec<_> = folders
+        .iter()
+        .map(|folder| folder.display().to_string())
+        .collect();
+    match names.split_last() {
+        Some((last, [])) => last.clone(),
+        Some((last, rest)) => format!("{} or {last}", rest.join(", ")),
+        None => String::new(),
+    }
 }
 
 /// What a session tells its tab.
@@ -112,11 +229,14 @@ impl Session {
     /// Starts the shell. `output` is called with what the shell writes and, last, with how it
     /// ended, from threads of the session's own. It may block: the reader then stops reading,
     /// and the shell waits (PERF-07).
+    ///
+    /// A shell that cannot start is an [`Error::Shell`], which says why and what to offer
+    /// instead (FISH-02).
     pub fn start(
         start: Start,
         output: impl Fn(Output) + Send + Sync + 'static,
-    ) -> io::Result<Self> {
-        spawn(command(&start), start.size, Arc::new(output))
+    ) -> Result<Self, Error> {
+        spawn(&start.shell, command(&start), start.size, Arc::new(output))
     }
 
     /// Passes `bytes` to the shell, without waiting for the shell to read them.
@@ -144,14 +264,7 @@ impl Drop for Session {
 
 /// What runs, where, and with which environment.
 fn command(start: &Start) -> CommandBuilder {
-    let mut command = match start.shell.as_deref().and_then(<[String]>::split_first) {
-        Some((program, arguments)) => {
-            let mut command = CommandBuilder::new(program);
-            command.args(arguments);
-            command
-        }
-        None => default_shell(),
-    };
+    let mut command = program(&start.shell);
 
     command.env("TERM", TERM);
     command.env("COLORTERM", "truecolor");
@@ -175,9 +288,26 @@ fn command(start: &Start) -> CommandBuilder {
     command
 }
 
+/// What runs for `shell`, before its environment and directory are set.
+fn program(shell: &Shell) -> CommandBuilder {
+    match shell {
+        Shell::Command(words) => match words.split_first() {
+            Some((program, arguments)) => {
+                let mut command = CommandBuilder::new(program);
+                command.args(arguments);
+                command
+            }
+            None => default_shell(),
+        },
+        Shell::Default => default_shell(),
+        Shell::Fallback => fallback_shell(),
+    }
+}
+
 /// The user's default shell (SW-01). portable-pty finds it: `$SHELL`, else the shell in the
-/// user's account entry, else `/bin/sh`. It starts it as a login shell, with a `-` before its
-/// name as `login` does, and with no command it is interactive.
+/// user's account entry, else `/bin/sh`. A `$SHELL` that cannot run is [`refused`] before
+/// that. It starts it as a login shell, with a `-` before its name as `login` does, and with
+/// no command it is interactive.
 #[cfg(not(windows))]
 fn default_shell() -> CommandBuilder {
     CommandBuilder::new_default_prog()
@@ -187,6 +317,147 @@ fn default_shell() -> CommandBuilder {
 #[cfg(windows)]
 fn default_shell() -> CommandBuilder {
     CommandBuilder::new(powershell(env::var_os("PATH").as_deref()))
+}
+
+/// The OS's own shell (FISH-02). portable-pty finds it as it finds the default shell, but
+/// without `$SHELL`: the shell in the user's account entry if it can run, else `/bin/sh`. It
+/// starts as a login shell too.
+#[cfg(not(windows))]
+fn fallback_shell() -> CommandBuilder {
+    let mut command = CommandBuilder::new_default_prog();
+    command.env_remove("SHELL");
+    command
+}
+
+/// What `%ComSpec%` names, else `cmd.exe`: portable-pty starts it when given no program.
+#[cfg(windows)]
+fn fallback_shell() -> CommandBuilder {
+    CommandBuilder::new_default_prog()
+}
+
+/// What `command` runs, as the user would name it.
+fn name(command: &CommandBuilder) -> String {
+    match command.get_argv().first() {
+        Some(program) => program.to_string_lossy().into_owned(),
+        None => command.get_shell(),
+    }
+}
+
+/// The program `command` would start as the default shell, and what is wrong with it, before
+/// it is started (FISH-02). When `$SHELL` names a shell that cannot run, portable-pty would
+/// start another in its place without a word. With `$SHELL` not set the default is the shell
+/// in the user's account entry, and that is not looked at here.
+#[cfg(not(windows))]
+fn refused(command: &CommandBuilder) -> Option<(String, Problem)> {
+    if !command.is_default_prog() {
+        return None;
+    }
+    let shell = command.get_env("SHELL").filter(|shell| !shell.is_empty())?;
+    let problem = problem_at(Path::new(shell))?;
+    Some((shell.to_string_lossy().into_owned(), problem))
+}
+
+/// Windows has no `$SHELL`. Its default shell is PowerShell, which is started as any program.
+#[cfg(windows)]
+fn refused(_command: &CommandBuilder) -> Option<(String, Problem)> {
+    None
+}
+
+/// What is wrong with the program `command` runs, as far as can be seen without running it.
+/// `None` when it looks as if it can run, and only the OS knows why it did not.
+fn problem_of(command: &CommandBuilder) -> Option<Problem> {
+    let program = command.get_argv().first()?;
+    // A relative path is relative to the shell's directory, which portable-pty chooses so.
+    let home = command.get_env(if cfg!(windows) { "USERPROFILE" } else { "HOME" });
+    let directory = command
+        .get_cwd()
+        .map(OsString::as_os_str)
+        .filter(|directory| Path::new(directory).is_dir())
+        .or(home)
+        .unwrap_or_default();
+    let extensions = if cfg!(windows) {
+        command.get_env("PATHEXT")
+    } else {
+        None
+    };
+    problem(
+        program,
+        command.get_env("PATH"),
+        extensions,
+        Path::new(directory),
+    )
+}
+
+/// What is wrong with `program`, or `None` when it looks as if it can run. A program with no
+/// folder in its name is looked for in each folder of `path`, as written and with each of
+/// `extensions` added (Windows' `PATHEXT`). Any other is a path, relative to `directory`.
+fn problem(
+    program: &OsStr,
+    path: Option<&OsStr>,
+    extensions: Option<&OsStr>,
+    directory: &Path,
+) -> Option<Problem> {
+    if Path::new(program).parent() != Some(Path::new("")) {
+        return problem_at(&directory.join(program));
+    }
+    let searched: Vec<PathBuf> = path.into_iter().flat_map(env::split_paths).collect();
+    let mut cannot = None;
+    for folder in &searched {
+        for name in names(program, extensions) {
+            match problem_at(&folder.join(name)) {
+                None => return None,
+                Some(Problem::NotFound { .. }) => {}
+                Some(problem) => {
+                    cannot.get_or_insert(problem);
+                }
+            }
+        }
+    }
+    Some(cannot.unwrap_or(Problem::NotFound { searched }))
+}
+
+/// The names `program` is looked for by: as written, then with each of `extensions` added.
+/// They are separated by `;`, as in Windows' `PATHEXT`.
+fn names(program: &OsStr, extensions: Option<&OsStr>) -> impl Iterator<Item = OsString> {
+    let extensions = extensions.map(OsStr::to_string_lossy).unwrap_or_default();
+    let added: Vec<OsString> = extensions
+        .split(';')
+        .filter(|extension| !extension.is_empty())
+        .map(|extension| {
+            let mut name = program.to_os_string();
+            name.push(extension);
+            name
+        })
+        .collect();
+    iter::once(program.to_os_string()).chain(added)
+}
+
+/// What is wrong with the file at `path` as a program, or `None` when it looks as if it can
+/// run.
+fn problem_at(path: &Path) -> Option<Problem> {
+    let why = match fs::metadata(path) {
+        Err(_) => {
+            return Some(Problem::NotFound {
+                searched: Vec::new(),
+            })
+        }
+        Ok(file) if file.is_dir() => "it is a folder",
+        Ok(file) if !executable(&file) => "it is not executable",
+        Ok(_) => return None,
+    };
+    Some(Problem::CannotRun(why.to_string()))
+}
+
+#[cfg(unix)]
+fn executable(file: &fs::Metadata) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    file.permissions().mode() & 0o111 != 0
+}
+
+/// Windows runs a file by the extension of its name, not by a permission.
+#[cfg(not(unix))]
+fn executable(_file: &fs::Metadata) -> bool {
+    true
 }
 
 /// PowerShell 7 or later if `pwsh.exe` is on `path`, otherwise the Windows PowerShell that
@@ -222,17 +493,37 @@ fn pty_size(size: Size) -> PtySize {
     }
 }
 
-/// Starts `command` on a new pseudo-terminal of `size`, with the session's threads.
-fn spawn(command: CommandBuilder, size: Size, output: Sink) -> io::Result<Session> {
+/// Starts `command`, which runs `shell`, on a new pseudo-terminal of `size`, with the
+/// session's threads.
+fn spawn(
+    shell: &Shell,
+    command: CommandBuilder,
+    size: Size,
+    output: Sink,
+) -> Result<Session, Error> {
+    let not_started = |program, problem| {
+        Error::Shell(NotStarted {
+            program,
+            problem,
+            instead: shell.instead(),
+        })
+    };
+    if let Some((program, problem)) = refused(&command) {
+        return Err(not_started(program, problem));
+    }
+
     let pair = native_pty_system()
         .openpty(pty_size(size))
         .map_err(io::Error::other)?;
     let reader = pair.master.try_clone_reader().map_err(io::Error::other)?;
     let writer = pair.master.take_writer().map_err(io::Error::other)?;
-    let mut child = pair
-        .slave
-        .spawn_command(command)
-        .map_err(io::Error::other)?;
+    let mut child = match pair.slave.spawn_command(command.clone()) {
+        Ok(child) => child,
+        Err(error) => {
+            let problem = problem_of(&command).unwrap_or(Problem::CannotRun(error.to_string()));
+            return Err(not_started(name(&command), problem));
+        }
+    };
     // Now only the shell may hold the other end. While Twominal holds it too, the reader
     // never comes to the end of the output.
     drop(pair.slave);
@@ -251,7 +542,7 @@ fn spawn(command: CommandBuilder, size: Size, output: Sink) -> io::Result<Sessio
     if let Err(error) = started {
         let _ = child.kill();
         let _ = child.wait();
-        return Err(error);
+        return Err(error.into());
     }
 
     let mut killer = child.clone_killer();
@@ -264,7 +555,7 @@ fn spawn(command: CommandBuilder, size: Size, output: Sink) -> io::Result<Sessio
         });
     if let Err(error) = waiting {
         let _ = killer.kill();
-        return Err(error);
+        return Err(error.into());
     }
 
     Ok(Session {
