@@ -9,3 +9,7 @@ publish = false
 # the interface, rendering or OS processes (ARC-02).
 [dependencies]
 vte = { version = "0.15", default-features = false }
+
+# cargo-fuzz builds with `--cfg fuzzing`, which makes `fuzz.rs` public for the fuzz crate.
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(fuzzing)"] }

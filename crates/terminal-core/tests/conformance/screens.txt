@@ -1,0 +1,76 @@
+# The primary and alternate screens (TERM-06). There is one cursor, and it stays where it is
+# when the screen switches.
+
+## Mode 1049 saves the cursor and shows a clear alternate screen
+size 10x3
+send before\r\n
+send \e[?1049h
+mode alternate_screen on
+screen
+|          |
+|          |
+|          |
+cursor 2;1
+send \e[Hvim\e[3;5H
+screen
+|vim       |
+|          |
+|          |
+send \e[?1049l
+mode alternate_screen off
+screen
+|before    |
+|          |
+|          |
+cursor 2;1
+send \e[?1049h
+screen
+|          |
+|          |
+|          |
+
+## Mode 1049 set twice clears the alternate screen again and keeps the first save
+# xterm saves into the alternate screen's own slot the second time, which 1049l leaves.
+size 10x3
+send \e[2;2H\e[?1049hfull\e[3;3H\e[?1049hx
+screen
+|          |
+|          |
+|  x       |
+cursor 3;4
+send \e[?1049l
+mode alternate_screen off
+cursor 2;2
+
+## Mode 1049 reset on the primary screen restores the cursor
+size 10x3
+send \e[2;2H\e7\e[3;3H\e[?1049l
+mode alternate_screen off
+cursor 2;2
+
+## Mode 47 switches screens and clears nothing
+size 10x2
+send one\e[?47h\e[Htwo
+screen
+|two       |
+|          |
+send \e[?47l
+screen
+|one       |
+|          |
+cursor 1;4
+send \e[?47h
+screen
+|two       |
+|          |
+
+## Mode 1047 clears the alternate screen on the way back
+size 10x2
+send one\e[?1047h\e[Htwo\e[?1047l
+screen
+|one       |
+|          |
+send \e[?1047h
+screen
+|          |
+|          |

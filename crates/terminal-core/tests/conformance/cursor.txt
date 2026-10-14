@@ -1,0 +1,154 @@
+# Moving, saving and restoring the cursor (TERM-06).
+
+## CUP and HVP count from one and stay on the screen
+size 20x10
+send \e[3;5H
+cursor 3;5
+send \e[H
+cursor 1;1
+send \e[4;6f
+cursor 4;6
+send \e[0;0H
+cursor 1;1
+send \e[99;99H
+cursor 10;20
+send \e[65535;65535H
+cursor 10;20
+
+## A parameter too large for any screen still means the last row
+size 20x10
+send \e[99999999;3H
+cursor 10;3
+
+## Relative moves stop at the edges
+size 20x10
+send \e[5;5H\e[2A
+cursor 3;5
+send \e[5;5H\e[99A
+cursor 1;5
+send \e[5;5H\e[B
+cursor 6;5
+send \e[5;5H\e[99B
+cursor 10;5
+send \e[5;5H\e[99e
+cursor 10;5
+send \e[5;5H\e[3C
+cursor 5;8
+send \e[5;5H\e[99C
+cursor 5;20
+send \e[5;5H\e[99a
+cursor 5;20
+send \e[5;5H\e[2D
+cursor 5;3
+send \e[5;5H\e[99D
+cursor 5;1
+send \e[5;5H\e[2E
+cursor 7;1
+send \e[5;5H\e[2F
+cursor 3;1
+send \e[5;5H\e[99E
+cursor 10;1
+send \e[5;5H\e[99F
+cursor 1;1
+send \e[5;5H\e[9G
+cursor 5;9
+send \e[5;5H\e[9`
+cursor 5;9
+send \e[5;5H\e[9d
+cursor 9;5
+send \e[5;5H\e[0A
+cursor 4;5
+
+## CUU and CUD stop at the region they start in
+size 10x10
+send \e[3;6r
+send \e[5H\e[9A
+cursor 3;1
+send \e[5H\e[9B
+cursor 6;1
+send \e[1H\e[9B
+cursor 6;1
+send \e[8H\e[9A
+cursor 3;1
+send \e[8H\e[9B
+cursor 10;1
+send \e[2H\e[9A
+cursor 1;1
+
+## Origin mode counts rows from the region and keeps the cursor in it
+size 10x10
+send \e[3;6r\e[?6h
+cursor 3;1
+send \e[2;3H
+cursor 4;3
+send \e[99H
+cursor 6;1
+send \e[99;99H
+cursor 6;10
+send \e[6n
+reply \e[4;10R
+send \e[2d
+cursor 4;10
+send \e[?6l
+cursor 1;1
+
+## DECRC restores the position and the character sets DECSC saved
+size 10x5
+send \e[3;4H\e(0\e7\e[H\e(B\e8q
+screen
+|          |
+|          |
+|   ─      |
+|          |
+|          |
+cursor 3;5
+
+## DECRC restores origin mode
+size 10x5
+send \e[2;4r\e[?6h\e7\e[?6l\e8\e[H
+cursor 2;1
+
+## DECRC restores a pending wrap
+size 10x2
+send 0123456789\e7\e[2;1H\e8x
+screen
+|0123456789|>
+|x         |
+cursor 2;2
+
+## DECRC with nothing saved goes home
+size 10x5
+send \e[3;3H\e8
+cursor 1;1
+
+## CSI s and CSI u save and restore the cursor
+size 10x5
+send \e[2;3H\e[s\e[H\e[u
+cursor 2;3
+
+## With a private marker CSI u is another sequence
+# XTRESTORE and the kitty keyboard protocol's, which are not done.
+size 10x5
+send \e[2;3H\e[s\e[4;4H
+send \e[?u
+cursor 4;4
+send \e[?1u
+cursor 4;4
+send \e[=5u
+cursor 4;4
+send \e[>1u
+cursor 4;4
+send \e[<u
+cursor 4;4
+
+## Each screen has a saved cursor of its own
+size 10x5
+send \e[2;2H\e7\e[?47h\e[4;4H\e7\e[?47l\e8
+cursor 2;2
+send \e[?47h\e[H\e8
+cursor 4;4
+
+## Mode 1048 saves and restores the cursor
+size 10x5
+send \e[2;2H\e[?1048h\e[H\e[?1048l
+cursor 2;2

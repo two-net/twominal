@@ -1,0 +1,49 @@
+# The modes a program sets, which the rest of the tab acts on (TERM-06, TERM-10, TERM-11).
+
+## Modes are kept for the rest of the tab
+size 10x2
+send \e[?1h\e=\e[?2004h\e[?1004h\e[?1002h\e[?1006h\e[?25l\e[20h
+mode application_cursor on
+mode application_keypad on
+mode bracketed_paste on
+mode focus on
+mode mouse drag
+mode mouse_sgr on
+mode cursor_visible off
+mode newline on
+
+## Turning off any mouse mode turns mouse reporting off
+size 10x2
+send \e[?1002h\e[?1000l
+mode mouse off
+send \e[?9;1003h
+mode mouse motion
+send \e[?9h
+mode mouse press
+send \e[?1000h
+mode mouse click
+
+## The keypad modes are set by ESC = and ESC >, and by mode 66
+size 10x2
+send \e=
+mode application_keypad on
+send \e>
+mode application_keypad off
+send \e[?66h
+mode application_keypad on
+send \e[?66l
+mode application_keypad off
+
+## Modes that would lock the keyboard, echo or resize are ignored
+# KAM, SRM and DECCOLM (DESIGN.md §3).
+size 10x2
+send text\e[2h\e[12h\e[?3h\e[?3l
+screen
+|text      |
+|          |
+cursor 1;5
+
+## An unknown mode is ignored
+size 10x2
+send \e[?99h\e[99h\e[?1;99h
+mode application_cursor on

@@ -1,0 +1,80 @@
+# RIS, DECSTR and DECALN (TERM-01).
+
+## RIS resets everything but the size
+size 10x3
+send text\e[2;3r\e[?25l\e[?2004h\e[?1000h\e[3g\e(0\e[?1049hfull
+send \ec
+screen
+|          |
+|          |
+|          |
+cursor 1;1
+mode alternate_screen off
+mode cursor_visible on
+mode bracketed_paste off
+mode mouse off
+# The region is the whole screen, the tab stops are back, and the characters are ASCII.
+send top\e[3H\n\tq
+screen
+|          |
+|          |
+|        q |
+
+## DECSTR resets modes but keeps the screen and the cursor
+size 4x3
+send abc\e[?7l\e[?25l\e[4h\e[?1h\e=\e(0\e[2;3r\e[?6h\e7\e[!p
+screen
+|abc |
+|    |
+|    |
+cursor 2;1
+mode cursor_visible on
+mode application_cursor off
+mode application_keypad off
+send \e[4$p\e[?6$p\e[?7$p
+reply \e[4;2$y
+reply \e[?6;2$y
+reply \e[?7;1$y
+# Nothing is saved, so DECRC goes home. The characters are ASCII again, and autowrap is on
+# again, as in xterm and not the VT510: `tput reset` sends DECSTR.
+send \e8qxyzw
+screen
+|qxyz|>
+|w   |
+|    |
+# The region is the whole screen again.
+send \e[3H\n
+screen
+|w   |
+|    |
+|    |
+
+## DECSTR forgets only the saved cursor of the screen being shown
+# xterm saves the cursor at home in that screen's slot, and leaves the other's.
+size 10x5
+send \e[2;2H\e7\e[?47h\e[4;4H\e7\e[!p\e8
+cursor 1;1
+send \e[?47l\e8
+cursor 2;2
+
+## DECALN fills the screen with E
+size 3x2
+send abcd\e[2;2H\e#8
+screen
+|EEE|
+|EEE|
+cursor 1;1
+
+## DECALN makes the region the whole screen and turns origin mode off
+# xterm's CASE_DECALN clears ORIGIN and resets the margins.
+size 5x4
+send \e[2;3r\e[?6h\e[2;2H\e#8
+cursor 1;1
+send \e[?6$p
+reply \e[?6;2$y
+send \e[4H\n
+screen
+|EEEEE|
+|EEEEE|
+|EEEEE|
+|     |

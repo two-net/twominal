@@ -50,6 +50,8 @@ impl Perform for Terminal {
             0x0d => self.carriage_return(),
             0x0e => self.shift(1),
             0x0f => self.shift(0),
+            // vte has already ended any sequence that CAN or SUB cut short.
+            0x1a => self.substitute(),
             // BEL is #27's. ENQ asks for an answerback, which would be typed (SEC-05). vte
             // reads escape sequences only in their 7-bit form, so no C1 control is acted on.
             _ => {}

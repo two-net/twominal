@@ -1,0 +1,242 @@
+# The scrolling region, and what scrolls it (TERM-06).
+
+## DECSTBM sets the region and homes the cursor
+size 5x5
+send 1\r\n2\r\n3\r\n4\r\n5\e[2;4r
+cursor 1;1
+send \e[4H\nx
+screen
+|1    |
+|3    |
+|4    |
+|x    |
+|5    |
+
+## A region of less than two rows is ignored
+size 5x5
+send 1\r\n2\r\n3\r\n4\r\n5\e[3;3H
+send \e[3;3r
+cursor 3;3
+send \e[4;2r
+cursor 3;3
+send \e[9;99r
+cursor 3;3
+send \e[5H\n
+screen
+|2    |
+|3    |
+|4    |
+|5    |
+|     |
+
+## A region past the bottom ends at the bottom
+size 5x5
+send 1\r\n2\r\n3\r\n4\r\n5\e[2;99r\e[5H\n
+screen
+|1    |
+|3    |
+|4    |
+|5    |
+|     |
+
+## DECSTBM with no parameters, or zeros, makes the region the whole screen
+size 5x5
+send 1\r\n2\r\n3\r\n4\r\n5\e[2;3r\e[r\e[5H\n
+screen
+|2    |
+|3    |
+|4    |
+|5    |
+|     |
+send \e[2;3r\e[0;0r\e[5H\n
+screen
+|3    |
+|4    |
+|5    |
+|     |
+|     |
+
+## IND scrolls the region only on its bottom row
+size 5x6
+send 1\r\n2\r\n3\r\n4\r\n5\r\n6\e[2;4r\e[4H\eD
+screen
+|1    |
+|3    |
+|4    |
+|     |
+|5    |
+|6    |
+cursor 4;1
+
+## IND below the region on the last row does nothing
+size 5x6
+send 1\r\n2\r\n3\r\n4\r\n5\r\n6\e[2;4r\e[6H\eD\n
+screen
+|1    |
+|2    |
+|3    |
+|4    |
+|5    |
+|6    |
+cursor 6;1
+
+## NEL is an index and a carriage return
+size 5x3
+send ab\eEc
+screen
+|ab   |
+|c    |
+|     |
+
+## RI scrolls the region down only on its top row
+size 5x6
+send 1\r\n2\r\n3\r\n4\r\n5\r\n6\e[2;4r\e[2H\eM
+screen
+|1    |
+|     |
+|2    |
+|3    |
+|5    |
+|6    |
+cursor 2;1
+
+## RI above the region on the first row does nothing
+size 5x6
+send 1\r\n2\r\n3\r\n4\r\n5\r\n6\e[2;4r\e[1H\eM
+screen
+|1    |
+|2    |
+|3    |
+|4    |
+|5    |
+|6    |
+cursor 1;1
+
+## RI on the top row of the screen scrolls it down
+size 5x3
+send a\r\nb\e[H\eM
+screen
+|     |
+|a    |
+|b    |
+cursor 1;1
+
+## IL inserts blank rows inside the region
+size 5x5
+send 1\r\n2\r\n3\r\n4\r\n5\e[2;4r\e[3;3H\e[L
+screen
+|1    |
+|2    |
+|     |
+|3    |
+|5    |
+cursor 3;1
+
+## IL pushes no more rows than the region holds
+size 5x5
+send 1\r\n2\r\n3\r\n4\r\n5\e[2;4r\e[3H\e[99L
+screen
+|1    |
+|2    |
+|     |
+|     |
+|5    |
+
+## DL deletes rows inside the region
+size 5x5
+send 1\r\n2\r\n3\r\n4\r\n5\e[2;4r\e[3;3H\e[M
+screen
+|1    |
+|2    |
+|4    |
+|     |
+|5    |
+cursor 3;1
+
+## DL deletes no more rows than the region holds
+size 5x5
+send 1\r\n2\r\n3\r\n4\r\n5\e[2;4r\e[2H\e[99M
+screen
+|1    |
+|     |
+|     |
+|     |
+|5    |
+
+## IL and DL outside the region do nothing, and do not move the cursor
+size 5x5
+send 1\r\n2\r\n3\r\n4\r\n5\e[2;4r\e[5;3H\e[L
+cursor 5;3
+send \e[1;3H\e[M
+cursor 1;3
+screen
+|1    |
+|2    |
+|3    |
+|4    |
+|5    |
+
+## IL and DL cancel a pending wrap
+size 5x2
+send abcde\e[Lx
+screen
+|x    |
+|abcde|
+cursor 1;2
+
+## SU scrolls the region up and leaves the cursor
+size 5x5
+send 1\r\n2\r\n3\r\n4\r\n5\e[2;4r\e[3;3H\e[S
+screen
+|1    |
+|3    |
+|4    |
+|     |
+|5    |
+cursor 3;3
+
+## SD scrolls the region down and leaves the cursor
+size 5x5
+send 1\r\n2\r\n3\r\n4\r\n5\e[2;4r\e[3;3H\e[2T
+screen
+|1    |
+|     |
+|     |
+|2    |
+|5    |
+cursor 3;3
+
+## SU scrolls no more rows than the region holds
+size 5x5
+send 1\r\n2\r\n3\r\n4\r\n5\e[2;4r\e[3;3H\e[99S
+screen
+|1    |
+|     |
+|     |
+|     |
+|5    |
+
+## CSI T with five parameters is not SD
+# It is xterm's highlight mouse tracking, which is not done.
+size 5x5
+send 1\r\n2\r\n3\r\n4\r\n5\e[2;4r\e[3;3H\e[1;2;3;4;5T
+screen
+|1    |
+|2    |
+|3    |
+|4    |
+|5    |
+cursor 3;3
+
+## Rows keep their wrap when they scroll
+size 4x3
+send \r\nabcdef\e[3H\n
+screen
+|abcd|>
+|ef  |
+|    |
+send \e[H\e[L
+screen
+|    |
+|abcd|>
+|ef  |

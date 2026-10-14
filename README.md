@@ -29,7 +29,21 @@ cargo tauri dev
 cargo test --workspace
 ```
 
-This includes the architecture test, which checks the code against DESIGN.md.
+This includes the architecture test, which checks the code against DESIGN.md, and the Terminal Core's conformance suite, whose cases are in `crates/terminal-core/tests/conformance/`.
+
+## Fuzz
+
+The Terminal Core is fuzzed with cargo-fuzz, which needs the nightly toolchain. Nothing else does. Run each target for half an hour after changing the Terminal Core:
+
+```sh
+rustup toolchain install nightly
+cargo install cargo-fuzz
+cd crates/terminal-core
+cargo +nightly fuzz run interpret -- -dict=fuzz/terminal.dict -timeout=5 -max_len=16384 -max_total_time=1800
+cargo +nightly fuzz run split -s none -- -dict=fuzz/terminal.dict -timeout=5 -max_len=16384 -max_total_time=1800
+```
+
+A crash or a hang is saved in `fuzz/artifacts/`. DESIGN.md §8 says what each target checks.
 
 ## Build
 

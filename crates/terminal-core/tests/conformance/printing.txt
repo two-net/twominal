@@ -1,0 +1,278 @@
+# Printing, wrapping, insert mode and REP (TERM-01, TERM-06).
+#
+# xterm's pending wrap: a character printed in the last column leaves the cursor there, and
+# the next character starts the next row. fish relies on it (xenl). Every cursor movement but
+# a tab cancels it (xterm's cursor.c, ResetWrap).
+
+## Text is printed at the cursor
+size 10x3
+send hello
+screen
+|hello     |
+|          |
+|          |
+cursor 1;6
+
+## A full row waits for the next character to wrap
+size 10x3
+send 0123456789
+cursor 1;10
+send \r\nnext
+screen
+|0123456789|
+|next      |
+|          |
+cursor 2;5
+
+## The next character wraps and marks the row
+size 10x3
+send 0123456789ab
+screen
+|0123456789|>
+|ab        |
+|          |
+cursor 2;3
+
+## Wrapping on the last row scrolls
+size 5x2
+send abcdefghijklmno
+screen
+|fghij|>
+|klmno|
+cursor 2;5
+
+## Wrapping at the bottom of the region scrolls the region only
+size 5x4
+send top\e[4Hbotto\e[2;3r\e[3H
+send abcdefg
+screen
+|top  |
+|abcde|>
+|fg   |
+|botto|
+cursor 3;3
+
+## A wrap on the last row below the region writes over that row
+# xterm's WrapLine marks the row and indexes, which below the region does not move or scroll.
+size 5x4
+send \e[1;2r\e[4H
+send abcdefg
+screen
+|     |
+|     |
+|     |
+|fgcde|>
+cursor 4;3
+
+## A wrap stays pending across SGR, which moves nothing
+size 10x2
+send 0123456789\e[1m\e[mx
+screen
+|0123456789|>
+|x         |
+cursor 2;2
+
+## BS from a pending wrap goes to the column before the last
+size 10x2
+send 0123456789\bx
+screen
+|01234567x9|
+|          |
+cursor 1;10
+
+## CR cancels a pending wrap
+size 10x2
+send 0123456789\rx
+screen
+|x123456789|
+|          |
+cursor 1;2
+
+## CUF cancels a pending wrap
+size 10x2
+send 0123456789\e[Cx
+screen
+|012345678x|
+|          |
+cursor 1;10
+
+## CUB from a pending wrap goes to the column before the last
+size 10x2
+send 0123456789\e[Dx
+screen
+|01234567x9|
+|          |
+cursor 1;10
+
+## LF cancels a pending wrap and keeps the column
+size 10x2
+send 0123456789\nx
+screen
+|0123456789|
+|         x|
+cursor 2;10
+
+## EL cancels a pending wrap
+size 10x2
+send 0123456789\e[Kx
+screen
+|012345678x|
+|          |
+cursor 1;10
+
+## CUP to where the cursor is cancels a pending wrap
+size 10x2
+send 0123456789\e[1;10Hx
+screen
+|012345678x|
+|          |
+cursor 1;10
+
+## CHA, VPA, CUU and CUD cancel a pending wrap
+size 10x2
+send 0123456789\e[10Gx
+screen
+|012345678x|
+|          |
+send \r0123456789\e[1dy
+screen
+|012345678y|
+|          |
+send \r0123456789\e[Az
+screen
+|012345678z|
+|          |
+send \r0123456789\e[Bw
+screen
+|0123456789|
+|         w|
+cursor 2;10
+
+## A tab keeps a pending wrap
+size 10x2
+send 0123456789\tx
+screen
+|0123456789|>
+|x         |
+cursor 2;2
+
+## Without autowrap the last column is written over
+size 10x2
+send \e[?7l0123456789abc
+screen
+|012345678c|
+|          |
+cursor 1;10
+
+## Without autowrap a wrap is still pending, for when autowrap is on again
+# xterm sets do_wrap in the last column whether autowrap is on or not, and DECAWM leaves it.
+size 10x2
+send \e[?7l0123456789\e[?7hx
+screen
+|0123456789|>
+|x         |
+cursor 2;2
+
+## Turning autowrap off and on keeps a pending wrap
+size 10x2
+send 0123456789\e[?7l\e[?7hx
+screen
+|0123456789|>
+|x         |
+cursor 2;2
+
+## Without autowrap a pending wrap is dropped by the next character
+size 10x2
+send 0123456789\e[?7lx\e[?7hy
+screen
+|012345678x|>
+|y         |
+cursor 2;2
+
+## Insert mode pushes the row right
+size 10x1
+send abcdefghij\r\e[4hXY
+screen
+|XYabcdefgh|
+cursor 1;3
+
+## Insert mode can be turned off
+size 10x1
+send abcdefghij\r\e[4h\e[4lXY
+screen
+|XYcdefghij|
+cursor 1;3
+
+## REP repeats the last character
+size 10x1
+send a\e[3b
+screen
+|aaaa      |
+cursor 1;5
+
+## REP repeats it as the character set shows it
+size 10x1
+send \e(0q\e[2b
+screen
+|───       |
+
+## REP repeats only straight after a character
+size 10x1
+send a\r\e[3b
+screen
+|a         |
+send \e[3b
+screen
+|a         |
+send \ra\e[?5b\e[3b
+screen
+|a         |
+cursor 1;2
+
+## REP with no character before it does nothing
+size 10x1
+send \e[3b
+screen
+|          |
+cursor 1;1
+
+## REP with 0 repeats once
+size 10x1
+send a\e[0b
+screen
+|aa        |
+
+## REP fills a screen and goes on, as printing would
+# 1 and 65535 characters on a screen of 5 by 2: the last row holds 65536 mod 5, one of them.
+size 5x2
+send a\e[65535b
+screen
+|aaaaa|>
+|a    |
+cursor 2;2
+
+## REP past a screenful leaves the screen as printing them all would
+# 1003 characters on a screen of 5 by 2: the last row holds 1003 mod 5, three of them.
+size 5x2
+send a\e[1002b
+screen
+|aaaaa|>
+|aaa  |
+cursor 2;4
+
+## REP in insert mode inserts each character in turn
+size 6x2
+send wxyz\r\e[4ha\e[2b
+screen
+|aaawxy|
+|      |
+cursor 1;4
+
+## REP in insert mode wraps as printing would
+size 4x3
+send \e[3;1Hxy\e[1;1H\e[4ha\e[5b
+screen
+|aaaa|>
+|aa  |
+|xy  |
+cursor 2;3

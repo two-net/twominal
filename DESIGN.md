@@ -1,6 +1,6 @@
 # Twominal — Design
 
-**Version:** 0.9 · **Date:** 2026-10-14 · **Tracks:** [SRS](SRS.md) v0.6
+**Version:** 0.10 · **Date:** 2026-10-14 · **Tracks:** [SRS](SRS.md) v0.6
 
 > The SRS says what Twominal must do. This document says how it is built: the technology choices the SRS leaves open (C-1) and where each component of SRS §6 lives. Requirement IDs such as `ARC-02` are the SRS's. Where the two disagree, the SRS wins and this document is corrected.
 
@@ -79,6 +79,7 @@ The table above and the dependency table in §2 are read by `src-tauri/tests/arc
 | Webview code | Plain HTML, CSS and ES modules, using the global `window.__TAURI__`. No bundler, no npm | ARC-06, C-3 |
 | Where logic lives | All state and logic in Rust. The webview holds no model state | REL-01, PERF-07, TAB-15 |
 | Terminal Core | Our own screen model on the `vte` parser | TERM-01, SEC-05, ARC-03, MAINT-03 |
+| Fuzzing | `cargo-fuzz` and libFuzzer, on the nightly toolchain, for the Terminal Core. Only the fuzz crate needs nightly, and it is not part of what ships | REL-02 |
 | Renderer | Canvas 2D. Each row is drawn as runs of same-style text | FONT-04 to FONT-08, FONT-11, SW-06, HW-03 |
 | Pseudo-terminal | `portable-pty`, which uses ConPTY on Windows | SW-01, PORT-01 |
 | Rust ⇄ webview | Tauri commands in; events and channels out | PERF-04, PERF-07 |
@@ -131,6 +132,8 @@ Every crate Twominal depends on directly is listed here, and nothing else may be
 | `tab` | `terminal-core` | The Terminal Core |
 | `tab` | `portable-pty` | Pseudo-terminals: starts the shell on one and carries its bytes, through ConPTY on Windows (SW-01, PORT-01) |
 | `terminal-core` | `vte` | Parses escape sequences. Default features off: no `std`, and a bounded buffer for OSC sequences (ARC-02, REL-02) |
+| `terminal-core-fuzz` | `terminal-core` | The crate it fuzzes |
+| `terminal-core-fuzz` | `libfuzzer-sys` | Runs the fuzz targets under libFuzzer (REL-02). The fuzz crate is outside the workspace and is not part of what ships |
 <!-- dependencies:end -->
 
 Planned, and added by the issue that first needs each:
@@ -301,15 +304,16 @@ A pure `no_std` crate. Bytes go in through one entry point. Out come the screen 
 - **One way in.** `TerminalCore::interpret` takes bytes and returns the replies and reports they gave, in order, one reply for each query. The Tab writes the replies to the Session (#31). A sequence cut in two by the end of one call is finished by the next, so the screen comes out the same however the output was cut (ARC-03). A character cut in two is held back by the core until the rest comes, because vte 0.15 loses the byte after such a character when another character follows it. `screen()`, `cursor()` and `modes()` say what there is to show.
 - **The state, as in xterm.**
   - Two screens, primary and alternate, each made of rows that remember whether their line wrapped.
-  - One cursor, which stays where it is when the screen switches. It has xterm's pending wrap: a character printed in the last column waits for the next one before the line wraps, which fish relies on.
+  - One cursor, which stays where it is when the screen switches. It has xterm's pending wrap: a character printed in the last column waits for the next one before the line wraps, which fish relies on. As in xterm, the wrap is pending whether autowrap is on or not, so a character printed after autowrap is turned back on wraps.
   - One saved cursor for each screen.
   - The scrolling region, the tab stops, the character sets G0 to G3, and the modes. DEC Special Graphics is there for the boxes ncurses draws.
 - **What it does.**
-  - The C0 controls.
+  - The C0 controls. CAN cancels a sequence, and SUB cancels one and shows `␦`, as xterm does for a VT220.
   - IND, NEL, RI, HTS, DECSC, DECRC, RIS, DECALN, the keypad modes and the designation of character sets.
   - Moving the cursor, erasing, inserting and deleting characters and lines, scrolling, REP, the tab stops and the scrolling region.
   - The modes IRM and LNM, and the DEC private modes 1, 6, 7, 25, 47, 1047, 1048, 1049, 66, 1004, 2004, 9, 1000, 1002, 1003 and 1006. The keyboard and mouse modes are only kept, for #20 and #21 to act on.
-  - DECSTR, which turns autowrap back on, as in xterm. `tput reset` sends it.
+  - DECSTR, which turns autowrap back on, as in xterm. `tput reset` sends it. It forgets the saved cursor of the screen being shown, and the other screen keeps its own.
+  - DECALN, which also makes the region the whole screen and turns origin mode off, as in xterm.
 - **The replies.** They hold fixed text and numbers, never bytes the program wrote (SEC-05).
   - DA1 is `CSI ? 62 ; 22 c`: a VT220 with ANSI color. fish waits for it before its first prompt. DECID (`ESC Z`) gets the same answer.
   - DA2 is `CSI > 1 ; 10 ; 0 c`. The low version keeps vim from probing for features of xterm that are not here. #21 may raise it, for vim to choose SGR mouse reports.
@@ -319,9 +323,11 @@ A pure `no_std` crate. Bytes go in through one entry point. Out come the screen 
 - **Ignored.** Whatever is not listed here, as ECMA-48 asks (REL-02).
   - Until their issues: SGR (#19), the cursor's shape (#25), and titles, OSC 7, color queries, the bell, links and the clipboard (#27). The kitty keyboard protocol's query is not answered, so programs know it is not there (#20).
   - Always: DECCOLM, which would resize the screen and clear it, and KAM and SRM, which would lock the keyboard or echo what is typed.
-  - The C1 controls and DEL take no cell. vte reads escape sequences only in their 7-bit form.
+  - The C1 controls and DEL take no cell, whether a C1 control comes as UTF-8 or as a single byte. vte reads escape sequences only in their 7-bit form.
+  - A control function with more than 32 parameters is ignored whole, where xterm acts on its first ones and drops the rest.
+- **Where the wrap mark differs from xterm.** A row stops wrapping when an erase reaches its last cell, or when it is cleared whole. xterm's EL 0 and ECH clear the mark whatever they erase, and its EL 1 and EL 2 keep it (`util.c`, `ClearRight`, `ClearLeft`, `ClearLine`). Here EL 0 and ECH clear it only when they reach the last cell, and EL 1 and EL 2 clear it when they reach it, EL 2 always. The mark serves only copying and reflow (TERM-16, TERM-17), and a row whose end was erased does not go on in the next.
 - **Until their issues.** Every character takes one cell (#18). Rows that scroll off the top are dropped. A resize cuts or pads the rows without reflowing them, and with fewer rows takes rows from the top only as far as needed to keep the cursor on the screen (#26).
-- **Bounded.** `vte` has its default features off. Its buffer for an operating system command is then 256 KiB, boxed, and a longer command is cut short. Every count is clamped to the screen, so no sequence does more than a screenful of work for each of its parameters. A size of zero is made one.
+- **Bounded.** `vte` has its default features off. Its buffer for an operating system command is then 256 KiB, boxed, and a longer command is cut short. Every count is clamped to the screen, so no sequence does more than a screenful of work for each of its parameters. REP, which xterm carries out in full however large its count, is cut by whole rows to no more than a screenful and a row: from there each further row's worth leaves the screen as it was, so the screen comes out as xterm's does. A size of zero is made one.
 
 ### What §6.1 does not name
 
@@ -476,12 +482,12 @@ Saving a setting changes only the keys whose value changed. Comments, the order 
 - **Session.** `crates/tab/src/session/tests.rs` starts `/bin/sh` on real pseudo-terminals and checks the bytes both ways, the environment, the directory, the size, the exit status, closing, and an exit while a background program holds the terminal (SW-01, SW-02, FISH-01, TERM-15, SEC-03). It also checks a shell that cannot start: a Shell setting that names no file while another session keeps working, a name missing from the `PATH`, a file that is not executable, and a `$SHELL` that has gone (FISH-02, AT-16). These run on macOS and Linux.
   - Shell integration is tested the same way (FISH-04 to FISH-06). zsh, bash and PowerShell start in a home folder of the test's own, with the user's files in it, and the tests check the reports, that the user's files are read in the usual order, and that the home folder is the same afterwards, file for file. Twominal's own folder, the variables it passes and the setting turned off are checked too. A test whose shell is not installed says so and passes. On macOS, `brew install powershell` installs PowerShell 7.
   - The choice of locale and of PowerShell, the waiter's rule for when to report the exit, how a program is looked for and why it cannot run, the offers and their wording, and which shells get shell integration and what it adds to their command are tested on every OS, but no shell has yet been started on Windows.
-- **Terminal Core.** `crates/terminal-core/src/tests.rs` feeds bytes in and checks the screen, the cursor, the modes, the replies and the reports, for each control function in §3 and for each query that must not be answered (SEC-05). Everything runs with no window (ARC-03).
-  - The same bytes give the same state whether they come whole, a byte at a time, cut at any one place or in random pieces (ARC-03). Characters cut in two are checked on their own. Hostile output, made of random pieces of sequences, never breaks the screen's rules at sizes down to one cell (REL-02).
-  - An ignored test measures plain text: `cargo test --release -p terminal-core -- --ignored` (PERF-06).
+- **Terminal Core.** Everything runs with no window (ARC-03).
+  - **The conformance suite** (MAINT-03), `crates/terminal-core/tests/conformance.rs`, runs the cases in `crates/terminal-core/tests/conformance/`, one file for each area of §3. A case gives a size, the bytes a program writes, and the screen, cursor, modes and replies that must follow, drawn as text. Each expectation is what xterm does, taken from its control sequences document and its source, or a deviation this section documents, which the case's comment names. Every reply must be one the case expects, so a query that must not be answered fails if it is (SEC-05). Each case runs twice, as written and a byte at a time (ARC-03). The suite uses only the public interface, as the Tab does, and is where each TERM requirement the Terminal Core meets gets its test (MAINT-02).
+  - **Unit tests**, `crates/terminal-core/src/tests.rs`, check what the public interface does not show: internal state, the reports of the shell integration, resizing, and that the same bytes give the same state whether they come whole, a byte at a time, cut at any one place or in random pieces (ARC-03). Characters cut in two are checked on their own. An ignored test measures plain text: `cargo test --release -p terminal-core -- --ignored` (PERF-06).
+  - **Fuzzing** (REL-02). `crates/terminal-core/fuzz/` holds two cargo-fuzz targets. `interpret` gives hostile output in pieces, with resizes between, and checks the state's rules after each step and that every reply is fixed text and numbers (SEC-05). `split` checks that the output gives the same state and events whole, a byte at a time and in pieces (ARC-03). An input's first bytes choose the size, up to 160 by 60, and the cuts, so libFuzzer explores them too. `terminal.dict` gives it the pieces of sequences. What they check is `crates/terminal-core/src/fuzz.rs`, which `cargo test` also runs, on stable, with hostile output made up from the same pieces. Run each target from `crates/terminal-core` for half an hour after a change to the Terminal Core, and add whatever it finds as a test: `cargo +nightly fuzz run interpret -- -dict=fuzz/terminal.dict -timeout=5 -max_len=16384 -max_total_time=1800`, and the same for `split` with `-s none` after `split`. `-timeout` makes a slow input a hang, which REL-02 forbids. `interpret` runs under AddressSanitizer, for the `unsafe` code in vte. `split` checks logic, not memory, so it runs without: under AddressSanitizer its memory grows by about 100 MB a minute until libFuzzer stops it at 2 GB, though the Terminal Core holds none of it, and without it runs three times as fast.
   - `crates/tab/tests/programs.rs` runs fish, vim, less, `git log` and top on real pseudo-terminals through the Session, with the Terminal Core answering their queries. It checks what they show and that the screen is given back when they end (TERM-01). Each runs in a home folder and environment of its own. A program that is not installed is said so, and its test passes.
   - `crates/tab/src/session/tests.rs` checks that the Terminal Core reads zsh's reports as the scripts write them, a list of over 60 KB among them.
-  - #17 adds the conformance suite (MAINT-03) and fuzz targets (REL-02).
 - **Tab tier.** The `tab` crate does not depend on Tauri, so the Command Line, key handling and the Renderer's choice of text runs are unit-tested without a window.
 - **Webview.** It has no logic of its own to unit-test. What it draws is checked by the acceptance scenarios (SRS §7) as documented manual tests (MAINT-02).
 

@@ -26,6 +26,10 @@ extern crate alloc;
 extern crate std;
 
 mod control;
+/// What the fuzz targets check. Only for them and for the tests.
+#[cfg(any(test, fuzzing))]
+#[doc(hidden)]
+pub mod fuzz;
 mod report;
 mod screen;
 mod terminal;

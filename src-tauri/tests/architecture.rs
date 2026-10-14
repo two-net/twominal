@@ -215,10 +215,18 @@ fn dependencies_match_the_design() {
         .map(|row| (row[0].clone(), row[1].clone()))
         .collect();
 
+    // Every package, not only the components' crates: the fuzz crate is outside the
+    // workspace, but its dependencies are as direct as any.
     let mut actual = BTreeSet::new();
-    for dir in crate_dirs(&components()) {
-        let manifest = read(&format!("{}/Cargo.toml", dir.rsplit_once('/').unwrap().0));
-        let package = package_name(&manifest).expect("a manifest names its package");
+    for file in ["crates", "src-tauri"]
+        .into_iter()
+        .flat_map(|dir| walk(dir, &["toml"]))
+        .filter(|file| file.ends_with("/Cargo.toml"))
+    {
+        let manifest = read(&file);
+        let Some(package) = package_name(&manifest) else {
+            continue;
+        };
         for dependency in manifest_dependencies(&manifest) {
             actual.insert((package.clone(), dependency));
         }
@@ -365,7 +373,8 @@ fn read(file: &str) -> String {
     fs::read_to_string(root().join(file)).unwrap_or_else(|error| panic!("{file}: {error}"))
 }
 
-/// Every file under `dir` with one of the extensions, as sorted repository paths.
+/// Every file under `dir` with one of the extensions, as sorted repository paths. Cargo's
+/// `target` folders are not looked in.
 fn walk(dir: &str, extensions: &[&str]) -> Vec<String> {
     let mut found = Vec::new();
     let mut pending = vec![dir.to_string()];
@@ -376,7 +385,9 @@ fn walk(dir: &str, extensions: &[&str]) -> Vec<String> {
         for entry in entries.flatten() {
             let path = format!("{dir}/{}", entry.file_name().to_string_lossy());
             if entry.path().is_dir() {
-                pending.push(path);
+                if entry.file_name() != "target" {
+                    pending.push(path);
+                }
             } else if extensions
                 .iter()
                 .any(|extension| path.ends_with(&format!(".{extension}")))

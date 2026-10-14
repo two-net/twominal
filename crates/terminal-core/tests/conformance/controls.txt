@@ -1,0 +1,136 @@
+# C0 and C1 controls, tab stops, and bytes that are not characters (TERM-01, TERM-06).
+
+## LF, VT and FF move down and keep the column
+size 10x6
+send ab\ncd\r\nab\x0bcd\r\nab\x0ccd
+screen
+|ab        |
+|  cd      |
+|ab        |
+|  cd      |
+|ab        |
+|  cd      |
+cursor 6;5
+
+## In newline mode a line feed also returns to the first column
+size 10x3
+send \e[20hab\ncd
+screen
+|ab        |
+|cd        |
+|          |
+mode newline on
+
+## BS stops at the first column
+size 10x1
+send \b\bab\b\b\bc
+screen
+|cb        |
+cursor 1;2
+
+## Tab stops are every eight columns, and the last column stops a tab
+size 20x1
+send \tx\t\t\ty
+screen
+|        x          y|
+send \t
+cursor 1;20
+
+## HTS sets a tab stop and TBC 3 clears them all
+size 20x2
+send \e[5G\eH\r\tx\r\n\e[3g\ty
+screen
+|    x               |
+|                   y|
+
+## TBC 0 clears the tab stop under the cursor
+size 20x1
+send \e[9G\e[g\r\tx
+screen
+|                x   |
+
+## DECST8C puts the tab stops back every eight columns
+size 20x1
+send \e[3g\e[?5W\tx
+screen
+|        x           |
+
+## CHT and CBT move by tab stops
+size 80x1
+send \e[2I
+cursor 1;17
+send \e[20G\e[Z
+cursor 1;17
+send \e[20G\e[2Z
+cursor 1;9
+send \e[20G\e[99Z
+cursor 1;1
+send \e[99I
+cursor 1;80
+
+## CBT from the first column stays there
+size 20x1
+send \e[Z
+cursor 1;1
+
+## A control inside a control sequence is done there, and the sequence goes on
+# ECMA-48 and xterm: the CR acts at once, then CSI 2 C moves on from the first column.
+size 10x1
+send ab\e[2\rCx
+screen
+|abx       |
+cursor 1;4
+
+## CAN cancels a sequence and shows nothing
+# xterm shows nothing for CAN as a VT220, which DA1 says Twominal is.
+size 10x1
+send a\e[3\x18Hb
+screen
+|aHb       |
+cursor 1;4
+
+## SUB cancels a sequence and shows a reverse question mark
+# xterm shows U+2426 for SUB as a VT220 and later, in a sequence or not.
+size 10x1
+send a\e[3\x1aHb\x1ac
+screen
+|a␦Hb␦c    |
+cursor 1;7
+
+## ESC inside a sequence starts another
+size 10x5
+send \e[3\e[5;5H
+cursor 5;5
+
+## DEL, NUL and the C1 controls take no cell
+# A deviation (DESIGN.md §3): vte reads escape sequences only in their 7-bit form, so a C1
+# control is not acted on, whether it comes as UTF-8 or as a single byte.
+size 10x1
+send a\x7fb\x00c\xc2\x85d\x85e\xc2\x9b2Jf
+screen
+|abcde2Jf  |
+cursor 1;9
+
+## A C1 control cut in two still takes no cell
+size 10x1
+send a\xc2
+send \x85b
+screen
+|ab        |
+
+## Bytes that are not UTF-8 show as U+FFFD
+size 10x1
+send a\xffb\xc3c
+screen
+|a�b�c     |
+cursor 1;6
+
+## A character cut in two by the end of the output loses nothing around it
+# The Session reads output in pieces, which may end inside a character (ARC-03).
+size 10x1
+send caf\xc3
+send \xa9 \xc3\xa9\xe2\x94
+send \x80!
+screen
+|café é─!  |
+cursor 1;9

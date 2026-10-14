@@ -1,0 +1,113 @@
+# The queries that are answered, and those that never are (TERM-01, SEC-05). A reply is made
+# of fixed text and numbers, never of bytes the program wrote. Every reply a case gets must
+# be one it expects.
+
+## DA1 is answered as a VT220 with ANSI color
+size 10x2
+send \e[c
+reply \e[?62;22c
+send \e[0c
+reply \e[?62;22c
+
+## DECID gets DA1's answer
+size 10x2
+send \eZ
+reply \e[?62;22c
+
+## DA2 is answered as a VT220, version 10
+size 10x2
+send \e[>c
+reply \e[>1;10;0c
+send \e[>0c
+reply \e[>1;10;0c
+
+## Other device attributes are not answered
+# DA3 (CSI = c) would report a unit ID.
+size 10x2
+send \e[1c\e[=c\e[>1c
+
+## DSR 5 is answered with no malfunction
+size 10x2
+send \e[5n
+reply \e[0n
+
+## CPR and DECXCPR report where the cursor is, counted from 1
+size 10x5
+send \e[3;7H\e[6n
+reply \e[3;7R
+send \e[?6n
+reply \e[?3;7R
+
+## Other status reports are not answered
+size 10x5
+send \e[?5n\e[7n\e[?15n
+
+## With a wrap pending the cursor is in the last column
+size 10x5
+send 0123456789\e[6n
+reply \e[1;10R
+
+## DECRQM reports the DEC private modes
+size 10x2
+send \e[?2004$p
+reply \e[?2004;2$y
+send \e[?7$p
+reply \e[?7;1$y
+send \e[?25$p
+reply \e[?25;1$y
+send \e[?1049$p
+reply \e[?1049;2$y
+send \e[?2004h\e[?1049h\e[?1002h
+send \e[?2004$p
+reply \e[?2004;1$y
+send \e[?1049$p
+reply \e[?1049;1$y
+send \e[?47$p
+reply \e[?47;1$y
+send \e[?1002$p
+reply \e[?1002;1$y
+send \e[?1000$p
+reply \e[?1000;2$y
+
+## DECRQM reports the ANSI modes
+size 10x2
+send \e[4$p
+reply \e[4;2$y
+send \e[20$p
+reply \e[20;2$y
+send \e[4h\e[4$p
+reply \e[4;1$y
+
+## DECRQM reports a mode it does not know, or an action, as not known
+size 10x2
+send \e[?1048$p
+reply \e[?1048;0$y
+send \e[?2026$p
+reply \e[?2026;0$y
+send \e[?65535$p
+reply \e[?65535;0$y
+send \e[2$p
+reply \e[2;0$y
+
+## Each query gets its reply, in order
+size 10x2
+send \e[c\e[5n\e[6n
+reply \e[?62;22c
+reply \e[0n
+reply \e[1;1R
+
+## Nothing that would echo the program's text is answered
+# SEC-05: a reply that held text the program chose would be typed into the shell. These are
+# the title and icon reports, the other window reports, ENQ's answerback, DECRQSS,
+# XTGETTCAP, XTVERSION, the color and clipboard queries, and the kitty keyboard query.
+size 10x2
+send \e[20t\e[21t\e]2;rm -rf ~\a\e[21t\e[18t\e[14t\e[22;0t\e[23;0t
+send \x05
+send \eP$qm\e\\\eP$q"p\e\\\eP+q696e646e\e\\
+send \e[>q\e[>0q
+send \e]11;?\a\e]10;?\e\\\e]4;1;?\a\e]52;c;?\a
+send \e[?u
+screen
+|          |
+|          |
+cursor 1;1

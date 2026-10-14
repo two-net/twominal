@@ -1,0 +1,27 @@
+# Character sets G0 to G3 (TERM-01). DEC Special Graphics draws the boxes ncurses draws.
+
+## DEC Special Graphics draws lines
+size 10x3
+send \e(0lqqk\r\nx  x\r\nmqqj\e(Bq
+screen
+|┌──┐      |
+|│  │      |
+|└──┘q     |
+
+## SO and SI shift between G0 and G1
+size 10x1
+send \e)0q\x0eq\x0fq
+screen
+|q─q       |
+
+## LS2 and LS3 shift to G2 and G3
+size 10x1
+send \e*0\e+A\enq\eo#
+screen
+|─£        |
+
+## The British set has a pound for the hash, and an unknown set changes nothing
+size 10x1
+send \e(A#\e(B#\e(Z#
+screen
+|£##       |

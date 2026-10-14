@@ -234,8 +234,10 @@ pub(crate) struct Terminal {
     alternate: Screen,
     row: usize,
     col: usize,
-    /// A character was printed in the last column with autowrap on, so the next one starts
-    /// the next row: xterm's pending wrap. The cursor is then in the last column.
+    /// A character was printed in the last column, so the next one starts the next row if
+    /// autowrap is on: xterm's pending wrap. The cursor is then in the last column. As in
+    /// xterm, it is kept whether autowrap is on or not, and turning autowrap on or off does
+    /// not change it.
     pending: bool,
     /// What DECSC saved on the primary screen and on the alternate one.
     saved: [Option<Saved>; 2],
@@ -346,11 +348,18 @@ impl Terminal {
         self.last = Some(char);
     }
 
-    /// Prints the last character printed `count` more times (REP), and no more than fills
-    /// the screen.
+    /// Prints the last character printed `count` more times (REP). xterm prints them all,
+    /// however many. Once a screenful and a row have been printed, every row the characters
+    /// reach is full of them, and from then on each row's worth printed leaves the screen as
+    /// it was, so a larger count is cut by whole rows to no more than that.
     pub(crate) fn repeat(&mut self, count: usize) {
         let Some(char) = self.last else { return };
-        let mut left = count.min(self.cols * self.rows);
+        let enough = self.cols * (self.rows + 1);
+        let mut left = if count > enough {
+            enough + (count - enough) % self.cols
+        } else {
+            count
+        };
         while left > 0 {
             self.wrap();
             // As much of the run as fits in the row at once, so that in insert mode the row
@@ -368,13 +377,19 @@ impl Terminal {
         self.last = None;
     }
 
+    /// SUB: shows `␦` where a character was lost, as xterm does for a VT220 and later.
+    pub(crate) fn substitute(&mut self) {
+        self.put('\u{2426}');
+    }
+
     fn put(&mut self, char: char) {
         self.wrap();
         self.make_room(1);
         self.write(char);
     }
 
-    /// Starts the next row if a wrap is pending.
+    /// Starts the next row if a wrap is pending and autowrap is on. Without autowrap the
+    /// character in the last column is written over.
     fn wrap(&mut self) {
         if mem::take(&mut self.pending) && self.autowrap {
             let row = self.row;
@@ -400,7 +415,7 @@ impl Terminal {
         if col + 1 < self.cols {
             self.col += 1;
         } else {
-            self.pending = self.autowrap;
+            self.pending = true;
         }
     }
 
@@ -669,11 +684,13 @@ impl Terminal {
         }
     }
 
-    /// DECALN: fills the screen with `E`, for aligning a CRT. Seldom used but by tests.
+    /// DECALN: fills the screen with `E`, for aligning a CRT. Seldom used but by tests. As in
+    /// xterm, the scrolling region becomes the whole screen and origin mode goes off.
     pub(crate) fn align(&mut self) {
         self.screen_mut().fill(Cell::new('E'));
         self.top = 0;
         self.bottom = self.rows - 1;
+        self.origin = false;
         self.row = 0;
         self.col = 0;
         self.pending = false;
@@ -732,11 +749,7 @@ impl Terminal {
                 self.origin = on;
                 self.goto(0, 0);
             }
-            Mode::Autowrap => {
-                self.autowrap = on;
-                // Without autowrap a character in the last column is overwritten by the next.
-                self.pending &= on;
-            }
+            Mode::Autowrap => self.autowrap = on,
             Mode::CursorVisible => self.modes.cursor_visible = on,
             Mode::Alternate => self.modes.alternate_screen = on,
             Mode::AlternateCleared => {
@@ -804,6 +817,7 @@ impl Terminal {
 
     /// DECSTR, as xterm does it: the modes a program may have left behind go back to their
     /// defaults, autowrap included, but what is on the screen and where the cursor is stay.
+    /// The screen being shown forgets its saved cursor; the other keeps its own.
     pub(crate) fn soft_reset(&mut self) {
         self.modes.cursor_visible = true;
         self.modes.application_cursor = false;
@@ -814,7 +828,7 @@ impl Terminal {
         self.top = 0;
         self.bottom = self.rows - 1;
         self.charsets = Charsets::default();
-        self.saved = [None, None];
+        self.saved[self.modes.alternate_screen as usize] = None;
     }
 
     // Resizing
@@ -867,7 +881,7 @@ impl Terminal {
     }
 
     /// Panics if the state breaks a rule the rest of this file relies on.
-    #[cfg(test)]
+    #[cfg(any(test, fuzzing))]
     pub(crate) fn check(&self) {
         assert!(self.row < self.rows && self.col < self.cols, "{self:?}");
         assert!(!self.pending || self.col == self.cols - 1, "{self:?}");

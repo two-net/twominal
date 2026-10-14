@@ -1,0 +1,33 @@
+[package]
+name = "terminal-core-fuzz"
+version = "0.0.0"
+description = "Fuzz targets for Twominal's Terminal Core (REL-02). Not part of what ships"
+edition = "2021"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+# Every dependency must be listed in DESIGN.md §2 first (ARC-06).
+[dependencies]
+libfuzzer-sys = "0.4"
+terminal-core = { path = ".." }
+
+# A workspace of its own, so `cargo test --workspace` never builds libFuzzer, and the product
+# never needs the nightly toolchain that cargo-fuzz does.
+[workspace]
+members = ["."]
+
+[[bin]]
+name = "interpret"
+path = "fuzz_targets/interpret.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "split"
+path = "fuzz_targets/split.rs"
+test = false
+doc = false
+bench = false
