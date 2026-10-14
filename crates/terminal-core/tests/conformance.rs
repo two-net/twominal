@@ -18,7 +18,9 @@
 //! |ijkl|
 //! cursor 2;2                                              counted from 1, as CUP counts
 //! reply \e[?62;22c                                        the next reply not yet checked
-//! mode bracketed_paste on                                 a field of `Modes`
+//! mode bracketed_paste on                                 a field of `Modes`: `on` or
+//! mode keyboard 5                                         `off`, the mouse's tracking, or
+//!                                                         the keyboard flags' number
 //! style r bold foreground 1                               `r` stands for this style below
 //! styles                                                  every row again, a letter for the
 //! |rr..|                                                  style of each cell
@@ -135,6 +137,7 @@ const MODES: &[&str] = &[
     "focus",
     "mouse",
     "mouse_sgr",
+    "keyboard",
 ];
 
 /// The cases in `text`. What cannot be read goes to `problems`, as `file:line: why`, and
@@ -687,6 +690,7 @@ fn mode(modes: &Modes, name: &str) -> String {
             MouseTracking::Motion => "motion",
         }
         .to_string(),
+        "keyboard" => modes.keyboard.bits().to_string(),
         _ => unreachable!("parse lets only the names in MODES through"),
     }
 }

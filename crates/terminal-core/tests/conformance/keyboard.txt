@@ -1,0 +1,187 @@
+# The kitty keyboard protocol's flags (TERM-09): how a program asked to be told of keys, kept
+# on a stack for each screen. kitty defines the protocol, so it is the model here as xterm is
+# elsewhere: where the protocol's specification says nothing, a case does what kitty's
+# `screen.c` does and says so.
+
+## No flag is set at the start
+size 10x2
+mode keyboard 0
+send \e[?u
+reply \e[?0u
+
+## A push sets the flags, and a pop gives back the ones before
+size 10x2
+send \e[>1u
+mode keyboard 1
+send \e[>13u
+mode keyboard 13
+send \e[?u
+reply \e[?13u
+send \e[<u
+mode keyboard 1
+send \e[<u
+mode keyboard 0
+
+## A pop takes as many as it is told
+size 10x2
+send \e[>1u\e[>2u\e[>3u\e[>4u
+send \e[<3u
+mode keyboard 1
+
+## Popping more than were pushed leaves no flag set
+size 10x2
+send \e[>1u\e[>2u\e[<9u
+mode keyboard 0
+send \e[<u
+mode keyboard 0
+send \e[>4u
+mode keyboard 4
+send \e[<u
+mode keyboard 0
+
+## A pop of 0 pops one
+# A deviation (DESIGN.md §3): vte reads an empty parameter as 0, so CSI < 0 u cannot be told
+# from CSI < u. kitty pops none.
+size 10x2
+send \e[>1u\e[>2u\e[<0u
+mode keyboard 1
+
+## A push with no flags pushes none set
+size 10x2
+send \e[>1u\e[>u
+mode keyboard 0
+send \e[<u
+mode keyboard 1
+
+## A full stack forgets its oldest flags
+# kitty's holds eight.
+size 10x2
+send \e[>1u\e[>2u\e[>3u\e[>4u\e[>5u\e[>6u\e[>7u\e[>8u
+mode keyboard 8
+send \e[>9u
+mode keyboard 9
+send \e[<7u
+mode keyboard 2
+send \e[<u
+mode keyboard 0
+
+## Setting changes the flags in use, by its mode
+# 1, or no mode, makes them the flags given; 2 sets those too; 3 resets them.
+size 10x2
+send \e[>1u\e[=12u
+mode keyboard 12
+send \e[=1;1u
+mode keyboard 1
+send \e[=6;2u
+mode keyboard 7
+send \e[=3;3u
+mode keyboard 4
+send \e[<u
+mode keyboard 0
+
+## Setting changes only the newest flags
+size 10x2
+send \e[>1u\e[>2u\e[=8u
+mode keyboard 8
+send \e[<u
+mode keyboard 1
+
+## Setting with nothing pushed sets a first entry
+# As kitty does, which is what fish relies on: it only ever sets.
+size 10x2
+send \e[=5u
+mode keyboard 5
+send \e[>2u\e[<u
+mode keyboard 5
+send \e[=0u
+mode keyboard 0
+send \e[=5u\e[<u
+mode keyboard 0
+
+## A setting mode other than 1, 2 and 3 changes nothing
+# As in kitty, an empty mode, which is 0, among them.
+size 10x2
+send \e[=5u\e[=1;0u\e[=1;4u\e[=1;u
+mode keyboard 5
+
+## Seven bits of flags are kept
+# As kitty keeps them, so a program reads back flags the protocol does not define yet. Higher
+# bits are dropped.
+size 10x2
+send \e[>127u
+mode keyboard 127
+send \e[=255u
+mode keyboard 127
+send \e[=129u
+mode keyboard 1
+send \e[=65535u
+mode keyboard 127
+send \e[?u
+reply \e[?127u
+
+## The query is answered whatever its parameters
+# As kitty answers it.
+size 10x2
+send \e[>3u\e[?5u\e[?1;2u
+reply \e[?3u
+reply \e[?3u
+
+## Each screen has flags of its own
+size 10x2
+send \e[>1u\e[?1049h
+mode keyboard 0
+send \e[>15u
+mode keyboard 15
+send \e[?u
+reply \e[?15u
+send \e[?1049l
+mode keyboard 1
+send \e[?u
+reply \e[?1u
+
+## The alternate screen keeps its flags while it is not shown
+# kitty switches to the other screen's stack and clears neither.
+size 10x2
+send \e[?1049h\e[>15u\e[?1049l
+mode keyboard 0
+send \e[?47h
+mode keyboard 15
+send \e[?47l\e[?1047h
+mode keyboard 15
+
+## A pop on one screen leaves the other's flags
+size 10x2
+send \e[>1u\e[?47h\e[>2u\e[<5u
+mode keyboard 0
+send \e[?47l
+mode keyboard 1
+
+## RIS forgets the flags of both screens
+size 10x2
+send \e[>1u\e[?1049h\e[>2u\ec
+mode keyboard 0
+send \e[?1049h
+mode keyboard 0
+
+## DECSTR forgets the flags of both screens
+# As kitty's soft reset does.
+size 10x2
+send \e[>1u\e[?1049h\e[>2u\e[!p
+mode keyboard 0
+send \e[?1049l
+mode keyboard 0
+
+## Plain CSI u still restores the cursor
+size 10x5
+send \e[2;3H\e[s\e[H\e[>1u\e[u
+cursor 2;3
+mode keyboard 1
+
+## The sequences print nothing and leave the cursor where it is
+size 10x2
+send a\e[>1ub\e[=5uc\e[<ud\e[?ue
+reply \e[?0u
+screen
+|abcde     |
+|          |
+cursor 1;6

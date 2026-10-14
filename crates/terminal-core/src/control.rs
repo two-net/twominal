@@ -10,8 +10,7 @@
 //! the answerback to ENQ, and every device control string, DECRQSS and XTGETTCAP among them.
 //!
 //! Left to their own issues: the cursor's shape (#25), the bell, titles and the other operating
-//! system commands (#27). The kitty keyboard protocol's `CSI ? u` is not answered, so programs
-//! know it is not there (#20).
+//! system commands (#27).
 
 use alloc::format;
 
@@ -179,6 +178,20 @@ impl Perform for Terminal {
             ([], 'r') => self.set_region(arg(0), arg(1)),
             ([], 's') => self.save_cursor(),
             ([], 'u') => self.restore_cursor(),
+            // The kitty keyboard protocol (TERM-09). vte reads a missing parameter as 0, so
+            // `CSI < 0 u` pops one, as `CSI < u` does, where kitty pops none.
+            ([b'>'], 'u') => self.push_keyboard(arg(0)),
+            ([b'<'], 'u') => self.pop_keyboard(count(0)),
+            ([b'='], 'u') => {
+                // A missing mode is 1, and an empty one 0, which does nothing, as in kitty.
+                let how = if params.len() < 2 { 1 } else { arg(1) };
+                self.set_keyboard(arg(0), how);
+            }
+            // Whatever its parameters, as kitty answers it.
+            ([b'?'], 'u') => {
+                let flags = self.modes().keyboard.bits();
+                self.reply(format!("\x1b[?{flags}u").into_bytes());
+            }
             ([b'?'], 'W') if arg(0) == 5 => self.reset_tab_stops(),
             ([b'$'], 'p') => {
                 let number = first(params);

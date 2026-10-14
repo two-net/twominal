@@ -127,12 +127,14 @@ send \e[2;3H\e[s\e[H\e[u
 cursor 2;3
 
 ## With a private marker CSI u is another sequence
-# XTRESTORE and the kitty keyboard protocol's, which are not done.
+# XTRESTORE, which is not done, and the kitty keyboard protocol's, which keyboard.txt checks.
 size 10x5
 send \e[2;3H\e[s\e[4;4H
 send \e[?u
+reply \e[?0u
 cursor 4;4
 send \e[?1u
+reply \e[?0u
 cursor 4;4
 send \e[=5u
 cursor 4;4

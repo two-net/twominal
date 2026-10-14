@@ -1,9 +1,11 @@
-//! Real programs, shown by the Terminal Core (TERM-01 to TERM-04, TERM-06).
+//! Real programs, shown by the Terminal Core and typed into through the Input Handler
+//! (TERM-01 to TERM-04, TERM-06, TERM-08, TERM-09, TERM-11).
 //!
 //! Each test starts a program on a pseudo-terminal through the Session, as a tab does, and
-//! passes what it writes to a Terminal Core, which answers its queries. The Tab will do that
-//! itself with #31; here the test does. A test whose program is not installed says so, and
-//! passes.
+//! passes what it writes to a Terminal Core, which answers its queries. Keys, pastes and focus
+//! changes go through the Input Handler, by the modes the program set, as DOM events. The Tab
+//! will do that itself with #31; here the test does. A test whose program is not installed
+//! says so, and passes.
 //!
 //! Every program runs with an environment of its own and a home folder of the test's own, so
 //! nothing of the user's is read or written. These run on macOS and Linux.
@@ -18,8 +20,9 @@ use std::sync::mpsc::{sync_channel, Receiver};
 use std::time::{Duration, Instant};
 use std::{env, fs};
 
+use tab::input::{Action, InputEvent, InputHandler, KeyEvent, Modifiers};
 use tab::session::{Output, Session, Shell, Start};
-use terminal_core::{Color, Event, Size, Style, TerminalCore, Underline};
+use terminal_core::{Color, Event, Keyboard, Size, Style, TerminalCore, Underline};
 
 /// How long a test waits for a program before it fails.
 const PATIENCE: Duration = Duration::from_secs(10);
@@ -63,11 +66,59 @@ fn installed(program: &str) -> Option<String> {
     Some(found?.to_str()?.to_string())
 }
 
-/// A program on a terminal: its session, and the Terminal Core that shows it.
+/// The DOM event of a key going down: `key` is what it typed or its name, at the place a US
+/// keyboard has it.
+fn press(key: &str, modifiers: Held) -> InputEvent {
+    let code = match key {
+        " " => "Space".to_string(),
+        "[" => "BracketLeft".to_string(),
+        "-" => "Minus".to_string(),
+        letter if letter.len() == 1 && letter.as_bytes()[0].is_ascii_alphabetic() => {
+            format!("Key{}", letter.to_ascii_uppercase())
+        }
+        letter if letter.len() == 1 && letter.as_bytes()[0].is_ascii_digit() => {
+            format!("Digit{letter}")
+        }
+        name => name.to_string(),
+    };
+    InputEvent::Key(KeyEvent {
+        key: key.to_string(),
+        code,
+        modifiers: modifiers.0,
+        ..KeyEvent::default()
+    })
+}
+
+/// The modifiers held for a key.
+#[derive(Clone, Copy, Default)]
+struct Held(Modifiers);
+
+fn held() -> Held {
+    Held::default()
+}
+
+impl Held {
+    fn shift(mut self, on: bool) -> Self {
+        self.0.shift = on;
+        self
+    }
+    fn ctrl(mut self) -> Self {
+        self.0.ctrl = true;
+        self
+    }
+    fn alt(mut self) -> Self {
+        self.0.alt = true;
+        self
+    }
+}
+
+/// A program on a terminal: its session, the Terminal Core that shows it and the Input
+/// Handler that types into it.
 struct Terminal {
     session: Session,
     output: Receiver<Output>,
     core: TerminalCore,
+    input: InputHandler,
 }
 
 impl Terminal {
@@ -113,6 +164,7 @@ impl Terminal {
             session,
             output,
             core: TerminalCore::new(SIZE, None),
+            input: InputHandler::new(),
         }
     }
 
@@ -151,6 +203,22 @@ impl Terminal {
 
     fn keys(&self, keys: &str) {
         self.session.write(keys.as_bytes().to_vec());
+    }
+
+    /// Passes `event` through the Input Handler, with the modes the program set, and writes
+    /// what it sends.
+    fn input(&mut self, event: InputEvent) {
+        if let Some(Action::Send(bytes)) = self.input.handle(event, self.core.modes()) {
+            self.session.write(bytes);
+        }
+    }
+
+    /// Types `text` a key at a time, each as the DOM reports it on a US keyboard.
+    fn type_text(&mut self, text: &str) {
+        for char in text.chars() {
+            let shift = char.is_ascii_uppercase();
+            self.input(press(&char.to_string(), held().shift(shift)));
+        }
     }
 
     /// The rows of the screen being shown, without their trailing blanks.
@@ -459,4 +527,179 @@ fn top_runs_on_the_alternate_screen() {
     top.until_exit();
     assert!(!top.alternate(), "{}", top.dump());
     assert_eq!(top.rows()[..3], ["before", "after", ""], "{}", top.dump());
+}
+
+// ---------------------------------------------------------------------------------------
+// Typing into programs
+// ---------------------------------------------------------------------------------------
+
+#[test]
+fn fish_key_reader_tells_apart_what_the_kitty_protocol_tells_apart() {
+    let Some(reader) = installed("fish_key_reader") else {
+        return;
+    };
+    let home = Folder::new();
+    let mut reader = Terminal::run(&home.0, &reader, &[&reader, "--continuous"], &[]);
+
+    // fish asks whether the protocol is there, and sets its flags when it is (TERM-09):
+    // disambiguation and the alternate keys.
+    reader.until("the protocol", |reader| {
+        reader.core.modes().keyboard == Keyboard::new(5)
+    });
+
+    // Tab and Ctrl+I are one byte without the protocol, and so are Esc and the start of every
+    // Alt key. Each is a key of its own here. Alt is on a key that types nothing, since on
+    // macOS Option types characters.
+    for (key, modifiers, bind) in [
+        ("Tab", held(), "bind tab "),
+        ("i", held().ctrl(), "bind ctrl-i "),
+        ("Escape", held(), "bind escape "),
+        ("Backspace", held().alt(), "bind alt-backspace "),
+        ("-", held().ctrl(), "bind ctrl-minus "),
+    ] {
+        reader.input(press(key, modifiers));
+        reader.until(bind, |reader| reader.shows(bind));
+    }
+}
+
+#[test]
+fn fish_edits_with_its_own_keys_through_the_kitty_protocol() {
+    let Some(fish) = installed("fish") else {
+        return;
+    };
+    let home = Folder::new();
+    let mut fish = Terminal::run(
+        &home.0,
+        &fish,
+        &[
+            &fish,
+            "--no-config",
+            "--private",
+            "--init-command",
+            "set -g fish_greeting; function fish_prompt; echo -n 'prompt> '; end",
+        ],
+        &[],
+    );
+    fish.until("the prompt, with the protocol on", |fish| {
+        fish.shows("prompt>") && fish.core.modes().keyboard == Keyboard::new(5)
+    });
+
+    // Ctrl+W deletes a word, as fish's own key (USE-03), and Enter runs the line.
+    fish.type_text("echo one two");
+    fish.until("the line", |fish| fish.shows("prompt> echo one two"));
+    fish.input(press("w", held().ctrl()));
+    fish.until("the word gone", |fish| {
+        fish.rows().iter().any(|row| row == "prompt> echo one")
+    });
+    fish.input(press("Enter", held()));
+    fish.until("the output", |fish| {
+        fish.rows().iter().any(|row| row == "one")
+    });
+
+    // fish turns the protocol off for the commands it runs, so cat reads its line and Ctrl+D
+    // as xterm sends them, and on again at the next prompt. sh says when cat has the terminal.
+    fish.type_text("sh -c 'echo ready; cat'");
+    fish.input(press("Enter", held()));
+    fish.until("cat", |fish| {
+        fish.core.modes().keyboard.is_legacy() && fish.rows().iter().any(|row| row == "ready")
+    });
+    fish.type_text("hello");
+    fish.input(press("Enter", held()));
+    fish.until("the line, echoed and written back", |fish| {
+        fish.rows().iter().filter(|row| *row == "hello").count() == 2
+    });
+    fish.input(press("d", held().ctrl()));
+    fish.until("the next prompt, with the protocol on", |fish| {
+        let prompts = fish
+            .rows()
+            .iter()
+            .filter(|row| row.starts_with("prompt>"))
+            .count();
+        prompts == 3 && fish.core.modes().keyboard == Keyboard::new(5)
+    });
+}
+
+#[test]
+fn zsh_takes_a_bracketed_paste_into_its_line_without_running_it() {
+    let Some(zsh) = installed("zsh") else { return };
+    let home = Folder::new();
+    let mut zsh = Terminal::run(&home.0, &zsh, &[&zsh, "-f", "-i"], &[("PS1", "prompt> ")]);
+    zsh.until("the prompt, ready for a bracketed paste", |zsh| {
+        zsh.shows("prompt>") && zsh.core.modes().bracketed_paste
+    });
+
+    // TERM-11. Had the paste's line break run the first line, its output would come before
+    // the Z typed after the paste.
+    zsh.input(InputEvent::Paste("echo one\necho two".to_string()));
+    zsh.type_text("Z");
+    zsh.until("the pasted lines in the line editor", |zsh| {
+        zsh.shows("echo twoZ")
+    });
+    assert!(
+        zsh.shows("prompt> echo one") && !zsh.rows().iter().any(|row| row == "one"),
+        "{}",
+        zsh.dump()
+    );
+
+    zsh.input(press("Backspace", held()));
+    zsh.input(press("Enter", held()));
+    zsh.until("both lines run", |zsh| {
+        let rows = zsh.rows();
+        rows.iter().any(|row| row == "one") && rows.iter().any(|row| row == "two")
+    });
+}
+
+#[test]
+fn vim_moves_with_the_cursor_keys_and_leaves_insert_mode_on_esc() {
+    let Some(vim) = installed("vim") else { return };
+    let home = Folder::new();
+    fs::write(home.0.join("notes.txt"), "").unwrap();
+    let script =
+        format!("'{vim}' -u NONE -N -n -i NONE --cmd 'set ttimeout ttimeoutlen=10' notes.txt");
+    let mut vim = Terminal::run(&home.0, &vim, &["/bin/sh", "-c", &script], &[]);
+
+    // vim turns on the cursor keys' and the keypad's application modes (TERM-08), so Left
+    // is SS3 D.
+    vim.until("the file", |vim| {
+        let modes = vim.core.modes();
+        vim.alternate() && modes.application_cursor && modes.application_keypad
+    });
+    vim.type_text("iab");
+    vim.input(press("ArrowLeft", held()));
+    vim.type_text("X");
+    vim.until("the text", |vim| vim.rows()[0] == "aXb");
+    // Esc goes at once, alone, so vim leaves insert mode and takes the command after it.
+    vim.input(press("Escape", held()));
+    vim.type_text(":wq");
+    vim.input(press("Enter", held()));
+    vim.until_exit();
+    assert_eq!(
+        fs::read_to_string(home.0.join("notes.txt")).unwrap(),
+        "aXb\n"
+    );
+}
+
+#[test]
+fn vim_hears_the_focus_come_and_go() {
+    let Some(vim) = installed("vim") else { return };
+    let home = Folder::new();
+    let script = format!(
+        "'{vim}' -u NONE -N -n -i NONE --cmd 'set ttimeout ttimeoutlen=10' \
+         -c 'autocmd FocusLost * call setline(1, \"lost\")' \
+         -c 'autocmd FocusGained * call setline(1, \"gained\")'"
+    );
+    let mut vim = Terminal::run(&home.0, &vim, &["/bin/sh", "-c", &script], &[]);
+
+    // vim asks to be told of focus (TERM-11).
+    vim.until("focus reporting", |vim| {
+        vim.alternate() && vim.core.modes().focus
+    });
+    vim.input(InputEvent::Focus(false));
+    vim.until("FocusLost", |vim| vim.rows()[0] == "lost");
+    vim.input(InputEvent::Focus(true));
+    vim.until("FocusGained", |vim| vim.rows()[0] == "gained");
+
+    vim.type_text(":q!");
+    vim.input(press("Enter", held()));
+    vim.until_exit();
 }

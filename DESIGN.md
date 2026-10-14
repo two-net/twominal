@@ -1,6 +1,6 @@
 # Twominal — Design
 
-**Version:** 0.12 · **Date:** 2026-10-15 · **Tracks:** [SRS](SRS.md) v0.6
+**Version:** 0.13 · **Date:** 2026-10-15 · **Tracks:** [SRS](SRS.md) v0.6
 
 > The SRS says what Twominal must do. This document says how it is built: the technology choices the SRS leaves open (C-1) and where each component of SRS §6 lives. Requirement IDs such as `ARC-02` are the SRS's. Where the two disagree, the SRS wins and this document is corrected.
 
@@ -146,7 +146,7 @@ Planned, and added by the issue that first needs each:
 
 ## 3. Components
 
-As of this version the Settings Store, the Session and the Terminal Core are built, and the App Shell opens windows, builds the native menus, gives the product its name and logo and answers the `twominal` command. Every other Rust home exists as a skeleton: types that say who owns what, and no behaviour. Of the webview homes only `src/app.js` exists. The others are created by their issues, at the paths in §1.
+As of this version the Settings Store, the Session, the Terminal Core and the Rust half of the Input Handler are built, and the App Shell opens windows, builds the native menus, gives the product its name and logo and answers the `twominal` command. Every other Rust home exists as a skeleton: types that say who owns what, and no behaviour. Of the webview homes only `src/app.js` exists. The others are created by their issues, at the paths in §1.
 
 ### Tier 1: App Shell
 
@@ -295,13 +295,57 @@ The `twominal` command is the app's own executable (GEN-02, GEN-05). `src-tauri/
 - **Versions.** The scripts use nothing newer than bash 3.2 and zsh 5.0, and PowerShell's runs in Windows PowerShell 5.1 and PowerShell 7. They are tested with bash 3.2.57, zsh 5.9 and PowerShell 7.6 on macOS. Windows PowerShell 5.1 waits for the first Windows build.
 - **Not yet.** With the command-line editor on, shell integration must also hide the shell's own prompt and take the finished line from the editor (CMD-01, CMD-04). That is added to these scripts with the editor.
 
+#### Input Handler
+
+`crates/tab/src/input.rs` decides what an input event means. So far every event is passthrough: it becomes the bytes the program in the session expects, by the modes the Terminal Core keeps (TERM-08, TERM-09, TERM-11, HW-01). Shortcuts (#43), the Command Line's keys and Vim mode (#35 to #37) are routed here as each is built.
+
+- **One way in.** `InputHandler::handle` takes an `InputEvent` and the core's modes, and returns one `Action`: bytes for the Session, or that the text being composed changed. Nothing waits for what may follow, so Esc is sent alone the moment it comes (TERM-08, VIM-05). The Session's writer flushes each write.
+- **What arrives.** `InputEvent` is shaped after the DOM's events, so the webview half only copies fields:
+  - a key's `key` and `code`, the modifiers held, the locks on, and whether it went down, repeated or came up
+  - text an input method committed, and the text it is composing
+  - a paste, and focus gained or lost
+
+  `input/key.rs` reads what a key means, and `input/encode.rs` makes the bytes. Any string may arrive, and one that names no key sends nothing.
+- **Layouts (HW-01).** A key sends what the layout typed, which the DOM's `key` gives.
+  - On macOS, Option types the character the layout gives it, as in Terminal.app and kitty, so every layout reaches its @, [ and |. On a key that types nothing, such as an arrow, Enter or Backspace, it is Alt, which is what the command line's keys need (Appendix A). With Ctrl or Cmd held, Option is Alt too. There is no setting.
+  - AltGr, on Linux and Windows, types the character too. Windows reports it as Ctrl and Alt as well, and those are dropped.
+  - With Ctrl or Alt, a key that types no ASCII on its layout is the key at its place on a US keyboard, as in kitty, so Ctrl+C and Alt+B work on Cyrillic and Greek. The DOM's `code` names that place.
+  - A dead key sends nothing. What it composes arrives as committed text.
+- **Without the kitty keyboard flags, as xterm** sends keys for `TERM=xterm-256color`:
+  - Ctrl makes what Xlib's `XkbToControl` makes, which xterm uses, and Ctrl+Shift with a letter is Ctrl with the letter. Alt puts ESC before the key.
+  - Enter is CR, or CR LF under LNM. Backspace is DEL, and BS with Ctrl. Shift+Tab is `CSI Z`.
+  - The arrows, Home, End and the keypad's Begin follow DECCKM, and with modifiers are `CSI 1;m`, Cmd counting as xterm's Meta, 8. Insert, Delete, the page keys and F5 to F12 are `CSI n ~`. F13 to F35 are what terminfo's `kf13` to `kf35` say: Shift, then Ctrl, with F1 to F12. The menu key is xterm's F16, `CSI 29 ~`.
+  - The keypad follows DECKPAM, but for a key that types a character while NumLock is on, as in xterm.
+  - A repeat sends what a press sends, and a release nothing.
+- **With the kitty keyboard flags (TERM-09)**, as kitty's `key_encoding.c` sends keys, kitty being the protocol's reference.
+  - With disambiguation, Esc and every key with Ctrl, Alt or Cmd are escape codes no other key sends, so Ctrl+I is not Tab and Esc does not start an Alt key. The keypad keeps its own codes.
+  - The other flags add repeats and releases, the key's shifted form and its US key, every key as an escape code, modifiers alone included, and the text a key types.
+  - Enter, Tab and Backspace send what they always have until every key is asked for, so `reset` can still be typed after a program that set the flags crashed.
+- **Where it differs.**
+  - From xterm: Cmd with a key that types, or with Enter, Tab, Backspace or Esc, sends nothing, since xterm has no encoding for it. Terminal.app and iTerm2 send nothing either. With the kitty protocol it is reported. The US key with Ctrl and Alt on other layouts is kitty's.
+  - From kitty with no flag set: Ctrl+Shift with a letter is Ctrl with the letter, and keys xterm has no sequence for, such as the media keys and PrintScreen, send nothing. kitty sends `CSI u` for both, which its specification lets a terminal leave out. The keypad follows DECKPAM, which kitty ignores.
+  - The kitty protocol's code for a key is what it types without Shift, and a webview cannot read the layout. A cased character's lowercase is right on every layout. For a shifted symbol, the code is the US key when the layout types the same there, and otherwise the shifted symbol (§9).
+- **Pastes (TERM-11).** Under 2004 a paste is bracketed.
+  - Line breaks become CR, as Enter types. xterm turns LF into CR too, but CR LF into two.
+  - Every other control character but tab becomes a space, as xterm's `disallowedPasteControls` does by default for ESC, BS, DEL, NUL, ENQ, EOT and the stty characters. Twominal cannot read stty, so it takes them all, C1 included. So a pasted ESC cannot end the bracket early, and a pasted Ctrl+C cannot interrupt.
+  - The multi-line warning (SEC-06) and the clipboard are #28's.
+- **Focus (TERM-11).** `CSI I` and `CSI O`, under 1004.
+- **Input methods (HW-01).** The text being composed is kept here, for the Renderer to show at the cursor (#22). Committed text is sent as it is, in every mode, as kitty sends it.
+- **The webview half** is written by #31, which first gives a window a tab to type into. It keeps to this, and decides nothing: which key it was, what it typed and which modifiers count are `key.rs`'s.
+  - A hidden `<textarea>` in the terminal area has the focus, so the OS sends it keys and input-method text. It follows the cursor's cell, so an input method's candidate window opens there (#22).
+  - `keydown` and `keyup` become key events, but not while `isComposing` is set, nor for keyCode 229 or the key `Dead`: those belong to the input method. A `keydown` that is sent is `preventDefault`ed, so no `input` event types it again.
+  - `compositionupdate` gives the text being composed, and `compositionend` gives an empty one, then the committed text.
+  - An `input` event that no sent `keydown` caused, as from the emoji picker, a press-and-hold accent or dictation, is committed text.
+  - `paste` is a paste. On macOS, Edit ▸ Paste fires it.
+  - The window gaining and losing focus is focus.
+
 ### Tier 4: Terminal Core
 
 A pure `no_std` crate. Bytes go in through one entry point. Out come the screen state, replies to terminal queries, and what shell integration reports. It holds the screen, scrollback, selection, Vim cursor and find matches. Must not depend on the interface, rendering or OS processes.
 
 `crates/terminal-core/src/` interprets output as xterm does (TERM-01, TERM-06).
 
-- **The parts.** `vte` splits the bytes into characters and control functions. `control.rs` says what each one does, `terminal.rs` does it to the cursor and the modes, and `screen.rs` to the rows. `width.rs` says how many cells a character takes, and `style.rs` what SGR does to the style of the cells. `report.rs` reads shell integration's reports.
+- **The parts.** `vte` splits the bytes into characters and control functions. `control.rs` says what each one does, `terminal.rs` does it to the cursor and the modes, and `screen.rs` to the rows. `width.rs` says how many cells a character takes, and `style.rs` what SGR does to the style of the cells. `keyboard.rs` keeps the kitty keyboard protocol's flags. `report.rs` reads shell integration's reports.
 - **One way in.** `TerminalCore::interpret` takes bytes and returns the replies and reports they gave, in order, one reply for each query. The Tab writes the replies to the Session (#31). A sequence cut in two by the end of one call is finished by the next, so the screen comes out the same however the output was cut (ARC-03). A character cut in two is held back by the core until the rest comes, because vte 0.15 loses the byte after such a character when another character follows it. `screen()`, `cursor()` and `modes()` say what there is to show.
 - **The state, as in xterm.**
   - Two screens, primary and alternate, each made of rows that remember whether their line wrapped.
@@ -312,7 +356,7 @@ A pure `no_std` crate. Bytes go in through one entry point. Out come the screen 
   - The C0 controls. CAN cancels a sequence, and SUB cancels one and shows `␦`, as xterm does for a VT220.
   - IND, NEL, RI, HTS, DECSC, DECRC, RIS, DECALN, the keypad modes and the designation of character sets.
   - Moving the cursor, erasing, inserting and deleting characters and lines, scrolling, REP, the tab stops and the scrolling region.
-  - The modes IRM and LNM, and the DEC private modes 1, 6, 7, 25, 47, 1047, 1048, 1049, 66, 1004, 2004, 9, 1000, 1002, 1003 and 1006. The keyboard and mouse modes are only kept, for #20 and #21 to act on.
+  - The modes IRM and LNM, and the DEC private modes 1, 6, 7, 25, 47, 1047, 1048, 1049, 66, 1004, 2004, 9, 1000, 1002, 1003 and 1006. The Input Handler acts on the keyboard, paste and focus modes. The mouse modes are only kept, for #21 to act on.
   - DECSTR, which turns autowrap back on, as in xterm. `tput reset` sends it. It forgets the saved cursor of the screen being shown, and the other screen keeps its own.
   - DECALN, which also makes the region the whole screen and turns origin mode off, as in xterm.
 - **Characters and their widths (TERM-02).** Text is UTF-8. A character takes the cells libc's `wcwidth` gives it, as in xterm, which takes them from there or from its own `mk_wcwidth`. Programs count with the same widths, so the grid stays aligned with what they print. Characters are counted one by one, never clustered.
@@ -323,6 +367,12 @@ A pure `no_std` crate. Bytes go in through one entry point. Out come the screen 
   - The format characters xterm discards are discarded: the zero width space, the direction marks, embeddings, overrides and isolates, the word joiner, the invisible operators, the deprecated format characters, the byte order mark and the interlinear annotations. ZWJ and ZWNJ, which xterm discards too, and VS15 and VS16, which it drops, are kept with the character before them, so that copying gives back the text (TERM-17) and the Renderer can draw the sequence.
   - Nothing leaves half a wide character. Writing over one of its cells, erasing or deleting one of them, inserting between them or pushing the character to the end of the row, and a narrower screen, blank the whole character, as in xterm.
   - Where it differs from xterm. xterm replaces a character and a mark with the one character Unicode has for both; here they stay as they came. xterm prints a mark on its own in a cell that was never written to, and moves on; here every cell holds at least a blank, so the mark joins it and the cursor stays, as `wcwidth` expects. Given several wide characters in one read with autowrap off, xterm puts the last of them in the last two columns; here each is taken alone, as xterm takes them when they come in separate reads, so the screen does not depend on how the output was read (ARC-03).
+- **The kitty keyboard protocol (TERM-09).** `keyboard.rs` keeps the flags a program asked keys to be sent with, and `Modes::keyboard` gives the ones in use, for the Input Handler. kitty defines the protocol, so it is the model, as xterm is elsewhere.
+  - Each screen has a stack of its own, of eight flags as kitty's, kept while the other screen is shown.
+  - `CSI > flags u` pushes flags, and on a full stack the oldest go. `CSI < n u` pops them, and popping more than there are leaves no flag set. `CSI = flags ; mode u` makes the newest flags these, sets these too or resets these, by its mode, and on an empty stack sets a first entry, as kitty does, which fish relies on: it only ever sets.
+  - Seven bits of flags are kept, as in kitty, so a program reads back flags the protocol does not define yet.
+  - RIS and DECSTR forget the flags of both screens, as kitty does.
+  - vte reads an empty parameter as 0, so `CSI < 0 u` pops one, where kitty pops none.
 - **Colors and attributes (TERM-03 to TERM-05).** SGR sets the style that characters are printed in, and each cell keeps the style it was written in. `style.rs` reads SGR as xterm's `CASE_SGR` and `parse_extended_colors` do, but for the underline's styles and color.
   - A color is the default, one of the 256 of the palette, or 24-bit RGB. The core keeps the palette's number, not what it looks like, so a theme change recolors what is on the screen (THM-02, THM-03). The Renderer gives 0 to 15 the theme's 16 ANSI colors (THM-04), and 16 to 255 xterm's 6×6×6 cube and 24 grays (#22). Bold stays apart from the color: the core never brightens a bold one, and how bold text looks is the Renderer's (FONT-09).
   - 30 to 37 and 90 to 97 are the palette's 0 to 15 for the text, 40 to 47 and 100 to 107 for the background, and 39 and 49 the defaults. 38 and 48 take any color, written in one of xterm's three ways: as the parameters after them (`38;5;n`, `38;2;r;g;b`), as the sub-parameters of the parameter after them (`38;5:n`, `38;2:r:g:b`), or as their own sub-parameters (`38:5:n`, `38:2:r:g:b`). In sub-parameters, an RGB color with four numbers after the `2` starts with the color space, which is skipped (`38:2::r:g:b`). A color with a number missing, or an index or component of 256 or more, is ignored, and the parameters it takes are used up. A kind of color other than 2 and 5 uses up only itself.
@@ -338,10 +388,11 @@ A pure `no_std` crate. Bytes go in through one entry point. Out come the screen 
   - DA2 is `CSI > 1 ; 10 ; 0 c`. The low version keeps vim from probing for features of xterm that are not here. #21 may raise it, for vim to choose SGR mouse reports.
   - DSR: the status, and where the cursor is, in the ANSI form and the DEC one.
   - DECRQM, for the ANSI and DEC modes above but 1048, which is an action and not a state. Any other mode is reported as not known.
+  - The kitty keyboard protocol's flags in use, `CSI ? flags u`, whatever the query's parameters.
 - **Never answered (SEC-05).** The window title and icon label reports (`CSI 20 t`, `CSI 21 t`) and every other window operation, the answerback to ENQ, and every device control string, DECRQSS and XTGETTCAP among them.
 - **Ignored.** Whatever is not listed here, as ECMA-48 asks (REL-02).
-  - Until their issues: the cursor's shape (#25), and titles, OSC 7, color queries, the bell, links and the clipboard (#27). The kitty keyboard protocol's query is not answered, so programs know it is not there (#20).
-  - Always: DECCOLM, which would resize the screen and clear it, KAM and SRM, which would lock the keyboard or echo what is typed, and the SGR numbers *Colors and attributes* does not list, blink among them.
+  - Until their issues: the cursor's shape (#25), and titles, OSC 7, color queries, the bell, links and the clipboard (#27).
+  - Always: DECCOLM, which would resize the screen and clear it, KAM and SRM, which would lock the keyboard or echo what is typed, the SGR numbers *Colors and attributes* does not list, blink among them, and xterm's modifyOtherKeys, since a program that wants its keys told apart has the kitty keyboard protocol. vim asks for modifyOtherKeys, so it gets xterm's keys, as in Terminal.app.
   - The C1 controls and DEL take no cell, whether a C1 control comes as UTF-8 or as a single byte. vte reads escape sequences only in their 7-bit form.
   - A control function with more than 32 parameters is ignored whole, where xterm acts on its first ones and drops the rest.
 - **Where the wrap mark differs from xterm.** A row stops wrapping when an erase reaches its last cell, or when it is cleared whole. xterm's EL 0 and ECH clear the mark whatever they erase, and its EL 1 and EL 2 keep it (`util.c`, `ClearRight`, `ClearLeft`, `ClearLine`). Here EL 0 and ECH clear it only when they reach the last cell, and EL 1 and EL 2 clear it when they reach it, EL 2 always. The mark serves only copying and reflow (TERM-16, TERM-17), and a row whose end was erased does not go on in the next.
@@ -505,9 +556,11 @@ Saving a setting changes only the keys whose value changed. Comments, the order 
   - **The conformance suite** (MAINT-03), `crates/terminal-core/tests/conformance.rs`, runs the cases in `crates/terminal-core/tests/conformance/`, one file for each area of §3. A case gives a size, the bytes a program writes, and the screen, cursor, modes and replies that must follow, drawn as text. A row of the screen is the text of its cells: a wide character takes two columns of it, as in a monospace font, and a combining mark follows its character. The cells' styles are drawn the same way, a letter for each cell, and the case says which style each letter stands for. Each expectation is what xterm does, taken from its control sequences document and its source, or a deviation this section documents, which the case's comment names. Every reply must be one the case expects, so a query that must not be answered fails if it is (SEC-05). Each case runs twice, as written and a byte at a time (ARC-03). The suite uses only the public interface, as the Tab does, and is where each TERM requirement the Terminal Core meets gets its test (MAINT-02).
   - **Unit tests**, `crates/terminal-core/src/tests.rs`, check what the public interface does not show: internal state, the reports of the shell integration, resizing, the widths, REP against printing the characters out, and that the same bytes give the same state whether they come whole, a byte at a time, cut at any one place or in random pieces (ARC-03). Characters cut in two are checked on their own. An ignored test measures plain text: `cargo test --release -p terminal-core -- --ignored` (PERF-06).
   - **Fuzzing** (REL-02). `crates/terminal-core/fuzz/` holds two cargo-fuzz targets. `interpret` gives hostile output in pieces, with resizes between, and checks the state's rules after each step and that every reply is fixed text and numbers (SEC-05). `split` checks that the output gives the same state and events whole, a byte at a time and in pieces (ARC-03). An input's first bytes choose the size, up to 160 by 60, and the cuts, so libFuzzer explores them too. `terminal.dict` gives it the pieces of sequences. What they check is `crates/terminal-core/src/fuzz.rs`, which `cargo test` also runs, on stable, with hostile output made up from the same pieces. Run each target from `crates/terminal-core` for half an hour after a change to the Terminal Core, and add whatever it finds as a test: `cargo +nightly fuzz run interpret -- -dict=fuzz/terminal.dict -timeout=5 -max_len=16384 -max_total_time=1800 -rss_limit_mb=4096`, and `cargo +nightly fuzz run split -s none -- -dict=fuzz/terminal.dict -timeout=5 -max_len=16384 -max_total_time=1800`. `-timeout` makes a slow input a hang, which REL-02 forbids. `interpret` runs under AddressSanitizer, for the `unsafe` code in vte. Its memory then grows to almost 3 GB in half an hour and levels off there, though the Terminal Core holds a few megabytes of it: AddressSanitizer's allocator keeps what each input's rows freed, and a row of 32-byte cells frees twice what one of 16 did. So it gets 4 GB, where libFuzzer's 2 GB stops it within the half hour. `split` checks logic, not memory, so it runs without: under AddressSanitizer its memory grows by about 100 MB a minute until libFuzzer stops it at 2 GB, though the Terminal Core holds none of it, and without it runs three times as fast.
-  - `crates/tab/tests/programs.rs` runs fish, vim, less, `git log` and top on real pseudo-terminals through the Session, with the Terminal Core answering their queries. It checks what they show and that the screen is given back when they end (TERM-01), that vim's cursor lands where the core put the characters of a file of wide characters, combining marks and emoji (TERM-02), and that the colors git writes reach the cells through less, as do vim's 24-bit colors, its attributes and the background it paints by erasing (TERM-03, TERM-04). Each runs in a home folder and environment of its own. A program that is not installed is said so, and its test passes.
+  - `crates/tab/tests/programs.rs` runs fish, vim, less, `git log`, top, `fish_key_reader` and zsh on real pseudo-terminals through the Session, with the Terminal Core answering their queries. It checks what they show and that the screen is given back when they end (TERM-01), that vim's cursor lands where the core put the characters of a file of wide characters, combining marks and emoji (TERM-02), and that the colors git writes reach the cells through less, as do vim's 24-bit colors, its attributes and the background it paints by erasing (TERM-03, TERM-04). Each runs in a home folder and environment of its own. A program that is not installed is said so, and its test passes.
+  - The same file types into them through the Input Handler, as DOM events, by the modes they set. `fish_key_reader` turns the kitty keyboard protocol on and reads Ctrl+I, Tab, Esc and an Alt key apart (TERM-09). fish edits with Ctrl+W through the protocol and turns it off for the commands it runs, so cat reads Ctrl+D as xterm sends it (USE-03). zsh keeps a bracketed paste in its line until Enter (TERM-11). vim moves with the arrows in application mode and leaves insert mode on Esc at once, and hears focus come and go (TERM-08, TERM-11).
   - `crates/tab/src/session/tests.rs` checks that the Terminal Core reads zsh's reports as the scripts write them, a list of over 60 KB among them.
 - **Tab tier.** The `tab` crate does not depend on Tauri, so the Command Line, key handling and the Renderer's choice of text runs are unit-tested without a window.
+  - **Input Handler.** `crates/tab/src/input/tests.rs` gives DOM key events, pastes, focus changes and input-method text, and checks the bytes: xterm's encodings of every key and modifier, layouts, macOS Option and AltGr, and the kitty protocol's flags, with kitty's own cases from `kitty_tests/keys.py`. It also checks that, with every key reported, every key and every set of modifiers reaches the program, that without the protocol every key xterm can send does, and that no string the webview sends can make it panic (TERM-08, TERM-09, TERM-11, HW-01).
 - **Webview.** It has no logic of its own to unit-test. What it draws is checked by the acceptance scenarios (SRS §7) as documented manual tests (MAINT-02).
 
 ## 9. Risks
@@ -518,7 +571,8 @@ Saving a setting changes only the keys whose value changed. Comments, the order 
 | A webview starts too slowly on some OS | PERF-01 | #48 | Nothing inside this design. The target or the framework is reopened |
 | The three webviews draw text slightly differently | PORT-02, FONT-05 | #22, #24 | Every run is drawn at its cell's position, so differences cannot move a column |
 | IPC adds too much to each key | PERF-04 | #48 | Frames while typing carry only the rows that changed. In Tauri 2.12 a channel message of up to about 8 KB of JSON goes to the webview in one step, and a larger one needs a second |
-| Input methods need decisions in the webview | HW-01 | #20 | The webview half of the Input Handler may hold a composition, and nothing else |
+| Input methods need decisions in the webview | HW-01 | #31, against the contract in §3 | The webview half of the Input Handler may hold a composition, and nothing else |
+| A webview cannot read the keyboard layout | TERM-09 | Nothing can settle it in a webview | The kitty protocol's code for a shifted symbol on a layout other than US is the shifted symbol (§3). If programs need more, the App Shell asks the OS for the layout and hands it down |
 | A webview does not follow the OS reduced-motion setting | SW-04, ACC-01 | #40 | The App Shell reads the OS setting itself and passes it to the Animator |
 | A canvas cannot be read by screen readers | ACC-04 | #46 | The Renderer keeps a hidden text copy of the visible rows for them |
 | Another crate turns on vte's `std` feature, which makes its buffer for operating system commands unbounded | ARC-02, REL-02 | The build: `TerminalCore::new` calls `vte::Parser::new_with_size`, which is there only without `std` | Change this document first |

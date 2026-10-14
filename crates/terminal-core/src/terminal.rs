@@ -8,6 +8,7 @@
 use alloc::vec::Vec;
 use core::mem;
 
+use crate::keyboard::{Keyboard, Stack};
 use crate::report::Report;
 use crate::screen::{Cell, Screen};
 use crate::style::Style;
@@ -42,6 +43,9 @@ pub struct Modes {
     pub mouse: MouseTracking,
     /// Mouse events are reported with SGR's extended coordinates (TERM-10, #21).
     pub mouse_sgr: bool,
+    /// How keys are encoded: the kitty keyboard protocol's flags in use on the screen being
+    /// shown, or none for xterm's encoding (TERM-08, TERM-09).
+    pub keyboard: Keyboard,
 }
 
 impl Default for Modes {
@@ -56,6 +60,7 @@ impl Default for Modes {
             focus: false,
             mouse: MouseTracking::Off,
             mouse_sgr: false,
+            keyboard: Keyboard::default(),
         }
     }
 }
@@ -245,6 +250,9 @@ pub(crate) struct Terminal {
     pending: bool,
     /// What DECSC saved on the primary screen and on the alternate one.
     saved: [Option<Saved>; 2],
+    /// The kitty keyboard protocol's flags pushed on the primary screen and on the alternate
+    /// one. `modes.keyboard` is the shown screen's flags in use.
+    keyboard: [Stack; 2],
     /// The scrolling region's first and last rows. `top <= bottom < rows`.
     top: usize,
     bottom: usize,
@@ -283,6 +291,7 @@ impl Terminal {
             col: 0,
             pending: false,
             saved: [None, None],
+            keyboard: [Stack::default(); 2],
             top: 0,
             bottom: rows - 1,
             tabs: (0..cols).map(default_stop).collect(),
@@ -824,6 +833,35 @@ impl Terminal {
         self.style.select(params);
     }
 
+    // The kitty keyboard protocol
+
+    /// `CSI > flags u`, on the stack of the screen being shown.
+    pub(crate) fn push_keyboard(&mut self, flags: usize) {
+        self.keyboard_stack().push(flags);
+        self.keyboard_changed();
+    }
+
+    /// `CSI < count u`.
+    pub(crate) fn pop_keyboard(&mut self, count: usize) {
+        self.keyboard_stack().pop(count);
+        self.keyboard_changed();
+    }
+
+    /// `CSI = flags ; how u`.
+    pub(crate) fn set_keyboard(&mut self, flags: usize, how: usize) {
+        self.keyboard_stack().set(flags, how);
+        self.keyboard_changed();
+    }
+
+    fn keyboard_stack(&mut self) -> &mut Stack {
+        &mut self.keyboard[self.modes.alternate_screen as usize]
+    }
+
+    /// Shows the flags of the screen being shown, after they or the screen changed.
+    fn keyboard_changed(&mut self) {
+        self.modes.keyboard = self.keyboard[self.modes.alternate_screen as usize].current();
+    }
+
     // Modes
 
     pub(crate) fn set_keypad(&mut self, application: bool) {
@@ -873,6 +911,8 @@ impl Terminal {
             }
             Mode::MouseSgr => self.modes.mouse_sgr = on,
         }
+        // Each screen has flags of its own, so switching changes the ones in use.
+        self.keyboard_changed();
     }
 
     /// Whether `mode` is set, for DECRQM. `None` for 1048, which is an action, not a state.
@@ -914,7 +954,8 @@ impl Terminal {
     /// defaults, autowrap included, but what is on the screen and where the cursor is stay.
     /// The screen being shown forgets its saved cursor; the other keeps its own. The style goes
     /// back to the default whole, as the VT510's does, where xterm's leaves dim, crossed-out and
-    /// double-underlined text on.
+    /// double-underlined text on. The kitty keyboard protocol's flags are forgotten on both
+    /// screens, as kitty forgets them.
     pub(crate) fn soft_reset(&mut self) {
         self.modes.cursor_visible = true;
         self.modes.application_cursor = false;
@@ -927,6 +968,8 @@ impl Terminal {
         self.charsets = Charsets::default();
         self.style = Style::PLAIN;
         self.saved[self.modes.alternate_screen as usize] = None;
+        self.keyboard = [Stack::default(); 2];
+        self.keyboard_changed();
     }
 
     // Resizing
@@ -996,6 +1039,14 @@ impl Terminal {
         for saved in self.saved.iter().flatten() {
             assert!(saved.row < self.rows && saved.col < self.cols, "{self:?}");
         }
+        for stack in &self.keyboard {
+            assert!(stack.len() <= crate::keyboard::DEPTH, "{self:?}");
+        }
+        assert_eq!(
+            self.modes.keyboard,
+            self.keyboard[self.modes.alternate_screen as usize].current(),
+            "{self:?}"
+        );
         if let Some((row, col)) = self.written {
             assert!(row < self.rows && col < self.cols, "{self:?}");
         }

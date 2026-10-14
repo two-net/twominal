@@ -158,19 +158,18 @@ fn check(core: &TerminalCore) {
 }
 
 /// Whether `reply` is built as every reply is: `CSI`, perhaps `?` or `>`, digits and `;`, and
-/// the final byte of DA, DSR or CPR, or `$y` for DECRQM. Only those are answered, and only
-/// with fixed text and numbers (SEC-05).
+/// the final byte of DA, DSR or CPR, `$y` for DECRQM, or `u` after `?` for the kitty keyboard
+/// protocol's flags. Only those are answered, and only with fixed text and numbers (SEC-05).
 fn is_reply(reply: &[u8]) -> bool {
     let Some(rest) = reply.strip_prefix(b"\x1b[") else {
         return false;
     };
-    let rest = rest
-        .strip_prefix(b"?")
-        .or_else(|| rest.strip_prefix(b">"))
-        .unwrap_or(rest);
+    let private = rest.strip_prefix(b"?");
+    let rest = private.or_else(|| rest.strip_prefix(b">")).unwrap_or(rest);
     let numbers = match rest.split_last() {
         Some((b'y', rest)) => rest.strip_suffix(b"$"),
         Some((b'c' | b'n' | b'R', rest)) => Some(rest),
+        Some((b'u', rest)) if private.is_some() => Some(rest),
         _ => None,
     };
     numbers.is_some_and(|numbers| {

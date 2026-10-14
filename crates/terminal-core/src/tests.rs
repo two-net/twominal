@@ -108,13 +108,14 @@ fn rep_is_the_character_printed_again() {
 
 #[test]
 fn ris_leaves_what_a_new_terminal_has() {
-    // The region, the tab stops, the character sets, the style, the saved cursors and the
-    // other screen too, which `resets.txt` and `styles.txt` see only in part.
+    // The region, the tab stops, the character sets, the style, the saved cursors, the
+    // keyboard flags and the other screen too, which `resets.txt`, `styles.txt` and
+    // `keyboard.txt` see only in part.
     let mut core = core(
         10,
         3,
         b"\x1b[1;4:3;38;5;9;48;2;1;2;3;58:5:4mtext\x1b[2;3r\x1b[?25l\x1b[?2004h\x1b[?1000h\x1b[3g\
-          \x1b(0\x1b7\x1b[?1049hfull",
+          \x1b(0\x1b[>5u\x1b7\x1b[?1049h\x1b[>31ufull",
     );
     core.interpret(b"\x1bc");
     assert!(core.terminal == self::core(10, 3, b"").terminal);
@@ -380,6 +381,7 @@ const PIECES: &[&[u8]] = &[
     b"?",
     b">",
     b"=",
+    b"<",
     b"$",
     b"!",
     b" ",
@@ -470,6 +472,10 @@ const PIECES: &[&[u8]] = &[
     b"\xc2\xad",
     b"\xff",
     b"\x1b\\",
+    b"\x1b[>1u",
+    b"\x1b[<u",
+    b"\x1b[=5;2u",
+    b"\x1b[?u",
     b"cwd;",
     b"ready",
     b"%",

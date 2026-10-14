@@ -2,7 +2,8 @@
 # prints a before and the rest after, and nothing else may change.
 
 ## SGR with an intermediate is not SGR
-# xterm's modifyOtherKeys and its query, for #20.
+# xterm's modifyOtherKeys and its query. A program that wants its keys told apart has the
+# kitty keyboard protocol (DESIGN.md §3).
 size 10x2
 send a\e[>4;1mb\e[?4mc
 screen
@@ -12,15 +13,6 @@ styles
 |..........|
 |..........|
 cursor 1;4
-
-## The kitty keyboard protocol is not there
-# #20. Its query is not answered, so programs know.
-size 10x2
-send a\e[?ub\e[=5uc\e[>1ud\e[<ue
-screen
-|abcde     |
-|          |
-cursor 1;6
 
 ## The cursor's shape waits for its issue
 # #25.

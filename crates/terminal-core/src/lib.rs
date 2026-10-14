@@ -14,11 +14,12 @@
 //! functions; `control.rs` says what each one does; `terminal.rs` does it to the cursor and
 //! the modes, and `screen.rs` to the rows. `width.rs` says how many cells a character takes
 //! (TERM-02), and `style.rs` what SGR does to the colors and attributes of the cells (TERM-03
-//! to TERM-05). `report.rs` reads what shell integration reports. DESIGN.md §3 lists what is
-//! supported and what is ignored on purpose.
+//! to TERM-05). `keyboard.rs` keeps the kitty keyboard protocol's flags (TERM-09).
+//! `report.rs` reads what shell integration reports. DESIGN.md §3 lists what is supported and
+//! what is ignored on purpose.
 //!
 //! Filled in by #16 (interpreter and screen model), #17 (conformance suite and fuzzing),
-//! #18 (Unicode), #19 (colors and attributes) and #26–#30.
+//! #18 (Unicode), #19 (colors and attributes), #20 (keyboard flags) and #26–#30.
 
 #![no_std]
 #![forbid(unsafe_code)]
@@ -32,6 +33,7 @@ mod control;
 #[cfg(any(test, fuzzing))]
 #[doc(hidden)]
 pub mod fuzz;
+mod keyboard;
 mod report;
 mod screen;
 mod style;
@@ -44,6 +46,7 @@ use alloc::boxed::Box;
 use alloc::vec::Vec;
 use core::{mem, str};
 
+pub use keyboard::Keyboard;
 pub use report::Report;
 pub use screen::{Cell, Row, Screen};
 pub use style::{Color, Style, Underline};
