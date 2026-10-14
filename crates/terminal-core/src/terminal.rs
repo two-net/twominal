@@ -1,0 +1,900 @@
+//! The terminal's state beside its rows: the cursor, the scrolling region, the tab stops, the
+//! character sets and the modes, and the operations of TERM-06 that use them.
+//!
+//! xterm is the model (TERM-01). There is one cursor, and it stays where it is when the screen
+//! switches. Each screen keeps a saved cursor of its own.
+
+use alloc::vec::Vec;
+use core::mem;
+
+use crate::report::Report;
+use crate::screen::{Cell, Screen};
+use crate::{Event, Size};
+
+/// Where the cursor is, counted in cells from the top left of the screen.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Cursor {
+    pub row: u16,
+    pub col: u16,
+}
+
+/// The modes a program sets that the rest of a tab acts on. The Terminal Core only keeps them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Modes {
+    /// The cursor is shown (DECTCEM, TERM-06).
+    pub cursor_visible: bool,
+    /// The alternate screen is shown: a full-screen program is running (TERM-06).
+    pub alternate_screen: bool,
+    /// The cursor keys send their application sequences (DECCKM, #20).
+    pub application_cursor: bool,
+    /// The keypad sends its application sequences (DECKPAM, #20).
+    pub application_keypad: bool,
+    /// Enter sends CR LF, and a line feed also returns the cursor to the first column (LNM).
+    pub newline: bool,
+    /// Pasted text is bracketed (TERM-11, #20).
+    pub bracketed_paste: bool,
+    /// Focus in and out is reported (TERM-11, #20).
+    pub focus: bool,
+    /// Which mouse events are reported (TERM-10, #21).
+    pub mouse: MouseTracking,
+    /// Mouse events are reported with SGR's extended coordinates (TERM-10, #21).
+    pub mouse_sgr: bool,
+}
+
+impl Default for Modes {
+    fn default() -> Self {
+        Self {
+            cursor_visible: true,
+            alternate_screen: false,
+            application_cursor: false,
+            application_keypad: false,
+            newline: false,
+            bracketed_paste: false,
+            focus: false,
+            mouse: MouseTracking::Off,
+            mouse_sgr: false,
+        }
+    }
+}
+
+/// Which mouse events a program asked to be told of (TERM-10).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum MouseTracking {
+    #[default]
+    Off,
+    /// Button presses (mode 9).
+    Press,
+    /// Presses and releases (mode 1000).
+    Click,
+    /// Those, and moves while a button is down (mode 1002).
+    Drag,
+    /// Those, and every move (mode 1003).
+    Motion,
+}
+
+/// A mode a program sets and resets by its number: with SM and RM, or with DECSET and DECRST
+/// for the DEC private modes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Mode {
+    Insert,
+    Newline,
+    ApplicationCursor,
+    Origin,
+    Autowrap,
+    CursorVisible,
+    /// 47: switch screens.
+    Alternate,
+    /// 1047: switch screens, clearing the alternate screen on the way back.
+    AlternateCleared,
+    /// 1048: save or restore the cursor. Not a state.
+    SaveCursor,
+    /// 1049: save the cursor and switch to a cleared alternate screen; switch back and
+    /// restore it.
+    AlternateSaved,
+    ApplicationKeypad,
+    Focus,
+    BracketedPaste,
+    Mouse(MouseTracking),
+    MouseSgr,
+}
+
+impl Mode {
+    /// The mode SM and RM name with `number`.
+    pub(crate) fn ansi(number: u16) -> Option<Self> {
+        // Not 2, which locks the keyboard, nor 12, which would echo input locally.
+        Some(match number {
+            4 => Self::Insert,
+            20 => Self::Newline,
+            _ => return None,
+        })
+    }
+
+    /// The DEC private mode DECSET and DECRST name with `number`.
+    pub(crate) fn dec(number: u16) -> Option<Self> {
+        // Not 3, which would resize the screen to 132 columns and clear it.
+        Some(match number {
+            1 => Self::ApplicationCursor,
+            6 => Self::Origin,
+            7 => Self::Autowrap,
+            9 => Self::Mouse(MouseTracking::Press),
+            25 => Self::CursorVisible,
+            47 => Self::Alternate,
+            66 => Self::ApplicationKeypad,
+            1000 => Self::Mouse(MouseTracking::Click),
+            1002 => Self::Mouse(MouseTracking::Drag),
+            1003 => Self::Mouse(MouseTracking::Motion),
+            1004 => Self::Focus,
+            1006 => Self::MouseSgr,
+            1047 => Self::AlternateCleared,
+            1048 => Self::SaveCursor,
+            1049 => Self::AlternateSaved,
+            2004 => Self::BracketedPaste,
+            _ => return None,
+        })
+    }
+}
+
+/// A set of graphic characters, which one of G0 to G3 is designated as.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum Charset {
+    #[default]
+    Ascii,
+    /// ASCII with `£` for `#`.
+    British,
+    /// The VT100's line-drawing characters, which ncurses draws boxes with.
+    Graphics,
+}
+
+impl Charset {
+    /// The set an escape sequence names by its final byte.
+    pub(crate) fn named(byte: u8) -> Option<Self> {
+        Some(match byte {
+            b'B' => Self::Ascii,
+            b'A' => Self::British,
+            b'0' => Self::Graphics,
+            _ => return None,
+        })
+    }
+
+    fn translate(self, char: char) -> char {
+        match self {
+            Self::Ascii => char,
+            Self::British if char == '#' => '£',
+            Self::British => char,
+            Self::Graphics => graphics(char),
+        }
+    }
+}
+
+/// What `char` is in DEC Special Graphics.
+fn graphics(char: char) -> char {
+    match char {
+        '_' => ' ',
+        '`' => '◆',
+        'a' => '▒',
+        'b' => '␉',
+        'c' => '␌',
+        'd' => '␍',
+        'e' => '␊',
+        'f' => '°',
+        'g' => '±',
+        'h' => '␤',
+        'i' => '␋',
+        'j' => '┘',
+        'k' => '┐',
+        'l' => '┌',
+        'm' => '└',
+        'n' => '┼',
+        'o' => '⎺',
+        'p' => '⎻',
+        'q' => '─',
+        'r' => '⎼',
+        's' => '⎽',
+        't' => '├',
+        'u' => '┤',
+        'v' => '┴',
+        'w' => '┬',
+        'x' => '│',
+        'y' => '≤',
+        'z' => '≥',
+        '{' => 'π',
+        '|' => '≠',
+        '}' => '£',
+        '~' => '·',
+        _ => char,
+    }
+}
+
+/// G0 to G3, and which of them characters are printed in.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct Charsets {
+    sets: [Charset; 4],
+    /// Which of `sets` is in use: shifted to with SI, SO, LS2 and LS3.
+    used: usize,
+}
+
+/// What DECSC saves and DECRC restores.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct Saved {
+    row: usize,
+    col: usize,
+    pending: bool,
+    origin: bool,
+    charsets: Charsets,
+}
+
+/// Everything the Terminal Core knows but the parser's state. The parser drives it through
+/// `control.rs`.
+#[derive(Debug, PartialEq)]
+pub(crate) struct Terminal {
+    /// The size, never zero.
+    cols: usize,
+    rows: usize,
+    primary: Screen,
+    alternate: Screen,
+    row: usize,
+    col: usize,
+    /// A character was printed in the last column with autowrap on, so the next one starts
+    /// the next row: xterm's pending wrap. The cursor is then in the last column.
+    pending: bool,
+    /// What DECSC saved on the primary screen and on the alternate one.
+    saved: [Option<Saved>; 2],
+    /// The scrolling region's first and last rows. `top <= bottom < rows`.
+    top: usize,
+    bottom: usize,
+    /// Whether each column has a tab stop.
+    tabs: Vec<bool>,
+    charsets: Charsets,
+    modes: Modes,
+    autowrap: bool,
+    /// Rows are counted from the top of the scrolling region, and the cursor stays inside it
+    /// (DECOM).
+    origin: bool,
+    insert: bool,
+    /// The last character printed, for REP to repeat. Any other control function forgets it.
+    last: Option<char>,
+    /// The nonce that marks a report of the shell integration.
+    nonce: Option<Vec<u8>>,
+    /// Replies and reports since the bytes were handed in.
+    events: Vec<Event>,
+}
+
+impl Terminal {
+    pub(crate) fn new(size: Size, nonce: Option<&str>) -> Self {
+        let (cols, rows) = dimensions(size);
+        Self {
+            cols,
+            rows,
+            primary: Screen::new(cols, rows),
+            alternate: Screen::new(cols, rows),
+            row: 0,
+            col: 0,
+            pending: false,
+            saved: [None, None],
+            top: 0,
+            bottom: rows - 1,
+            tabs: (0..cols).map(default_stop).collect(),
+            charsets: Charsets::default(),
+            modes: Modes::default(),
+            autowrap: true,
+            origin: false,
+            insert: false,
+            last: None,
+            nonce: nonce.map(|nonce| nonce.as_bytes().to_vec()),
+            events: Vec::new(),
+        }
+    }
+
+    pub(crate) fn size(&self) -> Size {
+        // Both came from a `Size`, so both fit.
+        Size {
+            cols: self.cols as u16,
+            rows: self.rows as u16,
+        }
+    }
+
+    /// The screen being shown.
+    pub(crate) fn screen(&self) -> &Screen {
+        if self.modes.alternate_screen {
+            &self.alternate
+        } else {
+            &self.primary
+        }
+    }
+
+    fn screen_mut(&mut self) -> &mut Screen {
+        if self.modes.alternate_screen {
+            &mut self.alternate
+        } else {
+            &mut self.primary
+        }
+    }
+
+    pub(crate) fn cursor(&self) -> Cursor {
+        Cursor {
+            row: self.row as u16,
+            col: self.col as u16,
+        }
+    }
+
+    pub(crate) fn modes(&self) -> &Modes {
+        &self.modes
+    }
+
+    pub(crate) fn nonce(&self) -> Option<&[u8]> {
+        self.nonce.as_deref()
+    }
+
+    pub(crate) fn reply(&mut self, bytes: Vec<u8>) {
+        self.events.push(Event::Reply(bytes));
+    }
+
+    pub(crate) fn report(&mut self, report: Report) {
+        self.events.push(Event::Report(report));
+    }
+
+    pub(crate) fn take_events(&mut self) -> Vec<Event> {
+        mem::take(&mut self.events)
+    }
+
+    // Printing
+
+    /// Prints `char` at the cursor, in the character set in use.
+    pub(crate) fn print_char(&mut self, char: char) {
+        let char = self.charsets.sets[self.charsets.used].translate(char);
+        self.put(char);
+        self.last = Some(char);
+    }
+
+    /// Prints the last character printed `count` more times (REP), and no more than fills
+    /// the screen.
+    pub(crate) fn repeat(&mut self, count: usize) {
+        let Some(char) = self.last else { return };
+        let mut left = count.min(self.cols * self.rows);
+        while left > 0 {
+            self.wrap();
+            // As much of the run as fits in the row at once, so that in insert mode the row
+            // moves once, not for every character.
+            let run = left.min(self.cols - self.col);
+            self.make_room(run);
+            for _ in 0..run {
+                self.write(char);
+            }
+            left -= run;
+        }
+    }
+
+    pub(crate) fn forget_last(&mut self) {
+        self.last = None;
+    }
+
+    fn put(&mut self, char: char) {
+        self.wrap();
+        self.make_room(1);
+        self.write(char);
+    }
+
+    /// Starts the next row if a wrap is pending.
+    fn wrap(&mut self) {
+        if mem::take(&mut self.pending) && self.autowrap {
+            let row = self.row;
+            self.screen_mut().set_wrapped(row, true);
+            self.col = 0;
+            self.index();
+        }
+    }
+
+    /// In insert mode, moves the rest of the row right to make room for `count` characters.
+    fn make_room(&mut self, count: usize) {
+        if self.insert {
+            let (row, col) = (self.row, self.col);
+            self.screen_mut().insert_cells(row, col, count);
+        }
+    }
+
+    /// Writes `char` under the cursor and moves it on: to the next column, or in the last one
+    /// to a pending wrap.
+    fn write(&mut self, char: char) {
+        let (row, col) = (self.row, self.col);
+        self.screen_mut().write(row, col, Cell::new(char));
+        if col + 1 < self.cols {
+            self.col += 1;
+        } else {
+            self.pending = self.autowrap;
+        }
+    }
+
+    // Moving the cursor
+
+    pub(crate) fn carriage_return(&mut self) {
+        self.col = 0;
+        self.pending = false;
+    }
+
+    /// Moves the cursor left, and no further than the first column. From a pending wrap that
+    /// is the column before the last, as in xterm.
+    pub(crate) fn backspace(&mut self) {
+        self.move_back(1);
+    }
+
+    /// Moves the cursor down a row, scrolling the region when it is on its bottom row (IND).
+    pub(crate) fn index(&mut self) {
+        self.pending = false;
+        if self.row == self.bottom {
+            // On the primary screen, with the region at the top, the row that scrolls off
+            // will go to the scrollback (#26).
+            self.scroll_up(1);
+        } else if self.row + 1 < self.rows {
+            self.row += 1;
+        }
+    }
+
+    /// Moves the cursor up a row, scrolling the region down when it is on its top row (RI).
+    pub(crate) fn reverse_index(&mut self) {
+        self.pending = false;
+        if self.row == self.top {
+            self.scroll_down(1);
+        } else if self.row > 0 {
+            self.row -= 1;
+        }
+    }
+
+    /// LF, VT and FF: an index, and a carriage return as well in newline mode (LNM).
+    pub(crate) fn line_feed(&mut self) {
+        self.index();
+        if self.modes.newline {
+            self.col = 0;
+        }
+    }
+
+    /// NEL.
+    pub(crate) fn next_line(&mut self) {
+        self.index();
+        self.col = 0;
+    }
+
+    /// CUU. The cursor stops at the top of the scrolling region if it starts inside it.
+    pub(crate) fn move_up(&mut self, count: usize) {
+        let limit = if self.row >= self.top { self.top } else { 0 };
+        self.row = self.row.saturating_sub(count).max(limit);
+        self.pending = false;
+    }
+
+    /// CUD. The cursor stops at the bottom of the scrolling region if it starts inside it.
+    pub(crate) fn move_down(&mut self, count: usize) {
+        let limit = if self.row <= self.bottom {
+            self.bottom
+        } else {
+            self.rows - 1
+        };
+        self.row = self.row.saturating_add(count).min(limit);
+        self.pending = false;
+    }
+
+    pub(crate) fn move_forward(&mut self, count: usize) {
+        self.col = self.col.saturating_add(count).min(self.cols - 1);
+        self.pending = false;
+    }
+
+    pub(crate) fn move_back(&mut self, count: usize) {
+        self.col = self.col.saturating_sub(count);
+        self.pending = false;
+    }
+
+    /// Moves the cursor to column `col` of its row, counted from 0.
+    pub(crate) fn set_col(&mut self, col: usize) {
+        self.col = col.min(self.cols - 1);
+        self.pending = false;
+    }
+
+    /// Moves the cursor to row `row`, counted from 0, and from the top of the scrolling region
+    /// in origin mode.
+    pub(crate) fn set_row(&mut self, row: usize) {
+        self.row = if self.origin {
+            self.top.saturating_add(row).min(self.bottom)
+        } else {
+            row.min(self.rows - 1)
+        };
+        self.pending = false;
+    }
+
+    pub(crate) fn goto(&mut self, row: usize, col: usize) {
+        self.set_row(row);
+        self.set_col(col);
+    }
+
+    /// Where the cursor is, as CPR reports it: counted from 1, and from the top of the
+    /// scrolling region in origin mode.
+    pub(crate) fn position(&self) -> (usize, usize) {
+        let row = if self.origin {
+            self.row.saturating_sub(self.top)
+        } else {
+            self.row
+        };
+        (row + 1, self.col + 1)
+    }
+
+    // Tab stops
+
+    /// HT and CHT: on to the next tab stop, or to the last column.
+    pub(crate) fn tab_forward(&mut self, count: usize) {
+        for _ in 0..count.min(self.cols) {
+            match (self.col + 1..self.cols).find(|&col| self.tabs[col]) {
+                Some(col) => self.col = col,
+                None => {
+                    self.col = self.cols - 1;
+                    break;
+                }
+            }
+        }
+    }
+
+    /// CBT: back to the tab stop before, or to the first column.
+    pub(crate) fn tab_backward(&mut self, count: usize) {
+        self.pending = false;
+        for _ in 0..count.min(self.cols) {
+            match (0..self.col).rev().find(|&col| self.tabs[col]) {
+                Some(col) => self.col = col,
+                None => {
+                    self.col = 0;
+                    break;
+                }
+            }
+        }
+    }
+
+    pub(crate) fn set_tab_stop(&mut self) {
+        self.tabs[self.col] = true;
+    }
+
+    pub(crate) fn clear_tab_stop(&mut self) {
+        self.tabs[self.col] = false;
+    }
+
+    pub(crate) fn clear_tab_stops(&mut self) {
+        self.tabs.fill(false);
+    }
+
+    /// A tab stop every 8 columns, as at the start (DECST8C).
+    pub(crate) fn reset_tab_stops(&mut self) {
+        for (col, stop) in self.tabs.iter_mut().enumerate() {
+            *stop = default_stop(col);
+        }
+    }
+
+    // Erasing, inserting and deleting
+
+    /// ED: erases below the cursor (0), above it (1), or all of the screen (2), the cursor's
+    /// row included in the first two. The scrollback (3) is #26's.
+    pub(crate) fn erase_display(&mut self, which: usize) {
+        let (row, col, rows, cols) = (self.row, self.col, self.rows, self.cols);
+        let screen = self.screen_mut();
+        match which {
+            0 => {
+                screen.erase(row, col..cols);
+                screen.erase_rows(row + 1..rows);
+            }
+            1 => {
+                screen.erase_rows(0..row);
+                screen.erase(row, 0..col + 1);
+            }
+            2 => screen.erase_rows(0..rows),
+            _ => return,
+        }
+        self.pending = false;
+    }
+
+    /// EL: erases the cursor's row to the right of the cursor (0), to its left (1), or all of
+    /// it (2), the cursor's cell included.
+    pub(crate) fn erase_line(&mut self, which: usize) {
+        let (row, col, cols) = (self.row, self.col, self.cols);
+        let cols = match which {
+            0 => col..cols,
+            1 => 0..col + 1,
+            2 => 0..cols,
+            _ => return,
+        };
+        self.screen_mut().erase(row, cols);
+        self.pending = false;
+    }
+
+    /// ECH: erases `count` cells from the cursor on, without moving it.
+    pub(crate) fn erase_chars(&mut self, count: usize) {
+        let (row, col) = (self.row, self.col);
+        self.screen_mut().erase(row, col..col.saturating_add(count));
+        self.pending = false;
+    }
+
+    /// ICH.
+    pub(crate) fn insert_chars(&mut self, count: usize) {
+        let (row, col) = (self.row, self.col);
+        self.screen_mut().insert_cells(row, col, count);
+        self.pending = false;
+    }
+
+    /// DCH.
+    pub(crate) fn delete_chars(&mut self, count: usize) {
+        let (row, col) = (self.row, self.col);
+        self.screen_mut().delete_cells(row, col, count);
+        self.pending = false;
+    }
+
+    /// IL: rows pushed past the bottom of the scrolling region are lost. Only inside it.
+    pub(crate) fn insert_lines(&mut self, count: usize) {
+        if self.inside_region() {
+            let region = self.row..self.bottom + 1;
+            self.screen_mut().scroll_down(region, count);
+            self.carriage_return();
+        }
+    }
+
+    /// DL: rows come in blank at the bottom of the scrolling region. Only inside it.
+    pub(crate) fn delete_lines(&mut self, count: usize) {
+        if self.inside_region() {
+            let region = self.row..self.bottom + 1;
+            self.screen_mut().scroll_up(region, count);
+            self.carriage_return();
+        }
+    }
+
+    /// SU, and IND on the bottom row of the scrolling region.
+    pub(crate) fn scroll_up(&mut self, count: usize) {
+        let region = self.top..self.bottom + 1;
+        self.screen_mut().scroll_up(region, count);
+    }
+
+    /// SD, and RI on the top row of the scrolling region.
+    pub(crate) fn scroll_down(&mut self, count: usize) {
+        let region = self.top..self.bottom + 1;
+        self.screen_mut().scroll_down(region, count);
+    }
+
+    fn inside_region(&self) -> bool {
+        (self.top..=self.bottom).contains(&self.row)
+    }
+
+    /// DECSTBM, with the rows counted from 1. 0 means the first row for `top`, and the last
+    /// one for `bottom`, as does a `bottom` below the screen. A region of less than two rows
+    /// is ignored. The cursor goes home.
+    pub(crate) fn set_region(&mut self, top: usize, bottom: usize) {
+        let top = top.max(1) - 1;
+        let bottom = match bottom {
+            0 => self.rows,
+            bottom => bottom.min(self.rows),
+        } - 1;
+        if top < bottom {
+            self.top = top;
+            self.bottom = bottom;
+            self.goto(0, 0);
+        }
+    }
+
+    /// DECALN: fills the screen with `E`, for aligning a CRT. Seldom used but by tests.
+    pub(crate) fn align(&mut self) {
+        self.screen_mut().fill(Cell::new('E'));
+        self.top = 0;
+        self.bottom = self.rows - 1;
+        self.row = 0;
+        self.col = 0;
+        self.pending = false;
+    }
+
+    // The cursor's memory
+
+    /// DECSC, into the slot of the screen being shown.
+    pub(crate) fn save_cursor(&mut self) {
+        let slot = self.modes.alternate_screen as usize;
+        self.saved[slot] = Some(Saved {
+            row: self.row,
+            col: self.col,
+            pending: self.pending,
+            origin: self.origin,
+            charsets: self.charsets,
+        });
+    }
+
+    /// DECRC, from the slot of the screen being shown. With nothing saved there, the cursor
+    /// goes home with ASCII and origin mode off.
+    pub(crate) fn restore_cursor(&mut self) {
+        let slot = self.modes.alternate_screen as usize;
+        let saved = self.saved[slot].unwrap_or_default();
+        self.row = saved.row.min(self.rows - 1);
+        self.col = saved.col.min(self.cols - 1);
+        self.pending = saved.pending && self.col == self.cols - 1;
+        self.origin = saved.origin;
+        self.charsets = saved.charsets;
+    }
+
+    // Character sets
+
+    /// Designates `charset` as G0 to G3, by `which`.
+    pub(crate) fn designate(&mut self, which: usize, charset: Charset) {
+        self.charsets.sets[which] = charset;
+    }
+
+    /// Prints in G0 to G3, by `which`: SI, SO, LS2 and LS3.
+    pub(crate) fn shift(&mut self, which: usize) {
+        self.charsets.used = which;
+    }
+
+    // Modes
+
+    pub(crate) fn set_keypad(&mut self, application: bool) {
+        self.modes.application_keypad = application;
+    }
+
+    pub(crate) fn set_mode(&mut self, mode: Mode, on: bool) {
+        match mode {
+            Mode::Insert => self.insert = on,
+            Mode::Newline => self.modes.newline = on,
+            Mode::ApplicationCursor => self.modes.application_cursor = on,
+            Mode::Origin => {
+                self.origin = on;
+                self.goto(0, 0);
+            }
+            Mode::Autowrap => {
+                self.autowrap = on;
+                // Without autowrap a character in the last column is overwritten by the next.
+                self.pending &= on;
+            }
+            Mode::CursorVisible => self.modes.cursor_visible = on,
+            Mode::Alternate => self.modes.alternate_screen = on,
+            Mode::AlternateCleared => {
+                if !on && self.modes.alternate_screen {
+                    self.alternate.erase_rows(0..self.rows);
+                }
+                self.modes.alternate_screen = on;
+            }
+            Mode::SaveCursor if on => self.save_cursor(),
+            Mode::SaveCursor => self.restore_cursor(),
+            Mode::AlternateSaved if on => {
+                self.save_cursor();
+                self.modes.alternate_screen = true;
+                self.alternate.erase_rows(0..self.rows);
+            }
+            Mode::AlternateSaved => {
+                self.modes.alternate_screen = false;
+                self.restore_cursor();
+            }
+            Mode::ApplicationKeypad => self.modes.application_keypad = on,
+            Mode::Focus => self.modes.focus = on,
+            Mode::BracketedPaste => self.modes.bracketed_paste = on,
+            // Turning off any of them turns off mouse reporting, as in xterm.
+            Mode::Mouse(tracking) => {
+                self.modes.mouse = if on { tracking } else { MouseTracking::Off }
+            }
+            Mode::MouseSgr => self.modes.mouse_sgr = on,
+        }
+    }
+
+    /// Whether `mode` is set, for DECRQM. `None` for 1048, which is an action, not a state.
+    pub(crate) fn mode(&self, mode: Mode) -> Option<bool> {
+        Some(match mode {
+            Mode::Insert => self.insert,
+            Mode::Newline => self.modes.newline,
+            Mode::ApplicationCursor => self.modes.application_cursor,
+            Mode::Origin => self.origin,
+            Mode::Autowrap => self.autowrap,
+            Mode::CursorVisible => self.modes.cursor_visible,
+            Mode::Alternate | Mode::AlternateCleared | Mode::AlternateSaved => {
+                self.modes.alternate_screen
+            }
+            Mode::SaveCursor => return None,
+            Mode::ApplicationKeypad => self.modes.application_keypad,
+            Mode::Focus => self.modes.focus,
+            Mode::BracketedPaste => self.modes.bracketed_paste,
+            Mode::Mouse(tracking) => self.modes.mouse == tracking,
+            Mode::MouseSgr => self.modes.mouse_sgr,
+        })
+    }
+
+    // Resets
+
+    /// RIS: everything as it was at the start, but the size, the nonce, and the replies and
+    /// reports not yet handed out.
+    pub(crate) fn reset(&mut self) {
+        let events = mem::take(&mut self.events);
+        let nonce = self.nonce.take();
+        *self = Self {
+            nonce,
+            events,
+            ..Self::new(self.size(), None)
+        };
+    }
+
+    /// DECSTR, as xterm does it: the modes a program may have left behind go back to their
+    /// defaults, autowrap included, but what is on the screen and where the cursor is stay.
+    pub(crate) fn soft_reset(&mut self) {
+        self.modes.cursor_visible = true;
+        self.modes.application_cursor = false;
+        self.modes.application_keypad = false;
+        self.insert = false;
+        self.origin = false;
+        self.autowrap = true;
+        self.top = 0;
+        self.bottom = self.rows - 1;
+        self.charsets = Charsets::default();
+        self.saved = [None, None];
+    }
+
+    // Resizing
+
+    /// Makes the screens `size`, without reflowing (#26). On each screen rows go from the top
+    /// only as far as needed to keep a row on it: the cursor's on the screen being shown, the
+    /// saved cursor's on the other. The scrolling region becomes the whole screen. The same
+    /// size changes nothing.
+    pub(crate) fn resize(&mut self, size: Size) {
+        let (cols, rows) = dimensions(size);
+        // A window can change size without the grid changing. The program is not told, so
+        // nothing it set may change either.
+        if (cols, rows) == (self.cols, self.rows) {
+            return;
+        }
+        let alternate = self.modes.alternate_screen;
+        let saved_row = |slot: usize| self.saved[slot].map_or(0, |saved| saved.row);
+        let keep = if alternate {
+            [saved_row(0), self.row]
+        } else {
+            [self.row, saved_row(1)]
+        };
+        let from_top = [
+            self.primary.resize(cols, rows, keep[0]),
+            self.alternate.resize(cols, rows, keep[1]),
+        ];
+
+        self.row = self
+            .row
+            .saturating_sub(from_top[alternate as usize])
+            .min(rows - 1);
+        self.col = self.col.min(cols - 1);
+        self.pending = false;
+        for (saved, from_top) in self.saved.iter_mut().zip(from_top) {
+            if let Some(saved) = saved {
+                saved.row = saved.row.saturating_sub(from_top).min(rows - 1);
+                saved.col = saved.col.min(cols - 1);
+                saved.pending &= saved.col == cols - 1;
+            }
+        }
+        self.top = 0;
+        self.bottom = rows - 1;
+        let had = self.tabs.len();
+        self.tabs.resize(cols, false);
+        for col in had..cols {
+            self.tabs[col] = default_stop(col);
+        }
+        self.cols = cols;
+        self.rows = rows;
+    }
+
+    /// Panics if the state breaks a rule the rest of this file relies on.
+    #[cfg(test)]
+    pub(crate) fn check(&self) {
+        assert!(self.row < self.rows && self.col < self.cols, "{self:?}");
+        assert!(!self.pending || self.col == self.cols - 1, "{self:?}");
+        assert!(
+            self.top <= self.bottom && self.bottom < self.rows,
+            "{self:?}"
+        );
+        assert_eq!(self.tabs.len(), self.cols);
+        assert!(self.charsets.used < 4);
+        for screen in [&self.primary, &self.alternate] {
+            assert_eq!(screen.rows().len(), self.rows);
+            for row in screen.rows() {
+                assert_eq!(row.cells().len(), self.cols);
+            }
+        }
+        for saved in self.saved.iter().flatten() {
+            assert!(saved.row < self.rows && saved.col < self.cols, "{self:?}");
+        }
+    }
+}
+
+/// A size in cells, never zero.
+fn dimensions(size: Size) -> (usize, usize) {
+    (usize::from(size.cols.max(1)), usize::from(size.rows.max(1)))
+}
+
+/// Whether column `col` has a tab stop at the start: one every 8 columns.
+fn default_stop(col: usize) -> bool {
+    col.is_multiple_of(8)
+}

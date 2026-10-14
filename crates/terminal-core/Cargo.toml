@@ -8,3 +8,4 @@ publish = false
 # Every dependency must be listed in DESIGN.md §2 first (ARC-06) and must not reach for
 # the interface, rendering or OS processes (ARC-02).
 [dependencies]
+vte = { version = "0.15", default-features = false }

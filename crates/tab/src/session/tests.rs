@@ -1282,6 +1282,59 @@ mod shells {
         assert_eq!(snapshot(&home), before, "the user's files are left alone");
     }
 
+    /// A report as the Terminal Core reads it, in the shape this file's own reader gives.
+    fn as_written(event: terminal_core::Event) -> Report {
+        use terminal_core::Report::*;
+        let text = |bytes: Vec<u8>| Some(String::from_utf8(bytes).unwrap());
+        let (key, value) = match event {
+            terminal_core::Event::Report(report) => match report {
+                Directory(path) => ("cwd", text(path)),
+                SearchPath(path) => ("path", text(path)),
+                Aliases(names) => ("aliases", Some(names.join(" "))),
+                Functions(names) => ("functions", Some(names.join(" "))),
+                Cmdlets(names) => ("cmdlets", Some(names.join(" "))),
+                Ready => ("ready", None),
+            },
+            reply => panic!("not a report: {reply:?}"),
+        };
+        (key.to_string(), value)
+    }
+
+    #[test]
+    fn the_terminal_core_reads_the_reports_as_written() {
+        let Some(zsh) = installed("zsh") else { return };
+        let (_folder, home, _) = home();
+        let private = Folder::new();
+        // Enough functions for a report of tens of kilobytes (DESIGN.md §7).
+        let functions: String = (0..3000)
+            .map(|number| format!("fixture_function_{number:04}() {{ :; }}\n"))
+            .collect();
+        user_files(
+            &home,
+            &[(".zshrc", &format!("unset HISTFILE\n{functions}"))],
+        );
+
+        let mut tab = Integrated::start(
+            Shell::Command(vec![zsh.to_str().unwrap().to_string()]),
+            Syntax::Posix,
+            &home,
+            &private.0,
+            |_| {},
+        );
+        let first = tab.next_ready();
+        assert!(value(&first, "functions").len() > 60_000);
+
+        let mut core = terminal_core::TerminalCore::new(SIZE, Some(&tab.nonce));
+        let read: Vec<Report> = core
+            .interpret(&tab.text)
+            .into_iter()
+            .filter(|event| matches!(event, terminal_core::Event::Report(_)))
+            .map(as_written)
+            .collect();
+        assert_eq!(read, tab.reports());
+        assert!(tab.exit().success());
+    }
+
     #[test]
     fn zsh_keeps_the_users_own_zdotdir() {
         let Some(zsh) = installed("zsh") else { return };

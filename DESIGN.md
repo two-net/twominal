@@ -1,6 +1,6 @@
 # Twominal — Design
 
-**Version:** 0.8 · **Date:** 2026-10-14 · **Tracks:** [SRS](SRS.md) v0.6
+**Version:** 0.9 · **Date:** 2026-10-14 · **Tracks:** [SRS](SRS.md) v0.6
 
 > The SRS says what Twominal must do. This document says how it is built: the technology choices the SRS leaves open (C-1) and where each component of SRS §6 lives. Requirement IDs such as `ARC-02` are the SRS's. Where the two disagree, the SRS wins and this document is corrected.
 
@@ -130,19 +130,19 @@ Every crate Twominal depends on directly is listed here, and nothing else may be
 | `twominal` | `toml_edit` | Reads the configuration file, and saves it with the user's comments kept (SET-03, SET-04) |
 | `tab` | `terminal-core` | The Terminal Core |
 | `tab` | `portable-pty` | Pseudo-terminals: starts the shell on one and carries its bytes, through ConPTY on Windows (SW-01, PORT-01) |
+| `terminal-core` | `vte` | Parses escape sequences. Default features off: no `std`, and a bounded buffer for OSC sequences (ARC-02, REL-02) |
 <!-- dependencies:end -->
 
 Planned, and added by the issue that first needs each:
 
 | Crate | Will depend on | For | Issue |
 |---|---|---|---|
-| `terminal-core` | `vte`, with default features off so it stays `no_std` | Parsing escape sequences | #16 |
 | `twominal` | A clipboard library that reaches the Linux primary selection | SW-05 | #28 |
 | `twominal` | A font library that lists installed monospaced families | FONT-02 | #23 |
 
 ## 3. Components
 
-As of this version the Settings Store and the Session are built, and the App Shell opens windows, builds the native menus, gives the product its name and logo and answers the `twominal` command. Every other Rust home exists as a skeleton: types that say who owns what, and no behaviour. Of the webview homes only `src/app.js` exists. The others are created by their issues, at the paths in §1.
+As of this version the Settings Store, the Session and the Terminal Core are built, and the App Shell opens windows, builds the native menus, gives the product its name and logo and answers the `twominal` command. Every other Rust home exists as a skeleton: types that say who owns what, and no behaviour. Of the webview homes only `src/app.js` exists. The others are created by their issues, at the paths in §1.
 
 ### Tier 1: App Shell
 
@@ -295,6 +295,34 @@ The `twominal` command is the app's own executable (GEN-02, GEN-05). `src-tauri/
 
 A pure `no_std` crate. Bytes go in through one entry point. Out come the screen state, replies to terminal queries, and what shell integration reports. It holds the screen, scrollback, selection, Vim cursor and find matches. Must not depend on the interface, rendering or OS processes.
 
+`crates/terminal-core/src/` interprets output as xterm does (TERM-01, TERM-06).
+
+- **The parts.** `vte` splits the bytes into characters and control functions. `control.rs` says what each one does, `terminal.rs` does it to the cursor and the modes, and `screen.rs` to the rows. `report.rs` reads shell integration's reports.
+- **One way in.** `TerminalCore::interpret` takes bytes and returns the replies and reports they gave, in order, one reply for each query. The Tab writes the replies to the Session (#31). A sequence cut in two by the end of one call is finished by the next, so the screen comes out the same however the output was cut (ARC-03). A character cut in two is held back by the core until the rest comes, because vte 0.15 loses the byte after such a character when another character follows it. `screen()`, `cursor()` and `modes()` say what there is to show.
+- **The state, as in xterm.**
+  - Two screens, primary and alternate, each made of rows that remember whether their line wrapped.
+  - One cursor, which stays where it is when the screen switches. It has xterm's pending wrap: a character printed in the last column waits for the next one before the line wraps, which fish relies on.
+  - One saved cursor for each screen.
+  - The scrolling region, the tab stops, the character sets G0 to G3, and the modes. DEC Special Graphics is there for the boxes ncurses draws.
+- **What it does.**
+  - The C0 controls.
+  - IND, NEL, RI, HTS, DECSC, DECRC, RIS, DECALN, the keypad modes and the designation of character sets.
+  - Moving the cursor, erasing, inserting and deleting characters and lines, scrolling, REP, the tab stops and the scrolling region.
+  - The modes IRM and LNM, and the DEC private modes 1, 6, 7, 25, 47, 1047, 1048, 1049, 66, 1004, 2004, 9, 1000, 1002, 1003 and 1006. The keyboard and mouse modes are only kept, for #20 and #21 to act on.
+  - DECSTR, which turns autowrap back on, as in xterm. `tput reset` sends it.
+- **The replies.** They hold fixed text and numbers, never bytes the program wrote (SEC-05).
+  - DA1 is `CSI ? 62 ; 22 c`: a VT220 with ANSI color. fish waits for it before its first prompt. DECID (`ESC Z`) gets the same answer.
+  - DA2 is `CSI > 1 ; 10 ; 0 c`. The low version keeps vim from probing for features of xterm that are not here. #21 may raise it, for vim to choose SGR mouse reports.
+  - DSR: the status, and where the cursor is, in the ANSI form and the DEC one.
+  - DECRQM, for the ANSI and DEC modes above but 1048, which is an action and not a state. Any other mode is reported as not known.
+- **Never answered (SEC-05).** The window title and icon label reports (`CSI 20 t`, `CSI 21 t`) and every other window operation, the answerback to ENQ, and every device control string, DECRQSS and XTGETTCAP among them.
+- **Ignored.** Whatever is not listed here, as ECMA-48 asks (REL-02).
+  - Until their issues: SGR (#19), the cursor's shape (#25), and titles, OSC 7, color queries, the bell, links and the clipboard (#27). The kitty keyboard protocol's query is not answered, so programs know it is not there (#20).
+  - Always: DECCOLM, which would resize the screen and clear it, and KAM and SRM, which would lock the keyboard or echo what is typed.
+  - The C1 controls and DEL take no cell. vte reads escape sequences only in their 7-bit form.
+- **Until their issues.** Every character takes one cell (#18). Rows that scroll off the top are dropped. A resize cuts or pads the rows without reflowing them, and with fewer rows takes rows from the top only as far as needed to keep the cursor on the screen (#26).
+- **Bounded.** `vte` has its default features off. Its buffer for an operating system command is then 256 KiB, boxed, and a longer command is cut short. Every count is clamped to the screen, so no sequence does more than a screenful of work for each of its parameters. A size of zero is made one.
+
 ### What §6.1 does not name
 
 - **Find bar, completion list, notices, Vim mode badge.** Their state belongs to the Terminal Core (find), the Command Line (completions) and the Input Handler (mode). The Renderer draws them over the terminal area from the frame (UI-02).
@@ -390,7 +418,7 @@ ESC ] 2222 ; <nonce> ; <key> ; <value> BEL
 | `cmdlets` | PowerShell only: the names of the cmdlets, which count as builtins (CMD-07, CMD-09) | Once, when PowerShell is first idle |
 | `ready` | None. The shell is ready for a command | Before each prompt, last |
 
-*When it changed* means since it was last sent, so the first prompt sends them all. A list can be long: a zsh with a plugin manager has a thousand functions or more, so a report can be tens of kilobytes, and the Terminal Core must take one that size (#16).
+*When it changed* means since it was last sent, so the first prompt sends them all. A list can be long: a zsh with a plugin manager has a thousand functions or more, so a report can be tens of kilobytes. The Terminal Core takes a report that ends in BEL and is shorter than 256 KiB from `2222` to the end of its value. It drops any other whole: one ended otherwise was cut short or is not one of the scripts', and one that long was cut short by the core's buffer.
 
 ### The settings file
 
@@ -448,7 +476,12 @@ Saving a setting changes only the keys whose value changed. Comments, the order 
 - **Session.** `crates/tab/src/session/tests.rs` starts `/bin/sh` on real pseudo-terminals and checks the bytes both ways, the environment, the directory, the size, the exit status, closing, and an exit while a background program holds the terminal (SW-01, SW-02, FISH-01, TERM-15, SEC-03). It also checks a shell that cannot start: a Shell setting that names no file while another session keeps working, a name missing from the `PATH`, a file that is not executable, and a `$SHELL` that has gone (FISH-02, AT-16). These run on macOS and Linux.
   - Shell integration is tested the same way (FISH-04 to FISH-06). zsh, bash and PowerShell start in a home folder of the test's own, with the user's files in it, and the tests check the reports, that the user's files are read in the usual order, and that the home folder is the same afterwards, file for file. Twominal's own folder, the variables it passes and the setting turned off are checked too. A test whose shell is not installed says so and passes. On macOS, `brew install powershell` installs PowerShell 7.
   - The choice of locale and of PowerShell, the waiter's rule for when to report the exit, how a program is looked for and why it cannot run, the offers and their wording, and which shells get shell integration and what it adds to their command are tested on every OS, but no shell has yet been started on Windows.
-- **Terminal Core.** A conformance suite that feeds byte streams and checks the screen (MAINT-03), and fuzz targets (REL-02). Both run with no window (ARC-03). #17.
+- **Terminal Core.** `crates/terminal-core/src/tests.rs` feeds bytes in and checks the screen, the cursor, the modes, the replies and the reports, for each control function in §3 and for each query that must not be answered (SEC-05). Everything runs with no window (ARC-03).
+  - The same bytes give the same state whether they come whole, a byte at a time, cut at any one place or in random pieces (ARC-03). Characters cut in two are checked on their own. Hostile output, made of random pieces of sequences, never breaks the screen's rules at sizes down to one cell (REL-02).
+  - An ignored test measures plain text: `cargo test --release -p terminal-core -- --ignored` (PERF-06).
+  - `crates/tab/tests/programs.rs` runs fish, vim, less, `git log` and top on real pseudo-terminals through the Session, with the Terminal Core answering their queries. It checks what they show and that the screen is given back when they end (TERM-01). Each runs in a home folder and environment of its own. A program that is not installed is said so, and its test passes.
+  - `crates/tab/src/session/tests.rs` checks that the Terminal Core reads zsh's reports as the scripts write them, a list of over 60 KB among them.
+  - #17 adds the conformance suite (MAINT-03) and fuzz targets (REL-02).
 - **Tab tier.** The `tab` crate does not depend on Tauri, so the Command Line, key handling and the Renderer's choice of text runs are unit-tested without a window.
 - **Webview.** It has no logic of its own to unit-test. What it draws is checked by the acceptance scenarios (SRS §7) as documented manual tests (MAINT-02).
 
@@ -463,7 +496,9 @@ Saving a setting changes only the keys whose value changed. Comments, the order 
 | Input methods need decisions in the webview | HW-01 | #20 | The webview half of the Input Handler may hold a composition, and nothing else |
 | A webview does not follow the OS reduced-motion setting | SW-04, ACC-01 | #40 | The App Shell reads the OS setting itself and passes it to the Animator |
 | A canvas cannot be read by screen readers | ACC-04 | #46 | The Renderer keeps a hidden text copy of the visible rows for them |
-| A dependency of the Terminal Core needs `std` | ARC-02 | #16 | Change this document first |
+| Another crate turns on vte's `std` feature, which makes its buffer for operating system commands unbounded | ARC-02, REL-02 | The build: `TerminalCore::new` calls `vte::Parser::new_with_size`, which is there only without `std` | Change this document first |
+| A report of the shell integration is 256 KiB or longer | FISH-05 | Nothing can settle it | The Terminal Core drops it, and the features that need it fall back as with no report (§3) |
+| A program asks for the cursor's position over and over and never reads the replies | REL-01 | #31 | The Session's writer queue has no bound, so the Tab must cap the replies waiting to be written |
 | A user's configuration undoes shell integration, so no report comes | FISH-05 | Nothing can settle it | The features that need it fall back, as with the setting off (§3) |
 | Windows PowerShell 5.1 runs the integration script differently from PowerShell 7 | FISH-04 | The first Windows build | The script changes. It needs no file, so nothing else does |
 
