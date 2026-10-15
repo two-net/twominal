@@ -122,8 +122,10 @@ fn sent_with(modes: &Modes, event: &Event) -> String {
 
 fn sent_on(macos: bool, modes: &Modes, event: &Event) -> String {
     match InputHandler::on(macos).handle(InputEvent::Key(event.0.clone()), modes) {
-        Some(Action::Send(bytes)) => String::from_utf8(bytes).unwrap(),
-        Some(action @ (Action::Composing | Action::Pointer(_) | Action::Scroll(_))) => {
+        Some(Action::Type(bytes) | Action::Send(bytes)) => String::from_utf8(bytes).unwrap(),
+        Some(
+            action @ (Action::Composing | Action::Pointer(_) | Action::Scroll(_) | Action::Clear),
+        ) => {
             panic!("a key meant {action:?}")
         }
         None => String::new(),
@@ -368,7 +370,7 @@ fn esc_is_sent_alone_and_at_once() {
     let mut input = InputHandler::on(false);
     assert_eq!(
         input.handle(InputEvent::Key(key("Escape").0), &Modes::default()),
-        Some(Action::Send(vec![0x1b]))
+        Some(Action::Type(vec![0x1b]))
     );
 }
 
@@ -426,7 +428,7 @@ fn editing_and_function_keys_are_xterms() {
             (key("Delete"), "\x1b[3~"),
             (key("PageUp"), "\x1b[5~"),
             (key("PageDown"), "\x1b[6~"),
-            (key("PageUp").shift(), "\x1b[5;2~"),
+            (key("PageUp").ctrl(), "\x1b[5;5~"),
             (key("Delete").ctrl(), "\x1b[3;5~"),
             (key("F1"), "\x1bOP"),
             (key("F2"), "\x1bOQ"),
@@ -499,7 +501,7 @@ fn the_keypad_follows_deckpam() {
             (pad("Enter", "NumpadEnter"), "\r"),
             (pad("ArrowUp", "Numpad8"), "\x1b[A"),
             (pad("Clear", "Numpad5"), "\x1b[E"),
-            (pad("PageUp", "Numpad9").shift(), "\x1b[5;2~"),
+            (pad("PageUp", "Numpad9").ctrl(), "\x1b[5;5~"),
             // A German keypad's decimal point.
             (pad(",", "NumpadDecimal").num_lock(), ","),
             (pad("5", "Numpad5").ctrl(), "\x1d"),
@@ -925,10 +927,11 @@ fn with_every_modifier(event: &Event) -> impl Iterator<Item = Event> + '_ {
 
 #[test]
 fn with_every_key_reported_every_key_and_modifier_reaches_the_program() {
+    // But for Twominal's shortcuts.
     for modes in [flags(0b1000), flags(0b11000), flags(0b11111)] {
         let releases = modes.keyboard.contains(Keyboard::EVENT_TYPES);
         for key in every_key() {
-            for event in with_every_modifier(&key) {
+            for event in with_every_modifier(&key).filter(|event| !is_shortcut(event, &modes)) {
                 assert_ne!(
                     sent_with(&modes, &event),
                     "",
@@ -949,7 +952,8 @@ fn with_every_key_reported_every_key_and_modifier_reaches_the_program() {
 
 #[test]
 fn without_the_protocol_every_key_xterm_can_send_reaches_the_program() {
-    // But for Cmd with a key that sends a character, which xterm cannot encode (DESIGN.md §3).
+    // But for Cmd with a key that sends a character, which xterm cannot encode (DESIGN.md §3),
+    // and Twominal's shortcuts.
     for modes in [
         Modes::default(),
         Modes {
@@ -959,7 +963,7 @@ fn without_the_protocol_every_key_xterm_can_send_reaches_the_program() {
         },
     ] {
         for key in every_key() {
-            for event in with_every_modifier(&key) {
+            for event in with_every_modifier(&key).filter(|event| !is_shortcut(event, &modes)) {
                 let sent = sent_with(&modes, &event);
                 let typed_with_cmd = event.0.modifiers.meta
                     && (event.0.key.chars().count() == 1
@@ -1088,7 +1092,7 @@ fn an_input_method_composes_then_commits() {
     );
     assert_eq!(
         input.handle(InputEvent::Text("日本".to_string()), &modes),
-        Some(Action::Send("日本".as_bytes().to_vec()))
+        Some(Action::Type("日本".as_bytes().to_vec()))
     );
     assert_eq!(input.composing(), "");
 }
@@ -1101,7 +1105,7 @@ fn committed_text_is_sent_as_it_is_in_every_mode() {
         input.handle(InputEvent::Compose("´".to_string()), &modes);
         assert_eq!(
             input.handle(InputEvent::Text("é".to_string()), &modes),
-            Some(Action::Send("é".as_bytes().to_vec()))
+            Some(Action::Type("é".as_bytes().to_vec()))
         );
         assert_eq!(input.composing(), "");
         assert_eq!(input.handle(InputEvent::Text(String::new()), &modes), None);
@@ -1120,11 +1124,11 @@ fn pasted(text: &str, bracketed: bool) -> Option<Action> {
 fn a_paste_is_bracketed_when_the_program_asked() {
     assert_eq!(
         pasted("echo hi", true),
-        Some(Action::Send(b"\x1b[200~echo hi\x1b[201~".to_vec()))
+        Some(Action::Type(b"\x1b[200~echo hi\x1b[201~".to_vec()))
     );
     assert_eq!(
         pasted("echo hi", false),
-        Some(Action::Send(b"echo hi".to_vec()))
+        Some(Action::Type(b"echo hi".to_vec()))
     );
     assert_eq!(pasted("", true), None);
 }
@@ -1133,7 +1137,7 @@ fn a_paste_is_bracketed_when_the_program_asked() {
 fn a_paste_breaks_lines_as_enter_does() {
     let expected = b"one\rtwo\rthree\rfour\r\r".to_vec();
     for bracketed in [false, true] {
-        let Some(Action::Send(bytes)) = pasted("one\ntwo\r\nthree\rfour\n\n", bracketed) else {
+        let Some(Action::Type(bytes)) = pasted("one\ntwo\r\nthree\rfour\n\n", bracketed) else {
             panic!("nothing pasted");
         };
         let bytes = if bracketed {
@@ -1151,7 +1155,7 @@ fn a_paste_types_no_control_character() {
     // program: every control but tab and the line breaks becomes a space, C1 among them.
     assert_eq!(
         pasted("a\x1b[201~rm -rf ~\x03\x04\t\x7f\u{9b}201~é", true),
-        Some(Action::Send(
+        Some(Action::Type(
             "\x1b[200~a [201~rm -rf ~  \t  201~é\x1b[201~"
                 .as_bytes()
                 .to_vec()
@@ -1159,7 +1163,7 @@ fn a_paste_types_no_control_character() {
     );
     assert_eq!(
         pasted("\x00\x08\x1a", false),
-        Some(Action::Send(b"   ".to_vec()))
+        Some(Action::Type(b"   ".to_vec()))
     );
 }
 
@@ -1181,6 +1185,180 @@ fn focus_is_reported_when_the_program_asked() {
     assert_eq!(
         input.handle(InputEvent::Focus(false), &Modes::default()),
         None
+    );
+}
+
+// ---------------------------------------------------------------------------------------
+// Shortcuts (Appendix A) and what is typed
+// ---------------------------------------------------------------------------------------
+
+/// Whether `event` is one of Twominal's shortcuts on Linux, which the program never hears.
+fn is_shortcut(event: &Event, modes: &Modes) -> bool {
+    super::key::read(&event.0, false)
+        .is_some_and(|press| super::shortcut::find(&press, modes, false).is_some())
+}
+
+/// What `event` means to an Input Handler as on macOS or not, with a grid of 24 rows.
+fn shortcut_on(macos: bool, modes: &Modes, event: &Event) -> Option<Action> {
+    let mut input = InputHandler::on(macos);
+    input.resize(GRID);
+    input.handle(InputEvent::Key(event.0.clone()), modes)
+}
+
+#[test]
+fn shift_and_the_page_keys_scroll_a_page_on_the_primary_screen() {
+    for modes in [Modes::default(), flags(0b11111)] {
+        for (event, rows) in [
+            (key("PageUp").shift(), -24.0),
+            (key("PageDown").shift(), 24.0),
+            (key("PageUp").code("Numpad9").shift(), -24.0),
+            (key("PageDown").code("Numpad3").shift(), 24.0),
+        ] {
+            assert_eq!(
+                shortcut_on(false, &modes, &event),
+                Some(Action::Scroll(rows)),
+                "{:?} with {modes:?}",
+                event.0
+            );
+        }
+    }
+    // With no grid yet a page is no rows, and the key is still taken.
+    let event = key("PageUp").shift();
+    assert_eq!(sent(&event), "");
+}
+
+#[test]
+fn on_the_alternate_screen_shift_and_the_page_keys_are_the_programs() {
+    let alternate = Modes {
+        alternate_screen: true,
+        ..Modes::default()
+    };
+    let event = key("PageUp").shift();
+    assert_eq!(
+        shortcut_on(false, &alternate, &event),
+        Some(Action::Type(b"\x1b[5;2~".to_vec()))
+    );
+    // Ctrl+Shift with them moves tabs off macOS (#43), so they never scroll.
+    let event = key("PageUp").ctrl().shift();
+    assert_eq!(sent(&event), "\x1b[5;6~");
+}
+
+#[test]
+fn clear_is_cmd_k_on_macos_and_ctrl_shift_k_elsewhere() {
+    for modes in [Modes::default(), flags(0b11111)] {
+        assert_eq!(
+            shortcut_on(true, &modes, &key("k").meta()),
+            Some(Action::Clear)
+        );
+        assert_eq!(
+            shortcut_on(false, &modes, &key("K").ctrl().shift()),
+            Some(Action::Clear)
+        );
+        // On a layout that types no ASCII there, the key in K's place on a US keyboard.
+        assert_eq!(
+            shortcut_on(false, &modes, &key("Л").code("KeyK").ctrl().shift()),
+            Some(Action::Clear)
+        );
+        // On one that types another letter there, the key that types k.
+        assert_eq!(
+            shortcut_on(false, &modes, &key("K").code("KeyV").ctrl().shift()),
+            Some(Action::Clear)
+        );
+        assert_ne!(
+            shortcut_on(false, &modes, &key("T").code("KeyK").ctrl().shift()),
+            Some(Action::Clear)
+        );
+    }
+    // Each OS's keys only.
+    assert_ne!(
+        shortcut_on(true, &Modes::default(), &key("K").ctrl().shift()),
+        Some(Action::Clear)
+    );
+    assert_ne!(
+        shortcut_on(false, &Modes::default(), &key("k").meta()),
+        Some(Action::Clear)
+    );
+    assert_eq!(sent(&key("k").ctrl()), "\x0b");
+}
+
+#[test]
+fn a_key_taken_repeats_as_taken_and_its_release_is_dropped() {
+    // Every key and its release are reported.
+    let modes = flags(0b11111);
+    let mut input = InputHandler::on(false);
+    input.resize(GRID);
+    let mut handle = |event: Event| input.handle(InputEvent::Key(event.0), &modes);
+    assert_eq!(handle(key("PageUp").shift()), Some(Action::Scroll(-24.0)));
+    assert_eq!(
+        handle(key("PageUp").shift().repeat()),
+        Some(Action::Scroll(-24.0))
+    );
+    // Shift came up first: the key is still taken.
+    assert_eq!(handle(key("PageUp").release()), None);
+    // Down again as itself, its release is the program's.
+    assert!(matches!(handle(key("PageUp")), Some(Action::Type(_))));
+    assert!(matches!(
+        handle(key("PageUp").release()),
+        Some(Action::Send(_))
+    ));
+    // Shift let go while the key repeats: it stays taken, and scrolls no more.
+    assert_eq!(handle(key("PageUp").shift()), Some(Action::Scroll(-24.0)));
+    assert_eq!(handle(key("PageUp").repeat()), None);
+    assert_eq!(handle(key("PageUp").release()), None);
+    // Shift held while a key the program had repeats: it stays the program's, so the program
+    // hears it come up.
+    assert!(matches!(handle(key("PageUp")), Some(Action::Type(_))));
+    assert!(matches!(
+        handle(key("PageUp").shift().repeat()),
+        Some(Action::Type(_))
+    ));
+    assert!(matches!(
+        handle(key("PageUp").release()),
+        Some(Action::Send(_))
+    ));
+}
+
+#[test]
+fn what_is_typed_is_told_from_what_is_reported() {
+    let every = flags(0b11111);
+    let mut input = InputHandler::on(false);
+    let mut handle = |event: InputEvent, modes: &Modes| input.handle(event, modes);
+    // Keys going down or repeating take the view to the bottom.
+    assert_eq!(
+        handle(InputEvent::Key(key("a").0), &Modes::default()),
+        Some(Action::Type(b"a".to_vec()))
+    );
+    assert!(matches!(
+        handle(InputEvent::Key(key("a").repeat().0), &every),
+        Some(Action::Type(_))
+    ));
+    // Releases and modifiers on their own do not, so Shift does not undo Shift+Page Up.
+    assert!(matches!(
+        handle(InputEvent::Key(key("a").release().0), &every),
+        Some(Action::Send(_))
+    ));
+    assert!(matches!(
+        handle(
+            InputEvent::Key(key("Shift").code("ShiftLeft").shift().0),
+            &every
+        ),
+        Some(Action::Send(_))
+    ));
+    assert_eq!(
+        handle(InputEvent::Text("é".to_string()), &Modes::default()),
+        Some(Action::Type("é".as_bytes().to_vec()))
+    );
+    assert_eq!(
+        handle(InputEvent::Paste("ls".to_string()), &Modes::default()),
+        Some(Action::Type(b"ls".to_vec()))
+    );
+    let focus = Modes {
+        focus: true,
+        ..Modes::default()
+    };
+    assert_eq!(
+        handle(InputEvent::Focus(true), &focus),
+        Some(Action::Send(b"\x1b[I".to_vec()))
     );
 }
 
@@ -2260,7 +2438,7 @@ fn nothing_the_webview_sends_can_panic_or_flood() {
         match input.handle(event.clone(), &modes) {
             // A cursor key with the kitty protocol's release is 13 bytes, and a report or
             // the releases of the five buttons less than 200.
-            Some(Action::Send(bytes)) => assert!(
+            Some(Action::Type(bytes) | Action::Send(bytes)) => assert!(
                 bytes.len() <= usize::from(screen) * 13 + 200,
                 "{} bytes for {event:?}",
                 bytes.len()

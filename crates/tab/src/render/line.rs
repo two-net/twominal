@@ -6,7 +6,7 @@
 //! Renderer compares rows built this way with the ones it sent last, so anything laid over the
 //! screen is drawn and sent the same way.
 
-use terminal_core::{width, Row};
+use terminal_core::{width, Row, Style};
 
 use super::color::{Ink, Look, Palette, Rgb};
 
@@ -54,10 +54,12 @@ impl Drawn {
 /// A row as it is drawn: a cell for each column.
 pub(crate) type Line = Vec<Drawn>;
 
-/// `row` as it is drawn with `palette`.
-pub(crate) fn draw(row: &Row, palette: &Palette) -> Line {
+/// `row` as it is drawn with `palette`, `cols` wide. A row of the scrollback may be narrower:
+/// the rest of it is blanks in the default style.
+pub(crate) fn draw(row: &Row, cols: usize, palette: &Palette) -> Line {
     let mut last = None;
-    row.cells()
+    let mut line: Line = row
+        .cells()
         .iter()
         .map(|cell| {
             // Neighbouring cells mostly share a style, so its look is kept.
@@ -82,7 +84,11 @@ pub(crate) fn draw(row: &Row, palette: &Palette) -> Line {
                 joins: false,
             }
         })
-        .collect()
+        .collect();
+    if line.len() < cols {
+        line.resize(cols, Drawn::blank(palette.look(&Style::default())));
+    }
+    line
 }
 
 /// Lays `text`, which an input method is composing, over `line` from column `col`, in the

@@ -7,10 +7,12 @@
 
 use alloc::vec::Vec;
 use core::mem;
+use core::ops::Range;
 
 use crate::keyboard::{Keyboard, Stack};
 use crate::report::Report;
 use crate::screen::{Cell, Screen};
+use crate::scrollback::{self, Point, Scrollback};
 use crate::style::Style;
 use crate::width::{discarded, width};
 use crate::{Event, Size};
@@ -288,6 +290,8 @@ pub(crate) struct Terminal {
     rows: usize,
     primary: Screen,
     alternate: Screen,
+    /// The rows that scrolled off the top of the primary screen (TERM-14).
+    scrollback: Scrollback,
     row: usize,
     col: usize,
     /// A character was printed in the last column, so the next one starts the next row if
@@ -334,6 +338,7 @@ impl Terminal {
             rows,
             primary: Screen::new(cols, rows),
             alternate: Screen::new(cols, rows),
+            scrollback: Scrollback::new(scrollback::DEFAULT),
             row: 0,
             col: 0,
             pending: false,
@@ -378,6 +383,16 @@ impl Terminal {
         } else {
             &mut self.primary
         }
+    }
+
+    pub(crate) fn scrollback(&self) -> &Scrollback {
+        &self.scrollback
+    }
+
+    /// Keeps no more than `rows` rows of scrollback, and no more than 100,000, dropping the
+    /// oldest: the Scrollback setting (TERM-14).
+    pub(crate) fn set_scrollback(&mut self, rows: usize) {
+        self.scrollback.set_limit(rows);
     }
 
     pub(crate) fn cursor(&self) -> Cursor {
@@ -486,7 +501,7 @@ impl Terminal {
                 return;
             }
             self.pending = true;
-            self.wrap();
+            self.wrap_early();
         }
         self.make_room(width);
         self.write(char, width);
@@ -502,9 +517,19 @@ impl Terminal {
     /// Starts the next row if a wrap is pending and autowrap is on. Without autowrap the
     /// character in the last column is written over.
     fn wrap(&mut self) {
+        self.wrap_line(false);
+    }
+
+    /// Starts the next row for a wide character that does not fit in the last column, which
+    /// is then not part of the line if it is a space.
+    fn wrap_early(&mut self) {
+        self.wrap_line(true);
+    }
+
+    fn wrap_line(&mut self, early: bool) {
         if mem::take(&mut self.pending) && self.autowrap {
             let row = self.row;
-            self.screen_mut().set_wrapped(row, true);
+            self.screen_mut().wrap(row, early);
             self.col = 0;
             self.index();
         }
@@ -565,7 +590,7 @@ impl Terminal {
         self.reset_wrap();
         if self.row == self.bottom {
             // On the primary screen, with the region at the top, the row that scrolls off
-            // will go to the scrollback (#26).
+            // goes to the scrollback.
             self.scroll_up(1);
         } else if self.row + 1 < self.rows {
             self.row += 1;
@@ -710,8 +735,14 @@ impl Terminal {
     // Erasing, inserting and deleting
 
     /// ED: erases below the cursor (0), above it (1), or all of the screen (2), the cursor's
-    /// row included in the first two. The scrollback (3) is #26's.
+    /// row included in the first two, or the scrollback (3), as xterm does on either screen.
+    /// Erasing the screen saves none of it in the scrollback, as in xterm without
+    /// `cdXtraScroll`.
     pub(crate) fn erase_display(&mut self, which: usize) {
+        if which == 3 {
+            self.scrollback.clear();
+            return;
+        }
         let (row, col, rows, cols) = (self.row, self.col, self.rows, self.cols);
         let blank = self.blank();
         let screen = self.screen_mut();
@@ -776,19 +807,32 @@ impl Terminal {
         }
     }
 
-    /// DL: rows come in blank at the bottom of the scrolling region. Only inside it.
+    /// DL: rows come in blank at the bottom of the scrolling region. Only inside it. On the
+    /// top row of the primary screen the rows deleted go to the scrollback, as xterm's
+    /// `DeleteLine` saves them.
     pub(crate) fn delete_lines(&mut self, count: usize) {
         if self.inside_region() {
-            let (region, blank) = (self.row..self.bottom + 1, self.blank());
-            self.screen_mut().scroll_up(region, count, blank);
+            self.scroll_rows_up(self.row..self.bottom + 1, count);
             self.carriage_return();
         }
     }
 
     /// SU, and IND on the bottom row of the scrolling region.
     pub(crate) fn scroll_up(&mut self, count: usize) {
-        let (region, blank) = (self.top..self.bottom + 1, self.blank());
-        self.screen_mut().scroll_up(region, count, blank);
+        self.scroll_rows_up(self.top..self.bottom + 1, count);
+    }
+
+    /// Moves the rows of `region` up by `count`, blank rows coming in at its bottom. On the
+    /// primary screen the rows that leave the top of the screen go to the scrollback, as xterm's
+    /// `xtermScroll` saves them, whatever the region's bottom.
+    fn scroll_rows_up(&mut self, region: Range<usize>, count: usize) {
+        let blank = self.blank();
+        if self.modes.alternate_screen {
+            self.alternate.scroll_up(region, count, blank, None);
+        } else {
+            let scrollback = (region.start == 0).then_some(&mut self.scrollback);
+            self.primary.scroll_up(region, count, blank, scrollback);
+        }
     }
 
     /// SD, and RI on the top row of the scrolling region.
@@ -1014,16 +1058,50 @@ impl Terminal {
 
     // Resets
 
-    /// RIS: everything as it was at the start, but the size, the nonce, and the replies and
-    /// reports not yet handed out.
+    /// RIS: everything as it was at the start, but the size, the nonce, the scrollback's limit,
+    /// which is a setting, and the replies and reports not yet handed out. The scrollback is
+    /// emptied, as xterm's RIS empties it, and its rows keep their numbers.
     pub(crate) fn reset(&mut self) {
         let events = mem::take(&mut self.events);
         let nonce = self.nonce.take();
+        let mut scrollback = mem::replace(&mut self.scrollback, Scrollback::new(0));
+        scrollback.clear();
         *self = Self {
             nonce,
             events,
+            scrollback,
             ..Self::new(self.size(), None)
         };
+    }
+
+    /// Clear (TERM-22): empties the scrollback, and on the primary screen moves the line the
+    /// cursor is on, as many of its rows as are on the screen, to the top and blanks the rest in
+    /// the default style. The cursor and the saved cursor move with their rows, and a wrap
+    /// waiting stays. On the alternate screen the program owns the screen, and would not know
+    /// to draw it again, so only the scrollback is emptied.
+    pub(crate) fn clear(&mut self) {
+        self.scrollback.clear();
+        if self.modes.alternate_screen {
+            return;
+        }
+        let rows = self.primary.rows();
+        let mut first = self.row;
+        while first > 0 && rows[first - 1].wrapped() {
+            first -= 1;
+        }
+        let mut last = self.row;
+        while last + 1 < self.rows && rows[last].wrapped() {
+            last += 1;
+        }
+        self.primary.keep(first..last + 1);
+        self.row -= first;
+        if let Some(saved) = &mut self.saved[0] {
+            saved.row = saved.row.saturating_sub(first);
+        }
+        self.written = self
+            .written
+            .filter(|(row, _)| (first..=last).contains(row))
+            .map(|(row, col)| (row - first, col));
     }
 
     /// DECSTR, as xterm does it: the modes a program may have left behind go back to their
@@ -1053,10 +1131,12 @@ impl Terminal {
 
     // Resizing
 
-    /// Makes the screens `size`, without reflowing (#26). On each screen rows go from the top
-    /// only as far as needed to keep a row on it: the cursor's on the screen being shown, the
-    /// saved cursor's on the other. The scrolling region becomes the whole screen. The same
-    /// size changes nothing.
+    /// Makes the screens `size`. The primary screen's lines are wrapped again to the new width
+    /// with its scrollback, and its cursor and saved cursor move with their cells (TERM-16,
+    /// DESIGN.md §3 *Reflow*). While the alternate screen is shown, the primary's cursor is the
+    /// one saved there. The alternate screen is cut or padded, and loses rows from the top only
+    /// as far as needed to keep a row on it: the cursor's while it is shown, the saved cursor's
+    /// while not. The scrolling region becomes the whole screen. The same size changes nothing.
     pub(crate) fn resize(&mut self, size: Size) {
         let (cols, rows) = dimensions(size);
         // A window can change size without the grid changing. The program is not told, so
@@ -1065,29 +1145,52 @@ impl Terminal {
             return;
         }
         let alternate = self.modes.alternate_screen;
-        let saved_row = |slot: usize| self.saved[slot].map_or(0, |saved| saved.row);
-        let keep = if alternate {
-            [saved_row(0), self.row]
+        let point = |row, col, pending| Some(Point { row, col, pending });
+        let mut cursor = point(self.row, self.col, self.pending);
+        let mut saved = self.saved[0].and_then(|saved| point(saved.row, saved.col, saved.pending));
+        let mut none = None;
+        let (primary_cursor, other) = if alternate {
+            (&mut saved, &mut none)
         } else {
-            [self.row, saved_row(1)]
+            (&mut cursor, &mut saved)
         };
-        let from_top = [
-            self.primary.resize(cols, rows, keep[0]),
-            self.alternate.resize(cols, rows, keep[1]),
-        ];
+        scrollback::reflow(
+            &mut self.scrollback,
+            &mut self.primary,
+            cols,
+            rows,
+            primary_cursor,
+            other,
+        );
+        if let (Some(slot), Some(point)) = (&mut self.saved[0], saved) {
+            slot.row = point.row;
+            slot.col = point.col;
+            slot.pending = point.pending;
+        }
 
-        self.row = self
-            .row
-            .saturating_sub(from_top[alternate as usize])
-            .min(rows - 1);
-        self.col = self.col.min(cols - 1);
-        self.reset_wrap();
-        for (saved, from_top) in self.saved.iter_mut().zip(from_top) {
-            if let Some(saved) = saved {
-                saved.row = saved.row.saturating_sub(from_top).min(rows - 1);
-                saved.col = saved.col.min(cols - 1);
-                saved.pending &= saved.col == cols - 1;
+        let keep = if alternate {
+            self.row
+        } else {
+            self.saved[1].map_or(0, |saved| saved.row)
+        };
+        let from_top = self.alternate.resize(cols, rows, keep);
+        match cursor {
+            Some(cursor) if !alternate => {
+                self.row = cursor.row;
+                self.col = cursor.col;
+                self.pending = cursor.pending;
             }
+            _ => {
+                self.row = self.row.saturating_sub(from_top).min(rows - 1);
+                self.col = self.col.min(cols - 1);
+                self.pending = false;
+            }
+        }
+        self.written = None;
+        if let Some(saved) = &mut self.saved[1] {
+            saved.row = saved.row.saturating_sub(from_top).min(rows - 1);
+            saved.col = saved.col.min(cols - 1);
+            saved.pending &= saved.col == cols - 1;
         }
         self.top = 0;
         self.bottom = rows - 1;
@@ -1098,6 +1201,13 @@ impl Terminal {
         }
         self.cols = cols;
         self.rows = rows;
+    }
+
+    /// Puts an empty scrollback in place of this one, numbered from 0, for a test to compare
+    /// the rest of the state.
+    #[cfg(test)]
+    pub(crate) fn forget_scrollback(&mut self) {
+        self.scrollback = Scrollback::new(self.scrollback.limit());
     }
 
     /// Panics if the state breaks a rule the rest of this file relies on.
@@ -1115,6 +1225,7 @@ impl Terminal {
             assert_eq!(screen.rows().len(), self.rows);
             screen.check(self.cols);
         }
+        self.scrollback.check(self.cols);
         for saved in self.saved.iter().flatten() {
             assert!(saved.row < self.rows && saved.col < self.cols, "{self:?}");
         }

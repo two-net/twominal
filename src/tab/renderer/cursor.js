@@ -8,7 +8,8 @@
 // and hides the canvas, a fade changes how opaque it is, and a glide draws the cursor again at
 // each display frame, on whole device pixels. While the cursor is steady or hidden no
 // timer and no animation frame runs, and while it blinks without fading only a timer does
-// (PERF-08). DESIGN.md §3 has the rules.
+// (PERF-08). It is drawn the frame's offset up, as the rows are, and the grid cuts it; the Rust
+// half says it does not glide when the view moved. DESIGN.md §3 has the rules.
 
 import { paintCursor } from "./paint.js";
 
@@ -86,7 +87,7 @@ export class Cursor {
     // needs a cell the cursor was drawn in, on a grid of the same cells.
     const [row, col] = cursor.cell;
     const [cellWidth, cellHeight] = full.cell;
-    const to = [col * cellWidth, row * cellHeight];
+    const to = [col * cellWidth, row * cellHeight - (frame.offset ?? 0)];
     const same =
       layout &&
       layout.scale === full.scale &&

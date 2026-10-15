@@ -7,9 +7,11 @@
 //! are escaped. Every number is finite.
 //!
 //! ```text
-//! { "full":   { "canvas": [w, h], "scale": s, "cell": [w, h], "baseline": b,
-//!               "font": "…", "fontSize": s, "background": "#rrggbb",
+//! { "full":   { "canvas": [w, h], "grid": [cols, rows], "scale": s, "cell": [w, h],
+//!               "baseline": b, "font": "…", "fontSize": s, "background": "#rrggbb",
 //!               "underlines": [single, double, curly, dotted, dashed], "strikethrough": shape },
+//!   "shift":  n,
+//!   "offset": n,
 //!   "colors": ["#rrggbb", …],
 //!   "styles": [[color, flags], [color, flags, underline color], …],
 //!   "shapes": { "─": shape, … },
@@ -19,7 +21,13 @@
 //!   "caret":  [row, col] }
 //! ```
 //!
-//! `full` comes only in a frame with every row. Colors and styles are numbered by their place
+//! `full` comes only in a frame with every row. `grid` is the grid's size in cells, which the
+//! canvas's top left holds: rows and the copy are cut at its edges, so the margins keep the
+//! background. `shift` is how many device pixels the rows moved up since the last frame, so the
+//! webview copies the grid that far before it paints the rows. `offset` is how many device pixels
+//! up from its cell each row is drawn, while the view is scrolled to between two rows. Each is
+//! there only when it is not 0. A row's index counts from the view's top. Colors and styles are
+//! numbered by their place
 //! in their lists, which hold those the frame uses, each once. A style's flags are 1 for bold, 2
 //! for italic, 4 for crossed out, and the underline's style times 8: none, single, double,
 //! curly, dotted and dashed. A row's spans are its backgrounds, three numbers each, and its runs
@@ -30,8 +38,9 @@
 //! `[x, y, width, height, alpha]` filled at `alpha`, and `["p", x, y, x, y, …]` a polygon, in
 //! device pixels from the cell's top left.
 //!
-//! `cursor` is there only while the cursor is drawn. It covers `cells` cells from `col`, and its
-//! shape is filled in its color, from its first cell's top left. `text` is the run under a block,
+//! `cursor` is there only while the cursor is drawn. It covers `cells` cells from `col` of `row`,
+//! counted from the view's top as the rows are, and drawn `offset` up as they are. Its shape is
+//! filled in its color, from its first cell's top left. `text` is the run under a block,
 //! drawn in the cursor's text color and cut to the cursor's cells: it may start in a cell before
 //! them, as a flag does. Each of `blink`, `fade` and `glide` is there only when true.
 
@@ -84,6 +93,12 @@ impl Frame {
             out.push_str("\"full\":");
             write_full(&mut out, full);
             out.push(',');
+        }
+        if self.shift != 0 {
+            let _ = write!(out, "\"shift\":{},", self.shift);
+        }
+        if self.offset != 0 {
+            let _ = write!(out, "\"offset\":{},", self.offset);
         }
         // The styles name colors, so they are numbered before the colors are written.
         let mut written = String::new();
@@ -190,8 +205,8 @@ fn write_full(out: &mut String, full: &Full) {
     let layout = &geometry.layout;
     let _ = write!(
         out,
-        "{{\"canvas\":[{},{}],\"scale\":",
-        geometry.canvas.0, geometry.canvas.1
+        "{{\"canvas\":[{},{}],\"grid\":[{},{}],\"scale\":",
+        geometry.canvas.0, geometry.canvas.1, layout.size.cols, layout.size.rows
     );
     number(out, layout.scale);
     let _ = write!(

@@ -9,8 +9,10 @@
 // scale. When the window moves to a display of another scale it measures again, and the frame
 // laid out for that scale is painted crisp (HW-03). DESIGN.md §3 has the rules.
 //
-// A frame is painted the moment it arrives, and no output fades or moves (ANIM-05). Only the
-// cursor does: it blinks, and fades and glides when its settings say, on a canvas of its own
+// A frame is painted the moment it arrives, and no output fades or moves (ANIM-05). A scroll
+// moves the rows only as far as the wheel or the trackpad did, which the frame says in device
+// pixels, so text stays sharp while it moves pixel by pixel (ANIM-06); the view is the Rust
+// half's. Only the cursor moves on its own: it blinks, and fades and glides when its settings say, on a canvas of its own
 // that renderer/cursor.js lays over the grid (ANIM-07, ANIM-08). That a frame was drawn is
 // reported at the display's next frame, so frames never come faster than the display shows
 // them, and a hidden window, whose frames are paused, asks for none (PERF-07).
@@ -19,7 +21,7 @@
 // and passes what it measures and that a frame was drawn to the Rust half (#31). The font is a
 // CSS family list ending in the bundled JetBrains Mono and the OS's monospace, so a character
 // the chosen font lacks comes from a fallback font, and paint.js fits it to its cells (FONT-11).
-// Filled in by #22 (grid), #23 (fonts), #24 (ligatures) and #25 (cursor).
+// Filled in by #22 (grid), #23 (fonts), #24 (ligatures), #25 (cursor) and #26 (scrolling).
 
 import { Cursor } from "./renderer/cursor.js";
 import { forget, paint } from "./renderer/paint.js";

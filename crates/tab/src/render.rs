@@ -17,10 +17,14 @@
 //! (FONT-10), and the cursor's shapes, and `json.rs` writes the frame. DESIGN.md §3 has the
 //! rules.
 //!
+//! It keeps the view: how far it is scrolled back, which a trackpad moves pixel by pixel
+//! (ANIM-06). Rows are known by the numbers the Terminal Core gives them, so a frame sends only
+//! the rows that changed, not those that moved, and says how far they moved.
+//!
 //! A tab sends a new frame only after the last one was drawn, so frames never queue behind
 //! heavy output (PERF-07).
 //!
-//! Filled in by #22 (grid), #23 (fonts), #24 (ligatures) and #25 (cursor).
+//! Filled in by #22 (grid), #23 (fonts), #24 (ligatures), #25 (cursor) and #26 (scrolling).
 
 mod color;
 mod json;
@@ -34,7 +38,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::mem;
 use std::sync::Arc;
 
-use terminal_core::{Cursor, CursorShape, TerminalCore};
+use terminal_core::{Cursor, CursorShape, Row, Size, TerminalCore};
 
 pub use color::{Palette, Rgb};
 pub use layout::{Layout, Measure};
@@ -56,8 +60,15 @@ pub struct Renderer {
     focused: bool,
     /// The layout of what the webview measured last. Nothing is drawn before it has measured.
     geometry: Option<Arc<Geometry>>,
-    /// The rows as the window was last sent them.
+    /// How far the view is scrolled back. None while it follows the output.
+    view: Option<View>,
+    /// The rows as the window was last sent them, from the view's top.
     sent: Vec<Line>,
+    /// Where the rows of the last frame were: the number of the first, how many device pixels
+    /// up they were drawn, and the number of the screen's first row.
+    sent_at: Option<(u64, u32, u64)>,
+    /// The core's size in the last frame. Another size numbers the rows anew.
+    size: Option<Size>,
     /// Where the window was last told the caret is.
     caret: Option<Cursor>,
     /// The cursor the window was last told to draw.
@@ -69,6 +80,15 @@ pub struct Renderer {
     shapes: HashMap<char, Option<Arc<[Primitive]>>>,
 }
 
+/// How far the view is scrolled back: the number of its top row, as the Terminal Core numbers
+/// rows, and the part of a row past it (DESIGN.md §3, *The view*).
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct View {
+    top: f64,
+    /// The core's size the rows were numbered at. A resize numbers them anew.
+    size: Size,
+}
+
 /// What to draw: the rows that changed, the cursor, where the caret is, and, when every row is
 /// in it, the layout. The wire format between the two halves of the Renderer, as
 /// [`Frame::json`] writes it. No other code reads it.
@@ -76,7 +96,13 @@ pub struct Renderer {
 pub struct Frame {
     /// The layout and the background, in a frame with every row.
     full: Option<Full>,
-    /// The rows that changed, from the top.
+    /// How many device pixels the rows moved up since the last frame: the webview copies what it
+    /// painted that far before it paints the rows. 0 in a frame with every row.
+    shift: i64,
+    /// How many device pixels up the rows are drawn from their cells: the part of a row the view
+    /// is scrolled past its top row.
+    offset: u32,
+    /// The rows that changed, from the view's top.
     rows: Vec<RowFrame>,
     /// The shapes of the characters the rows draw as shapes.
     shapes: BTreeMap<char, Arc<[Primitive]>>,
@@ -173,7 +199,10 @@ impl Renderer {
             motion: Motion::Full,
             focused: true,
             geometry: None,
+            view: None,
             sent: Vec::new(),
+            sent_at: None,
+            size: None,
             caret: None,
             cursor: None,
             full: true,
@@ -238,55 +267,162 @@ impl Renderer {
         self.full = true;
     }
 
+    /// Scrolls the view by `rows`, toward newer output when positive: what the Input Handler
+    /// makes of the wheel, a trackpad, or Shift+Page Up and Down. Fractional, so a trackpad
+    /// moves it pixel by pixel (ANIM-06). It stops at the oldest row of `core`'s scrollback and
+    /// at the bottom, where it follows the output again. On the alternate screen, which keeps no
+    /// scrollback, it does nothing.
+    pub fn scroll(&mut self, core: &TerminalCore, rows: f64) {
+        if core.modes().alternate_screen || !rows.is_finite() {
+            return;
+        }
+        let size = core.size();
+        let scrollback = core.scrollback();
+        let live = scrollback.start() + scrollback.len() as u64;
+        let from = self
+            .view
+            .filter(|view| view.size == size)
+            .map_or(live as f64, |view| view.top);
+        let top = (from + rows).max(scrollback.start() as f64);
+        self.view = (top < live as f64).then_some(View { top, size });
+    }
+
+    /// Takes the view back to the newest output, which it follows from then on: for what the
+    /// user types, the text being composed and Clear.
+    pub fn scroll_to_bottom(&mut self) {
+        self.view = None;
+    }
+
+    /// The number of the view's top row in `core`, and how many device pixels up its rows are
+    /// drawn, for cells `height` pixels high. A part of a row that rounds to a whole one is the
+    /// next row. The view follows the output on the alternate screen, after a resize and at the
+    /// bottom, and stops at the oldest row kept.
+    fn top(&mut self, core: &TerminalCore, height: u32) -> (u64, u32) {
+        let scrollback = core.scrollback();
+        let live = scrollback.start() + scrollback.len() as u64;
+        let view = self
+            .view
+            .filter(|view| view.size == core.size() && !core.modes().alternate_screen);
+        let Some(mut view) = view else {
+            self.view = None;
+            return (live, 0);
+        };
+        view.top = view.top.max(scrollback.start() as f64);
+        let whole = view.top.floor();
+        let mut top = whole as u64;
+        let mut offset = ((view.top - whole) * f64::from(height)).round() as u32;
+        if offset >= height {
+            top += 1;
+            offset = 0;
+        }
+        if top >= live {
+            self.view = None;
+            return (live, 0);
+        }
+        self.view = Some(view);
+        (top, offset)
+    }
+
     /// What changed since the last frame: what `core` holds, with `composing`, the text an input
-    /// method is composing, over the cursor. None when nothing did, and before the webview has
-    /// measured.
+    /// method is composing, over the cursor, in the view. None when nothing did, and before the
+    /// webview has measured.
     pub fn frame(&mut self, core: &TerminalCore, composing: &str) -> Option<Frame> {
         let geometry = self.geometry.clone()?;
-        let cursor = core.cursor();
-        let mut lines: Vec<Line> = core
-            .screen()
-            .rows()
-            .iter()
-            .map(|row| line::draw(row, &self.palette))
+        let layout = &geometry.layout;
+        let size = core.size();
+        let height = layout.cell_height;
+        let (top, offset) = self.top(core, height);
+        let scrollback = core.scrollback();
+        let live = scrollback.start() + scrollback.len() as u64;
+
+        // The view's rows: one more than the grid has while it is between two rows.
+        let count = usize::from(size.rows) + usize::from(offset > 0);
+        let row = |number: u64| -> &Row {
+            match number.checked_sub(live) {
+                Some(on_screen) => &core.screen().rows()[on_screen as usize],
+                None => scrollback
+                    .get((number - scrollback.start()) as usize)
+                    .expect("a row the view has"),
+            }
+        };
+        let mut lines: Vec<Line> = (top..top + count as u64)
+            .map(|number| line::draw(row(number), usize::from(size.cols), &self.palette))
             .collect();
+
+        // The line the cursor is on, if it is in the view.
+        let cursor = core.cursor();
+        let cursor_line = (live + u64::from(cursor.row))
+            .checked_sub(top)
+            .map(|index| index as usize)
+            .filter(|&index| index < count);
         let mut caret = cursor;
         let mut composed = false;
-        if !composing.is_empty() {
-            if let Some(line) = lines.get_mut(usize::from(cursor.row)) {
-                if let Some(col) =
-                    line::compose(line, usize::from(cursor.col), composing, &self.palette)
-                {
-                    caret.col = col as u16;
-                    composed = true;
-                }
+        if let Some(line) = cursor_line
+            .filter(|_| !composing.is_empty())
+            .and_then(|index| lines.get_mut(index))
+        {
+            if let Some(col) =
+                line::compose(line, usize::from(cursor.col), composing, &self.palette)
+            {
+                caret.col = col as u16;
+                composed = true;
             }
         }
         if self.ligatures {
             // A cursor that is shown splits the ligature it is on (FONT-07).
-            let cursor = core.modes().cursor_visible.then_some(cursor);
+            let split = cursor_line.filter(|_| core.modes().cursor_visible);
             for (index, line) in lines.iter_mut().enumerate() {
-                let col = cursor
-                    .filter(|cursor| usize::from(cursor.row) == index)
-                    .map(|cursor| usize::from(cursor.col));
+                let col = (split == Some(index)).then_some(usize::from(cursor.col));
                 line::ligatures(line, col);
             }
         }
 
+        // The view moved against the screen, so the cursor moves with the text and does not
+        // glide.
+        let moved = self
+            .sent_at
+            .is_some_and(|(sent_top, sent_offset, sent_live)| {
+                (live - top, offset) != (sent_live - sent_top, sent_offset)
+            });
         // The text being composed marks where it goes, so the cursor is not drawn over it.
         let shown = core.modes().cursor_visible && !composed;
-        let cursor = shown
-            .then(|| self.cursor(core, &lines, &geometry))
-            .flatten();
+        let cursor = cursor_line
+            .filter(|_| shown)
+            .and_then(|index| self.cursor(core, &lines, &geometry, index, moved));
 
-        let full = mem::take(&mut self.full)
-            || lines.len() != self.sent.len()
-            || lines.first().map(Vec::len) != self.sent.first().map(Vec::len);
+        let full = mem::take(&mut self.full) || self.size != Some(size);
+        // A row is drawn `offset` pixels up from its cell, and the grid cuts it.
+        let height = i64::from(height);
+        let grid = i64::from(layout.size.rows) * height;
+        let whole = |index: usize, offset: u32| {
+            let y = index as i64 * height - i64::from(offset);
+            y >= 0 && y + height <= grid
+        };
+        let (shift, sent_top, sent_offset) = match self.sent_at {
+            Some((sent_top, sent_offset, _)) if !full => (
+                (top as i64 - sent_top as i64) * height + i64::from(offset)
+                    - i64::from(sent_offset),
+                sent_top,
+                sent_offset,
+            ),
+            _ => (0, 0, 0),
+        };
+        // A row is not sent again when the window has it whole, and keeps it whole as it moves.
+        let kept = |index: usize, line: &Line| {
+            let Some(before) = (top + index as u64).checked_sub(sent_top) else {
+                return false;
+            };
+            let before = before as usize;
+            !full
+                && whole(index, offset)
+                && whole(before, sent_offset)
+                && self.sent.get(before) == Some(line)
+        };
         let background = self.palette.background;
         let rows: Vec<RowFrame> = lines
             .iter()
             .enumerate()
-            .filter(|(index, line)| full || self.sent[*index] != **line)
+            .filter(|(index, line)| !kept(*index, line))
             .map(|(index, line)| RowFrame {
                 index: index as u16,
                 spans: line::spans(line, background),
@@ -294,7 +430,14 @@ impl Renderer {
             })
             .collect();
         self.sent = lines;
-        if !full && rows.is_empty() && self.caret == Some(caret) && self.cursor == cursor {
+        self.sent_at = Some((top, offset, live));
+        self.size = Some(size);
+        if !full
+            && rows.is_empty()
+            && shift == 0
+            && self.caret == Some(caret)
+            && self.cursor == cursor
+        {
             return None;
         }
         self.caret = Some(caret);
@@ -330,6 +473,8 @@ impl Renderer {
                 geometry,
                 background,
             }),
+            shift,
+            offset,
             rows,
             shapes,
             cursor,
@@ -337,17 +482,20 @@ impl Renderer {
         })
     }
 
-    /// The cursor as it is drawn over `lines`, where `core` has it: in the shape the program
-    /// asked for or the settings give, or an outline in a window without the focus. None when
-    /// it is outside the grid laid out, as before the Tab has resized the core to it.
+    /// The cursor as it is drawn over `lines`, where `core` has it, on the line `index` of the
+    /// view: in the shape the program asked for or the settings give, or an outline in a window
+    /// without the focus. None when it is outside the grid laid out, as before the Tab has
+    /// resized the core to it. It does not glide when the view `moved` against the screen.
     fn cursor(
         &self,
         core: &TerminalCore,
         lines: &[Line],
         geometry: &Geometry,
+        index: usize,
+        moved: bool,
     ) -> Option<CursorFrame> {
         let Cursor { row, col } = core.cursor();
-        let line = lines.get(usize::from(row))?;
+        let line = lines.get(index)?;
         let (col, cells) = line::covers(line, usize::from(col));
         let layout = &geometry.layout;
         if row >= layout.size.rows || col + cells > usize::from(layout.size.cols) {
@@ -376,7 +524,7 @@ impl Renderer {
             None
         };
         Some(CursorFrame {
-            row,
+            row: index as u16,
             col: col as u16,
             cells: cells as u16,
             color: self.palette.cursor,
@@ -390,7 +538,7 @@ impl Renderer {
             text,
             blinks,
             fades: blinks && settings.fade && self.motion != Motion::Off,
-            glides: settings.glide && self.motion == Motion::Full,
+            glides: settings.glide && self.motion == Motion::Full && !moved,
         })
     }
 }

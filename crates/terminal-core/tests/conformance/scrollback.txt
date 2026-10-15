@@ -1,0 +1,226 @@
+# The scrollback (TERM-14): which rows go there and what empties it, as in xterm, whose
+# xtermScroll and DeleteLine save the rows that leave the top of the screen. DESIGN.md §3,
+# Scrollback, and Clear (TERM-22).
+
+## A line feed on the last row saves the top row
+size 4x2
+send ab\r\ncd\r\nef
+screen
+|cd  |
+|ef  |
+scrollback 1
+|ab  |
+
+## IND and NEL on the last row save the top row too
+size 4x2
+send ab\r\ncd\eDef\eEgh
+screen
+|  ef|
+|gh  |
+scrollback 2
+|ab  |
+|cd  |
+
+## A row that wraps is saved with its mark
+size 4x2
+send abcdefgh\r\nij
+screen
+|efgh|
+|ij  |
+scrollback 1
+|abcd|>
+
+## SU saves the rows it scrolls off the top
+size 4x3
+send ab\r\ncd\r\nef\e[2S
+screen
+|ef  |
+|    |
+|    |
+scrollback 2
+|ab  |
+|cd  |
+
+## A region at the top saves the rows it scrolls off, and the rows below it stay
+# xtermScroll saves while the top margin is 0, whatever the bottom one.
+size 4x4
+send ab\r\ncd\r\nef\r\ngh\e[1;2r\e[2H\n
+screen
+|cd  |
+|    |
+|ef  |
+|gh  |
+scrollback 1
+|ab  |
+
+## A region below the top saves nothing
+size 4x3
+send ab\r\ncd\r\nef\e[2;3r\e[3H\n
+screen
+|ab  |
+|ef  |
+|    |
+scrollback 0
+
+## DL on the top row saves the rows it deletes
+# xterm's CASE_DL calls DeleteLine with canSave, which saves on the top row.
+size 4x3
+send ab\r\ncd\r\nef\e[H\e[2M
+screen
+|ef  |
+|    |
+|    |
+scrollback 2
+|ab  |
+|cd  |
+
+## DL below the top row saves nothing
+size 4x3
+send ab\r\ncd\r\nef\e[2H\e[M
+screen
+|ab  |
+|ef  |
+|    |
+scrollback 0
+
+## RI and SD save nothing
+size 4x2
+send ab\r\ncd\e[H\eM\e[T
+screen
+|    |
+|    |
+scrollback 0
+
+## ED 2 saves nothing
+# As xterm without cdXtraScroll, its default.
+size 4x2
+send ab\r\ncd\e[2J
+screen
+|    |
+|    |
+scrollback 0
+
+## The alternate screen saves nothing
+size 4x2
+send ab\e[?1049h\r\ncd\r\nef\r\ngh
+screen
+|ef  |
+|gh  |
+scrollback 0
+send \e[?1049l
+screen
+|ab  |
+|    |
+
+## ED 3 empties the scrollback from the alternate screen too
+size 4x2
+send ab\r\ncd\r\nef\e[?1049h\e[3J\e[?1049l
+scrollback 0
+screen
+|cd  |
+|ef  |
+
+## RIS empties the scrollback
+# xterm's RIS calls VTReset(xw, True, True), which clears the saved lines.
+size 4x2
+send ab\r\ncd\r\nef\ec
+screen
+|    |
+|    |
+scrollback 0
+
+## The oldest rows go past the limit
+size 4x2
+limit 2
+send 1\r\n2\r\n3\r\n4\r\n5
+scrollback 2
+|2   |
+|3   |
+screen
+|4   |
+|5   |
+
+## A smaller limit drops the oldest rows at once
+size 4x2
+send 1\r\n2\r\n3\r\n4\r\n5
+scrollback 3
+|1   |
+|2   |
+|3   |
+limit 1
+scrollback 1
+|3   |
+
+## A limit of 0 keeps nothing
+size 4x2
+limit 0
+send 1\r\n2\r\n3
+scrollback 0
+screen
+|2   |
+|3   |
+
+## REP saves the rows it scrolls off, as far as its bound
+# DESIGN.md §3, Bounded: past two screenfuls and a row the count is cut by whole rows, and
+# the rows of the character it cuts are not saved, where xterm saves them.
+# Here 13 is cut to 11, so 12 x's are printed where xterm prints 14, and one row fewer is
+# saved.
+size 2x2
+send ab\r\nx\e[13b
+screen
+|xx|>
+|xx|
+scrollback 5
+|ab|
+|xx|>
+|xx|>
+|xx|>
+|xx|>
+
+## Clear keeps the line with the cursor, at the top
+size 4x3
+send ab\r\ncd\r\nef\r\ngh
+send \e[2;3H
+clear
+screen
+|ef  |
+|    |
+|    |
+cursor 1;3
+scrollback 0
+
+## Clear keeps every row of the cursor's line on the screen
+size 4x3
+send ab\r\n$ abcdefg
+clear
+screen
+|$ ab|>
+|cdef|>
+|g   |
+cursor 3;2
+
+## Clear keeps a wrap waiting
+size 4x2
+send ab\r\ncdef
+clear
+screen
+|cdef|
+|    |
+send g
+screen
+|cdef|>
+|g   |
+
+## Clear on the alternate screen empties only the scrollback
+# The program owns its screen, and would not know to draw it again.
+size 4x2
+send ab\r\ncd\r\nef\e[?1049h\e[Hvim
+clear
+screen
+|vim |
+|    |
+scrollback 0
+send \e[?1049l
+screen
+|cd  |
+|ef  |

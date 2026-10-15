@@ -103,6 +103,11 @@ impl Mouse {
         self.grid = (size(grid.cell_width) && size(grid.cell_height)).then_some(grid);
     }
 
+    /// How many rows the grid has, which is a page. None before there is a grid.
+    pub(crate) fn page(&self) -> Option<f64> {
+        self.grid.map(|grid| f64::from(grid.size.rows))
+    }
+
     /// What a button going down or up, or the mouse moving, means.
     pub(crate) fn event(&mut self, event: &MouseEvent, modes: &Modes) -> Option<Action> {
         let grid = self.grid?;

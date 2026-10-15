@@ -3,7 +3,7 @@
 //! cursor, and every shape drawn into pixels here, to see that it stays in its cell and meets its
 //! neighbours.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use terminal_core::{Color, CursorShape, Size, Style, TerminalCore, Underline};
 
@@ -55,6 +55,9 @@ fn first(core: &TerminalCore) -> Frame {
     let size = core.size();
     renderer(size.cols, size.rows).frame(core, "").unwrap()
 }
+
+/// A row as the window painted it: its backgrounds and its text.
+type Painted = (Vec<Span>, Vec<Run>);
 
 /// A run as the tests write it: its column, its text and how it takes its cells.
 type Text = (u16, String, Cells);
@@ -405,11 +408,12 @@ fn a_frame_holds_only_the_rows_that_changed() {
     assert_eq!(frame.rows[0].index, 1);
     assert_eq!(texts(&frame.rows[0]), [joined(0, "due")]);
 
-    // A scroll moves every row.
+    // A scroll moves the rows: the window copies them a row up, and only the new one is sent.
     core.interpret(b"\x1b[3;1H\n");
     let frame = renderer.frame(&core, "").unwrap();
+    assert_eq!(frame.shift, 18);
     let indexes: Vec<u16> = frame.rows.iter().map(|row| row.index).collect();
-    assert_eq!(indexes, [0, 1, 2]);
+    assert_eq!(indexes, [2]);
 }
 
 #[test]
@@ -550,6 +554,8 @@ fn frames_add_up_to_what_a_full_frame_draws() {
         "e\u{301}",
         "too long to fit at all",
     ];
+    // How many frames had the view between two rows, and how many moved the rows.
+    let (mut offsets, mut shifts) = (0, 0);
     for _ in 0..60 {
         let size = Size {
             cols: 1 + random.below(24) as u16,
@@ -564,14 +570,16 @@ fn frames_add_up_to_what_a_full_frame_draws() {
         let mut measure = measured(size.cols, size.rows);
         let mut renderer = Renderer::new(colors.clone());
         renderer.measure(&measure).unwrap();
-        // What the window shows, row by row, and its cursor.
-        let mut canvas: Vec<RowFrame> = Vec::new();
+        // What the window shows: the rows it painted, by the device pixel each starts at, its
+        // cursor, and the grid's height.
+        let mut canvas: BTreeMap<i64, Painted> = BTreeMap::new();
         let mut caret = None;
         let mut cursor = None;
+        let mut grid = 0;
 
         for step in 0..40 {
             core.interpret(output(&mut random).as_bytes());
-            match random.below(12) {
+            match random.below(18) {
                 0 => {
                     let size = Size {
                         cols: 1 + random.below(24) as u16,
@@ -607,6 +615,17 @@ fn frames_add_up_to_what_a_full_frame_draws() {
                     motion = [Motion::Full, Motion::Reduced, Motion::Off][random.below(3)];
                     renderer.set_motion(motion);
                 }
+                // Scrolling by whole rows and by parts of them, as a trackpad does.
+                6..=8 => {
+                    let rows = (random.below(400) as f64 - 200.0) / 37.0;
+                    renderer.scroll(&core, rows);
+                }
+                9 => renderer.scroll_to_bottom(),
+                10 => core.clear(),
+                11 => {
+                    core.interpret(b"\x1b[3J");
+                }
+                12 => core.set_scrollback([0, 1, 3, 50][random.below(4)]),
                 _ => {}
             }
             let composing = random.pick(&composings);
@@ -614,19 +633,30 @@ fn frames_add_up_to_what_a_full_frame_draws() {
                 if frame.full.is_none() && frame.rows.is_empty() {
                     // Nothing is sent when nothing changed.
                     assert!(
-                        caret != Some(frame.caret) || cursor != frame.cursor,
+                        frame.shift != 0 || caret != Some(frame.caret) || cursor != frame.cursor,
                         "step {step}"
                     );
                 }
-                if frame.full.is_some() {
+                let height = i64::from(renderer.geometry.as_ref().unwrap().layout.cell_height);
+                if let Some(full) = &frame.full {
                     canvas.clear();
+                    grid = i64::from(full.geometry.layout.size.rows) * height;
+                    assert_eq!(frame.shift, 0);
                 }
+                if frame.shift != 0 {
+                    // The window copies what it painted, and the grid cuts it: a row that is
+                    // no longer whole inside it must be painted again.
+                    canvas = canvas
+                        .into_iter()
+                        .map(|(y, row)| (y - frame.shift, row))
+                        .filter(|(y, _)| *y >= 0 && *y + height <= grid)
+                        .collect();
+                }
+                offsets += usize::from(frame.offset != 0);
+                shifts += usize::from(frame.shift != 0);
                 for row in frame.rows {
-                    let index = usize::from(row.index);
-                    if index >= canvas.len() {
-                        canvas.resize(index + 1, row.clone());
-                    }
-                    canvas[index] = row;
+                    let y = i64::from(row.index) * height - i64::from(frame.offset);
+                    canvas.insert(y, (row.spans, row.runs));
                 }
                 caret = Some(frame.caret);
                 cursor = frame.cursor;
@@ -638,12 +668,194 @@ fn frames_add_up_to_what_a_full_frame_draws() {
             fresh.set_motion(motion);
             fresh.set_focused(focused);
             fresh.measure(&measure).unwrap();
+            fresh.view = renderer.view;
             let full = fresh.frame(&core, composing).unwrap();
-            assert_eq!(canvas, full.rows, "step {step}");
+            let height = i64::from(fresh.geometry.as_ref().unwrap().layout.cell_height);
+            for row in &full.rows {
+                let y = i64::from(row.index) * height - i64::from(full.offset);
+                assert_eq!(
+                    canvas.get(&y),
+                    Some(&(row.spans.clone(), row.runs.clone())),
+                    "step {step}, row {}",
+                    row.index
+                );
+            }
             assert_eq!(caret, Some(full.caret), "step {step}");
-            assert_eq!(cursor, full.cursor, "step {step}");
+            // A cursor that moved with the view does not glide; a first frame cannot tell.
+            let still = |cursor: Option<CursorFrame>| {
+                cursor.map(|cursor| CursorFrame {
+                    glides: false,
+                    ..cursor
+                })
+            };
+            assert_eq!(still(cursor.clone()), still(full.cursor), "step {step}");
         }
     }
+    assert!(
+        offsets >= 20 && shifts >= 200,
+        "{offsets} offsets, {shifts} shifts"
+    );
+}
+
+// ---------------------------------------------------------------------------------------
+// The view (TERM-14, ANIM-06)
+// ---------------------------------------------------------------------------------------
+
+/// A terminal 6 by 3 whose output was the lines `1` to `count`, so that all but the last three
+/// are in the scrollback.
+fn numbered(count: usize) -> TerminalCore {
+    let lines: Vec<String> = (1..=count).map(|line| line.to_string()).collect();
+    core(6, 3, &lines.join("\r\n"))
+}
+
+/// The text of each row a frame sends, by its index.
+fn row_texts(frame: &Frame) -> Vec<(u16, String)> {
+    frame
+        .rows
+        .iter()
+        .map(|row| {
+            let text = row.runs.iter().map(|run| run.text.as_str()).collect();
+            (row.index, text)
+        })
+        .collect()
+}
+
+#[test]
+fn scrolling_back_shows_the_scrollback() {
+    let core = numbered(10);
+    let mut renderer = renderer(6, 3);
+    renderer.frame(&core, "").unwrap();
+    renderer.scroll(&core, -2.0);
+    let frame = renderer.frame(&core, "").unwrap();
+    // The rows moved two down: the window copies them, and the two new ones are sent.
+    assert_eq!(frame.shift, -36);
+    assert_eq!(
+        row_texts(&frame),
+        [(0, "6".to_string()), (1, "7".to_string())]
+    );
+    assert!(frame.full.is_none());
+    // The cursor, on the last row, is below the view.
+    assert_eq!(frame.cursor, None);
+}
+
+#[test]
+fn a_view_scrolled_back_stays_on_its_text_as_output_arrives() {
+    let mut core = numbered(10);
+    let mut renderer = renderer(6, 3);
+    renderer.scroll(&core, -4.0);
+    let frame = renderer.frame(&core, "").unwrap();
+    assert_eq!(row_texts(&frame)[0], (0, "4".to_string()));
+    core.interpret(b"\r\n11\r\n12");
+    // Nothing it shows changed, so nothing is sent.
+    assert_eq!(renderer.frame(&core, ""), None);
+    renderer.scroll_to_bottom();
+    let frame = renderer.frame(&core, "").unwrap();
+    let texts: Vec<String> = row_texts(&frame)
+        .into_iter()
+        .map(|(_, text)| text)
+        .collect();
+    assert_eq!(texts, ["10", "11", "12"]);
+}
+
+#[test]
+fn the_view_stops_at_the_oldest_row_and_at_the_bottom() {
+    let mut core = numbered(10);
+    let mut renderer = renderer(6, 3);
+    // A turn past the oldest row is not owed afterwards.
+    renderer.scroll(&core, -100.0);
+    renderer.scroll(&core, 1.0);
+    let frame = renderer.frame(&core, "").unwrap();
+    assert_eq!(row_texts(&frame)[0], (0, "2".to_string()));
+    // Rows dropped past the limit take the view to the oldest row kept.
+    core.set_scrollback(3);
+    let frame = renderer.frame(&core, "").unwrap();
+    assert_eq!(row_texts(&frame)[0], (0, "5".to_string()));
+    // Past the bottom, the view follows the output.
+    renderer.scroll(&core, 100.0);
+    assert_eq!(renderer.view, None);
+    core.clear();
+    renderer.scroll(&core, -1.0);
+    assert_eq!(renderer.view, None);
+}
+
+#[test]
+fn a_view_between_two_rows_draws_one_more_row_its_offset_up() {
+    let core = numbered(10);
+    let mut renderer = renderer(6, 3);
+    renderer.frame(&core, "").unwrap();
+    // A trackpad's few pixels: a quarter of a row, which is 4.5 pixels here, rounded.
+    renderer.scroll(&core, -0.25);
+    let frame = renderer.frame(&core, "").unwrap();
+    assert!(frame.full.is_none(), "an offset needs no layout");
+    assert_eq!(frame.offset, 14);
+    assert_eq!(frame.shift, -4);
+    // Rows 7 and 10 are cut at the grid's edges, so they are sent; 8 and 9 moved whole.
+    assert_eq!(
+        row_texts(&frame),
+        [(0, "7".to_string()), (3, "10".to_string())]
+    );
+    assert!(frame.json().contains("\"shift\":-4,\"offset\":14,"));
+    // The cursor, in the row cut at the bottom, is drawn there.
+    assert_eq!(frame.cursor.as_ref().map(|cursor| cursor.row), Some(3));
+    // A part of a row that rounds to a whole one is the next row.
+    renderer.scroll(&core, -0.74);
+    let frame = renderer.frame(&core, "").unwrap();
+    assert_eq!(frame.offset, 0);
+    assert_eq!(renderer.sent.len(), 3);
+}
+
+#[test]
+fn the_cursor_does_not_glide_when_the_view_moves() {
+    let mut core = numbered(10);
+    let mut renderer = renderer(6, 3);
+    renderer.set_cursor(CursorSettings {
+        glide: true,
+        ..CursorSettings::default()
+    });
+    renderer.frame(&core, "").unwrap();
+    renderer.scroll(&core, -0.5);
+    let frame = renderer.frame(&core, "").unwrap();
+    assert!(!frame.cursor.unwrap().glides);
+    // Output that the view follows moves the cursor against the grid, not the view.
+    renderer.scroll_to_bottom();
+    renderer.frame(&core, "").unwrap();
+    core.interpret(b"\r\nnext");
+    assert!(renderer.frame(&core, "").unwrap().cursor.unwrap().glides);
+}
+
+#[test]
+fn rows_of_the_scrollback_are_drawn_the_grid_wide() {
+    let core = numbered(10);
+    let mut renderer = renderer(6, 3);
+    renderer.scroll(&core, -3.0);
+    renderer.frame(&core, "").unwrap();
+    assert!(renderer.sent.iter().all(|line| line.len() == 6));
+    // As a blank of a row of the screen is drawn.
+    let mut screen_row = line::draw(&core.screen().rows()[0], 6, &palette());
+    line::ligatures(&mut screen_row, None);
+    assert_eq!(renderer.sent[0][5], screen_row[5]);
+}
+
+#[test]
+fn the_alternate_screen_and_a_resize_take_the_view_to_the_bottom() {
+    let mut core = numbered(10);
+    let mut renderer = renderer(6, 3);
+    renderer.scroll(&core, -2.0);
+    core.interpret(b"\x1b[?1049h");
+    renderer.frame(&core, "").unwrap();
+    assert_eq!(renderer.view, None);
+    // The alternate screen keeps no scrollback.
+    renderer.scroll(&core, -2.0);
+    assert_eq!(renderer.view, None);
+
+    core.interpret(b"\x1b[?1049l");
+    renderer.scroll(&core, -2.0);
+    renderer.frame(&core, "").unwrap();
+    let layout = renderer.measure(&measured(5, 3)).unwrap();
+    core.resize(layout.size);
+    let frame = renderer.frame(&core, "").unwrap();
+    assert!(frame.full.is_some());
+    assert_eq!(renderer.view, None);
 }
 
 // ---------------------------------------------------------------------------------------
@@ -2015,7 +2227,7 @@ fn a_full_frame_has_the_layout() {
     let json = first(&core(2, 1, "")).json();
     assert!(
         json.starts_with(
-            "{\"full\":{\"canvas\":[16,18],\"scale\":1,\"cell\":[8,18],\"baseline\":14,\
+            "{\"full\":{\"canvas\":[16,18],\"grid\":[2,1],\"scale\":1,\"cell\":[8,18],\"baseline\":14,\
              \"font\":\"Mono\",\"fontSize\":13,\"background\":\"#0a0a0a\",\"underlines\":[[[0,15,8,1]],"
         ),
         "{json}"

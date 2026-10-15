@@ -1,7 +1,11 @@
 // Renderer (SRS §6.1): painting a frame. src/tab/renderer.js calls it.
 //
-// Paints what a frame says on a canvas in device pixels. Each row is painted in a band of its
-// own, clipped to it, so a row painted alone comes out as it does among all the others. Each
+// Paints what a frame says on a canvas in device pixels. When the rows moved, as output scrolls
+// the screen or the user scrolls the view, what was painted is first copied as far as they moved,
+// so only the rows the frame sends are painted again. Each row is painted in a band of its own,
+// its offset up from its cell and clipped to it, so a row painted alone comes out as it does
+// among all the others. The copy and every band are clipped to the grid, so the margins keep the
+// background and the rows cut at its edges show what of them is inside (ANIM-06). Each
 // cell's text is drawn at the cell's left edge and on the baseline, whole pixels both, so no
 // webview's text engine can move a column. A run that may hold ligatures is drawn as one, so the
 // font's ligatures form, and stretched across so that each character's glyph still starts at its
@@ -206,13 +210,21 @@ function paintRun(context, full, frame, pen, run, top, left) {
   }
 }
 
+// The height of the grid `full` lays out, in device pixels: the rows and the copy are cut there.
+function gridHeight(full) {
+  return full.grid[1] * full.cell[1];
+}
+
 // Paints `frame` with `full`, the layout of the last frame that had every row. A frame with
-// every row paints the whole canvas first, margins included.
+// every row paints the whole canvas first, margins included. One whose rows moved copies the
+// grid as far as they moved first.
 export function paint(context, full, frame) {
   const { canvas } = context;
   const [cellWidth, cellHeight] = full.cell;
   const { colors } = frame;
   const pen = penFor(context);
+  const grid = gridHeight(full);
+  const offset = frame.offset ?? 0;
 
   context.textAlign = "left";
   context.textBaseline = "alphabetic";
@@ -221,17 +233,31 @@ export function paint(context, full, frame) {
     forget();
     pen.setFill(full.background);
     context.fillRect(0, 0, canvas.width, canvas.height);
+  } else if (frame.shift) {
+    // Whole device pixels and no transform, so the copy is exact. What it brings in from past
+    // the grid's edges is in rows the frame sends.
+    context.save();
+    context.beginPath();
+    context.rect(0, 0, canvas.width, grid);
+    context.clip();
+    context.drawImage(canvas, 0, -frame.shift);
+    context.restore();
   }
 
   for (const [index, spans, runs] of frame.rows) {
-    const top = index * cellHeight;
+    const top = index * cellHeight - offset;
+    const from = Math.max(top, 0);
+    const to = Math.min(top + cellHeight, grid);
+    if (to <= from) {
+      continue;
+    }
     context.save();
     context.beginPath();
-    context.rect(0, top, canvas.width, cellHeight);
+    context.rect(0, from, canvas.width, to - from);
     context.clip();
 
     pen.setFill(full.background);
-    context.fillRect(0, top, canvas.width, cellHeight);
+    context.fillRect(0, from, canvas.width, to - from);
     for (let i = 0; i < spans.length; i += 3) {
       pen.setFill(colors[spans[i + 2]]);
       context.fillRect(spans[i] * cellWidth, top, spans[i + 1] * cellWidth, cellHeight);
@@ -247,16 +273,19 @@ export function paint(context, full, frame) {
 
 // Paints `frame`'s cursor with its cells' top left at `x`, `y`: its shape in its color, and over a
 // block the text under it, in the cursor's text color (TERM-07). The text is cut at the cursor's
-// cells, so text drawn as one from a cell before them, such as a flag, shows the cursor's part.
-// Without `text`, only the shape, as while it glides.
+// cells, so text drawn as one from a cell before them, such as a flag, shows the cursor's part,
+// and the cursor is cut at the grid's edges, as its row is. Without `text`, only the shape, as
+// while it glides.
 export function paintCursor(context, full, frame, x, y, text = true) {
   const { cursor } = frame;
   const [cellWidth, cellHeight] = full.cell;
   const pen = penFor(context);
+  const from = Math.max(y, 0);
+  const to = Math.min(y + cellHeight, gridHeight(full));
 
   context.save();
   context.beginPath();
-  context.rect(x, y, cursor.cell[2] * cellWidth, cellHeight);
+  context.rect(x, from, cursor.cell[2] * cellWidth, Math.max(to - from, 0));
   context.clip();
   context.textAlign = "left";
   context.textBaseline = "alphabetic";

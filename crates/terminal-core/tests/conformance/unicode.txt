@@ -101,6 +101,19 @@ screen
 |日   |
 cursor 2;3
 
+## A wide character that leaves a blank last column leaves it out of the line
+# DESIGN.md §3, the wrap mark: reflow and copying put no space in the middle of the line.
+size 5x2
+send abcd日
+screen
+|abcd |»
+|日   |
+cursor 2;3
+send \e[1;5Hx
+screen
+|abcdx|>
+|日   |
+
 ## Without autowrap a wide character in the last column is dropped
 # The pending wrap goes too, so the next character writes over the last column.
 size 5x1
@@ -357,10 +370,11 @@ cursor 1;1
 # REP and the cursor
 
 ## REP repeats a wide character, wrapping as printing would
+# The last column is blank, so it is not part of the line (DESIGN.md §3, the wrap mark).
 size 5x2
 send 日\e[2b
 screen
-|日日 |>
+|日日 |»
 |日   |
 cursor 2;3
 

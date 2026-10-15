@@ -13,9 +13,16 @@
 //! send abcd\r\nefgh\r\nijkl\e[2;2H                        one call to `interpret`
 //! send \e[1J
 //! screen                                                  every row, at its full width; a
-//! |    |                                                  `>` after a row means it wraps
-//! |  gh|
-//! |ijkl|
+//! |    |                                                  `>` after a row means it wraps,
+//! |  gh|                                                  and `»` that it wraps and its last
+//! |ijkl|                                                  cell is not part of its line
+//! scrollback 2                                            the scrollback's rows, oldest
+//! |ab  |                                                  first, as many as it says, padded
+//! |cd  |                                                  to the width
+//! resize 3x2                                              resizes the terminal; what follows
+//!                                                         is drawn at the new size
+//! limit 5                                                 keeps 5 rows of scrollback
+//! clear                                                   Clear (TERM-22)
 //! cursor 2;2                                              counted from 1, as CUP counts
 //! reply \e[?62;22c                                        the next reply not yet checked
 //! mode bracketed_paste on                                 a field of `Modes`: `on` or
@@ -119,6 +126,10 @@ struct Step {
 enum Kind {
     Send(Vec<u8>),
     Screen(Vec<Row>),
+    Scrollback(Vec<Row>),
+    Resize(Size),
+    Limit(usize),
+    Clear,
     Styles(Vec<Vec<Style>>),
     Cursor(u16, u16),
     Reply(Vec<u8>),
@@ -130,6 +141,8 @@ enum Kind {
 struct Row {
     text: String,
     wrapped: bool,
+    /// Its last cell is not part of its line: a wide character that did not fit there went on.
+    early: bool,
 }
 
 /// The fields of `Modes` a case can name, with the words their values are written in.
@@ -153,6 +166,8 @@ const MODES: &[&str] = &[
 fn parse(file: &str, text: &str, problems: &mut Vec<String>) -> Vec<Case> {
     let mut cases = Vec::new();
     let mut case: Option<Case> = None;
+    // The size the case has reached: rows are drawn at it.
+    let mut now = Size { cols: 0, rows: 0 };
     let mut broken = false;
     let mut lines = text.lines().enumerate().map(|(at, line)| (at + 1, line));
 
@@ -197,9 +212,26 @@ fn parse(file: &str, text: &str, problems: &mut Vec<String>) -> Vec<Case> {
             "size" => match parse_size(rest) {
                 Some(size) => {
                     current.size = size;
+                    now = size;
                     continue;
                 }
                 None => Err(format!("{rest:?} is not a size such as 80x24")),
+            },
+            "resize" => match parse_size(rest) {
+                Some(size) => {
+                    now = size;
+                    Ok(Kind::Resize(size))
+                }
+                None => Err(format!("{rest:?} is not a size such as 80x24")),
+            },
+            "limit" => rest
+                .parse()
+                .map(Kind::Limit)
+                .map_err(|_| format!("{rest:?} is not a number of rows")),
+            "clear" if rest.is_empty() => Ok(Kind::Clear),
+            "scrollback" => match rest.parse::<usize>() {
+                Ok(count) => read_rows(&mut lines, count, "scrollback").map(Kind::Scrollback),
+                Err(_) => Err(format!("{rest:?} is not a number of rows")),
             },
             "style" => match parse_letter(rest, &current.letters) {
                 Ok(letter) => {
@@ -222,36 +254,19 @@ fn parse(file: &str, text: &str, problems: &mut Vec<String>) -> Vec<Case> {
                 _ => Err(format!("{rest:?} is not one of {MODES:?} and a value")),
             },
             "screen" if rest.is_empty() => {
+                read_rows(&mut lines, usize::from(now.rows), "screen").map(Kind::Screen)
+            }
+            "styles" if rest.is_empty() => {
                 let mut rows = Vec::new();
                 let mut why = None;
-                for _ in 0..current.size.rows {
+                for _ in 0..now.rows {
                     match lines.next() {
-                        Some((at, row)) => match parse_row(row) {
+                        Some((at, row)) => match parse_styles(row, now.cols, &current.letters) {
                             Ok(row) => rows.push(row),
                             Err(error) => {
                                 why.get_or_insert(format!("row on line {at}: {error}"));
                             }
                         },
-                        None => {
-                            why.get_or_insert("the file ends inside a screen".to_string());
-                        }
-                    }
-                }
-                why.map_or(Ok(Kind::Screen(rows)), Err)
-            }
-            "styles" if rest.is_empty() => {
-                let mut rows = Vec::new();
-                let mut why = None;
-                for _ in 0..current.size.rows {
-                    match lines.next() {
-                        Some((at, row)) => {
-                            match parse_styles(row, current.size.cols, &current.letters) {
-                                Ok(row) => rows.push(row),
-                                Err(error) => {
-                                    why.get_or_insert(format!("row on line {at}: {error}"));
-                                }
-                            }
-                        }
                         None => {
                             why.get_or_insert("the file ends inside the styles".to_string());
                         }
@@ -282,6 +297,30 @@ fn parse(file: &str, text: &str, problems: &mut Vec<String>) -> Vec<Case> {
     cases
 }
 
+/// The next `count` rows of `lines`, of a screen or of the scrollback as `what` says.
+fn read_rows<'a>(
+    lines: &mut impl Iterator<Item = (usize, &'a str)>,
+    count: usize,
+    what: &str,
+) -> Result<Vec<Row>, String> {
+    let mut rows = Vec::new();
+    let mut why = None;
+    for _ in 0..count {
+        match lines.next() {
+            Some((at, row)) => match parse_row(row) {
+                Ok(row) => rows.push(row),
+                Err(error) => {
+                    why.get_or_insert(format!("row on line {at}: {error}"));
+                }
+            },
+            None => {
+                why.get_or_insert(format!("the file ends inside a {what}"));
+            }
+        }
+    }
+    why.map_or(Ok(rows), Err)
+}
+
 fn parse_size(text: &str) -> Option<Size> {
     let (cols, rows) = text.split_once('x')?;
     let size = Size {
@@ -296,18 +335,23 @@ fn parse_cursor(text: &str) -> Option<(u16, u16)> {
     Some((row.parse().ok()?, col.parse().ok()?))
 }
 
-/// A row drawn as `|`, its text and `|`, then `>` if it wraps. A `|` inside the row is a
-/// character like any other: only the last one ends it. How wide the text is depends on its
-/// characters, so it is not counted here; a row of the wrong width fails as the screen differs.
+/// A row drawn as `|`, its text and `|`, then `>` if it wraps, or `»` if it wraps and its last
+/// cell is not part of its line. A `|` inside the row is a character like any other: only the
+/// last one ends it. How wide the text is depends on its characters, so it is not counted here;
+/// a row of the wrong width fails as the screen differs.
 fn parse_row(text: &str) -> Result<Row, String> {
-    let (inside, wrapped) = match text.strip_suffix("|>") {
-        Some(inside) => (inside, true),
-        None => (text.strip_suffix('|').unwrap_or(""), false),
+    let (inside, wrapped, early) = if let Some(inside) = text.strip_suffix("|>") {
+        (inside, true, false)
+    } else if let Some(inside) = text.strip_suffix("|»") {
+        (inside, true, true)
+    } else {
+        (text.strip_suffix('|').unwrap_or(""), false, false)
     };
     match inside.strip_prefix('|') {
         Some(inside) => Ok(Row {
             text: inside.to_string(),
             wrapped,
+            early,
         }),
         None => Err(format!("{text:?} is not a row between two |")),
     }
@@ -563,6 +607,19 @@ fn run(case: &Case, bytewise: bool) -> Vec<(usize, String)> {
                     ));
                 }
             }
+            Kind::Scrollback(expected) => {
+                let actual = scrollback(&core);
+                if &actual != expected {
+                    problem(format!(
+                        "the scrollback differs\nexpected\n{}\ngot\n{}",
+                        draw(expected),
+                        draw(&actual)
+                    ));
+                }
+            }
+            Kind::Resize(size) => core.resize(*size),
+            Kind::Limit(rows) => core.set_scrollback(*rows),
+            Kind::Clear => core.clear(),
             Kind::Styles(expected) => {
                 let actual = styles(&core);
                 if &actual != expected {
@@ -613,14 +670,32 @@ fn run(case: &Case, bytewise: bool) -> Vec<(usize, String)> {
 }
 
 fn screen(core: &TerminalCore) -> Vec<Row> {
-    core.screen()
-        .rows()
-        .iter()
-        .map(|row| Row {
-            text: row.text(),
-            wrapped: row.wrapped(),
+    core.screen().rows().iter().map(drawn).collect()
+}
+
+/// The scrollback's rows, oldest first, padded to the screen's width.
+fn scrollback(core: &TerminalCore) -> Vec<Row> {
+    let scrollback = core.scrollback();
+    let cols = usize::from(core.size().cols);
+    (0..scrollback.len())
+        .map(|index| {
+            let row = scrollback.get(index).unwrap();
+            let mut drawn = drawn(row);
+            drawn.text.extend(std::iter::repeat_n(
+                ' ',
+                cols.saturating_sub(row.cells().len()),
+            ));
+            drawn
         })
         .collect()
+}
+
+fn drawn(row: &terminal_core::Row) -> Row {
+    Row {
+        text: row.text(),
+        wrapped: row.wrapped(),
+        early: row.line().len() < row.cells().len(),
+    }
 }
 
 fn styles(core: &TerminalCore) -> Vec<Vec<Style>> {
@@ -673,7 +748,14 @@ fn capital(at: usize) -> char {
 fn draw(rows: &[Row]) -> String {
     let lines: Vec<String> = rows
         .iter()
-        .map(|row| format!("|{}|{}", row.text, if row.wrapped { ">" } else { "" }))
+        .map(|row| {
+            let mark = match (row.wrapped, row.early) {
+                (true, true) => "»",
+                (true, false) => ">",
+                _ => "",
+            };
+            format!("|{}|{mark}", row.text)
+        })
         .collect();
     lines.join("\n")
 }
@@ -787,6 +869,10 @@ fn rows_are_read_between_their_bars() {
     let row = parse_row("|a|b |>").unwrap();
     assert_eq!(row.text, "a|b ");
     assert!(row.wrapped);
+    assert!(!row.early);
+    let row = parse_row("|日日 |»").unwrap();
+    assert_eq!(row.text, "日日 ");
+    assert!(row.wrapped && row.early);
     let row = parse_row("|日本||").unwrap();
     assert_eq!(row.text, "日本|");
     assert!(!row.wrapped);
@@ -803,6 +889,16 @@ fn what_cannot_be_read_is_a_problem() {
         ("## a\nsend x\n", "a case starts with `size`"),
         ("## a\nsize 2x1\nsize 2x1\n", "a second `size`"),
         ("## a\nsize 2by1\n", "is not a size"),
+        ("## a\nsize 2x1\nresize 2by1\n", "is not a size"),
+        ("## a\nsize 2x1\nlimit many\n", "is not a number of rows"),
+        (
+            "## a\nsize 2x1\nscrollback two\n",
+            "is not a number of rows",
+        ),
+        (
+            "## a\nsize 2x1\nscrollback 1\n",
+            "the file ends inside a scrollback",
+        ),
         ("## a\nsize 2x1\nsend x \n", "ends in a space"),
         (
             "## a\nsize 2x1\nsned x\n",

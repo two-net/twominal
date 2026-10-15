@@ -1,0 +1,248 @@
+# Reflow (TERM-16, REL-03): a resize wraps the primary screen's lines again, with the
+# scrollback's. xterm does not reflow, so these follow DESIGN.md §3, Reflow.
+
+## A narrower grid wraps a line again
+size 6x2
+send abcdefghi
+resize 4x3
+screen
+|abcd|>
+|efgh|>
+|i   |
+cursor 3;2
+
+## A wider grid joins a line's rows
+size 4x3
+send abcdefghi
+resize 6x3
+screen
+|abcdef|>
+|ghi   |
+|      |
+cursor 2;4
+
+## Narrower and wider again gives the screen back
+size 6x3
+send one two\r\nthree
+resize 3x3
+screen
+|o  |
+|thr|>
+|ee |
+scrollback 2
+|one|>
+| tw|>
+resize 6x3
+screen
+|one tw|>
+|o     |
+|three |
+scrollback 0
+
+## A line does not wrap at the blanks after its text
+size 6x2
+send ab\r\ncd
+resize 3x2
+screen
+|ab |
+|cd |
+scrollback 0
+
+## The cursor stays after the text it was after
+size 6x2
+send $\x20\x20
+resize 2x2
+screen
+|$ |>
+|  |
+cursor 2;2
+
+## A cursor waiting to wrap waits again where the line fills its last row
+size 4x2
+send abcd
+resize 2x2
+screen
+|ab|>
+|cd|
+cursor 2;2
+send e
+screen
+|cd|>
+|e |
+
+## A cursor waiting to wrap does not wait where the line no longer fills its row
+size 4x2
+send abcd
+resize 6x2
+screen
+|abcd  |
+|      |
+cursor 1;5
+
+## A wide character that would start in the last column starts the next row
+size 6x2
+send ab日本
+resize 5x2
+screen
+|ab日 |»
+|本   |
+resize 6x2
+screen
+|ab日本|
+|      |
+
+## A full screen keeps its bottom, and the rows that no longer fit go into the scrollback
+size 4x3
+send 1\r\n2\r\n3
+resize 4x2
+screen
+|2   |
+|3   |
+scrollback 1
+|1   |
+cursor 2;2
+
+## A taller grid takes rows back from the scrollback
+size 4x2
+send 1\r\n2\r\n3\r\n4
+resize 4x4
+screen
+|1   |
+|2   |
+|3   |
+|4   |
+scrollback 0
+cursor 4;2
+
+## A screen with blank rows at its bottom keeps its top
+# As after Ctrl+L, so old rows do not come back over what was cleared.
+size 4x2
+send 1\r\n2\r\n3\e[H\e[2Jp
+resize 4x4
+screen
+|p   |
+|    |
+|    |
+|    |
+scrollback 1
+|1   |
+
+## Rows below the cursor that no longer fit are lost
+size 4x4
+send 1\r\n2\r\n3\r\n4\e[2H
+resize 4x2
+screen
+|2   |
+|3   |
+scrollback 1
+|1   |
+cursor 1;1
+
+## Rows past the scrollback's limit are lost
+size 4x3
+limit 1
+send 1\r\n2\r\n3
+resize 4x1
+screen
+|3   |
+scrollback 1
+|2   |
+
+## Wrapping again keeps no more rows than the limit
+size 6x2
+limit 2
+send abcdef\r\nx
+resize 2x2
+screen
+|ef|
+|x |
+scrollback 2
+|ab|>
+|cd|>
+
+## The style of a line's cells goes with them
+size 4x2
+style r foreground 1
+send \e[31mabcdef\e[m
+resize 3x2
+styles
+|rrr|
+|rrr|
+
+## The primary screen is reflowed while the alternate screen is shown
+size 6x2
+send abcdefgh\e[?1049h\e[Hvim
+resize 4x3
+screen
+|vim |
+|    |
+|    |
+send \e[?1049l
+screen
+|abcd|>
+|efgh|
+|    |
+cursor 2;4
+
+## The saved cursor moves with its cell
+size 6x2
+send abcdef\r\ngh\e[1;5H\e7\e[2;1H
+resize 3x4
+screen
+|abc|>
+|def|
+|gh |
+|   |
+send \e8x
+screen
+|abc|>
+|dxf|
+|gh |
+|   |
+
+## The alternate screen is cut and padded, not reflowed
+size 6x2
+send \e[?1049habcdefgh
+resize 4x2
+screen
+|abcd|>
+|gh  |
+
+## A grid that changes only its height wraps nothing again
+size 3x2
+send abcdef
+resize 3x3
+screen
+|abc|>
+|def|
+|   |
+
+## A saved cursor past the text keeps no blanks
+# It comes back just after the text, so a cursor a program saved and left behind never moves
+# the text.
+size 10x3
+send l1\e[1;9H\e7\e[2Hl2\r\nl3
+resize 5x3
+screen
+|l1   |
+|l2   |
+|l3   |
+send \e8x
+screen
+|l1x  |
+|l2   |
+|l3   |
+
+## A cursor on the column a wide character skipped stays on its row
+size 5x2
+send abcd日\e[1;5H
+resize 6x2
+screen
+|abcd日|
+|      |
+cursor 1;4
+resize 5x2
+screen
+|abcd |»
+|日   |
+cursor 1;4

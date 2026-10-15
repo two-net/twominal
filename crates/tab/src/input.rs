@@ -12,23 +12,30 @@
 //!
 //! So far keys, pastes and focus are passthrough: `key.rs` reads what a key event means, on
 //! any layout, and `encode.rs` turns it, a paste or a change of focus into the bytes a program
-//! expects, by the modes the Terminal Core keeps (TERM-08, TERM-09, TERM-11, HW-01). `mouse.rs`
+//! expects, by the modes the Terminal Core keeps (TERM-08, TERM-09, TERM-11, HW-01). Before that,
+//! `shortcut.rs` takes Twominal's own keys: a page of scrolling and Clear (TERM-22). `mouse.rs`
 //! decides whether the mouse and the wheel are the program's, reported as it asked or as cursor
 //! keys, or Twominal's own, for selection, links and scrolling to act on (TERM-10, HW-02).
 //! DESIGN.md §3 has the rules, and the contract the webview half keeps.
 //!
-//! Filled in by #20 (keys and input methods), #21 (mouse), #43 (shortcuts) and #36–#37
-//! (Scrollback Vim mode).
+//! Filled in by #20 (keys and input methods), #21 (mouse), #26 (scrolling and Clear), #43
+//! (shortcuts) and #36–#37 (Scrollback Vim mode).
 
 mod encode;
 mod key;
 mod mouse;
+mod shortcut;
 #[cfg(test)]
 mod tests;
 
 use terminal_core::{Modes, Size};
 
 use mouse::Mouse;
+use shortcut::Shortcut;
+
+/// How many keys taken as shortcuts are remembered while they are down. Any string may come as
+/// a key's `code`, so they are not kept without bound.
+const TAKEN: usize = 8;
 
 /// One tab's input state: which mode it is in and what the keys mean there.
 pub struct InputHandler {
@@ -37,6 +44,10 @@ pub struct InputHandler {
     /// The text an input method is composing, shown at the cursor until it is committed.
     composing: String,
     mouse: Mouse,
+    /// The keys taken as shortcuts that have not come up, by their `code`: their repeats are
+    /// taken too, and their releases dropped, so a program never hears a release without its
+    /// press.
+    taken: Vec<String>,
 }
 
 /// A key, input-method or mouse event as the webview captured it, before it means anything.
@@ -162,7 +173,12 @@ pub struct Grid {
 /// What an input event means.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Action {
-    /// Bytes to write to the session.
+    /// Bytes the user typed, to write to the session: a key going down or repeating, but a
+    /// modifier or a lock on its own, committed text and a paste. The view goes back to the
+    /// bottom for them (#26).
+    Type(Vec<u8>),
+    /// Other bytes to write to the session: a key coming up, or a modifier on its own, as the
+    /// kitty keyboard protocol may report them, focus, and the mouse and the wheel.
     Send(Vec<u8>),
     /// The text being composed changed, so the Renderer must show it at the cursor (#22).
     Composing,
@@ -170,9 +186,12 @@ pub enum Action {
     /// (TERM-17), open a link or show its target (TERM-20), open the context menu (UI-04) or
     /// paste the primary selection (SW-05).
     Pointer(Pointer),
-    /// The wheel or the trackpad scrolled the view by this many rows, toward newer output when
-    /// positive. Fractional, so a trackpad moves it pixel by pixel (HW-02, ANIM-06).
+    /// The wheel, the trackpad, or Shift+Page Up or Down scrolled the view by this many rows,
+    /// toward newer output when positive. Fractional, so a trackpad moves it pixel by pixel
+    /// (HW-02, ANIM-06).
     Scroll(f64),
+    /// Clear: the screen and the scrollback, keeping the line with the cursor (TERM-22).
+    Clear,
 }
 
 /// A mouse event that is Twominal's: where it fell on the grid, and with what.
@@ -225,6 +244,7 @@ impl InputHandler {
             macos,
             composing: String::new(),
             mouse: Mouse::default(),
+            taken: Vec::new(),
         }
     }
 
@@ -242,11 +262,23 @@ impl InputHandler {
         let bytes = match event {
             InputEvent::Key(event) => {
                 let press = key::read(&event, self.macos)?;
-                encode::key(&press, modes)
+                if let Some(action) = self.shortcut(&event, &press, modes) {
+                    return action;
+                }
+                let bytes = encode::key(&press, modes);
+                if bytes.is_empty() {
+                    return None;
+                }
+                let typed = press.kind != Kind::Release && !press.is_modifier();
+                return Some(if typed {
+                    Action::Type(bytes)
+                } else {
+                    Action::Send(bytes)
+                });
             }
             InputEvent::Text(text) => {
                 self.composing.clear();
-                text.into_bytes()
+                return (!text.is_empty()).then(|| Action::Type(text.into_bytes()));
             }
             InputEvent::Compose(text) => {
                 if text == self.composing {
@@ -256,13 +288,66 @@ impl InputHandler {
                 return Some(Action::Composing);
             }
             InputEvent::Paste(text) if text.is_empty() => return None,
-            InputEvent::Paste(text) => encode::paste(&text, modes.bracketed_paste),
+            InputEvent::Paste(text) => {
+                return Some(Action::Type(encode::paste(&text, modes.bracketed_paste)));
+            }
             InputEvent::Focus(focused) if modes.focus => encode::focus(focused).to_vec(),
             InputEvent::Focus(_) => return None,
             InputEvent::Mouse(event) => return self.mouse.event(&event, modes),
             InputEvent::Wheel(event) => return self.mouse.wheel(&event, modes),
         };
         (!bytes.is_empty()).then_some(Action::Send(bytes))
+    }
+
+    /// What `press`, the key `event`, means if it is a shortcut or a key taken as one: the
+    /// shortcut's action as it goes down or repeats, and nothing as it comes up. None when it is
+    /// neither, and goes to the program. Only a key going down is taken. While it repeats it
+    /// stays taken, whatever modifiers are held by then, and a key the program had stays the
+    /// program's, so a program never hears a repeat or a release without the press.
+    fn shortcut(
+        &mut self,
+        event: &KeyEvent,
+        press: &key::Press,
+        modes: &Modes,
+    ) -> Option<Option<Action>> {
+        let taken = self.taken.iter().position(|code| *code == event.code);
+        match press.kind {
+            Kind::Release => {
+                self.taken.remove(taken?);
+                return Some(None);
+            }
+            Kind::Repeat => {
+                taken?;
+                let shortcut = shortcut::find(press, modes, self.macos);
+                return Some(shortcut.and_then(|shortcut| self.act(shortcut)));
+            }
+            Kind::Press => {}
+        }
+        let Some(shortcut) = shortcut::find(press, modes, self.macos) else {
+            // Down again, as itself: its release, if it was lost, is the program's.
+            if let Some(taken) = taken {
+                self.taken.remove(taken);
+            }
+            return None;
+        };
+        if taken.is_none() {
+            if self.taken.len() == TAKEN {
+                self.taken.remove(0);
+            }
+            self.taken.push(event.code.clone());
+        }
+        Some(self.act(shortcut))
+    }
+
+    /// What `shortcut` does: scroll a page, of as many rows as the grid has, or Clear.
+    fn act(&self, shortcut: Shortcut) -> Option<Action> {
+        match shortcut {
+            Shortcut::Page { up } => self
+                .mouse
+                .page()
+                .map(|rows| Action::Scroll(if up { -rows } else { rows })),
+            Shortcut::Clear => Some(Action::Clear),
+        }
     }
 
     /// The text an input method is composing, for the Renderer to show at the cursor. Empty

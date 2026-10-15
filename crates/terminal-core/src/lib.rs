@@ -12,15 +12,16 @@
 //!
 //! It behaves as xterm does (TERM-01). vte splits the bytes into characters and control
 //! functions; `control.rs` says what each one does; `terminal.rs` does it to the cursor and
-//! the modes, and `screen.rs` to the rows. `width.rs` says how many cells a character takes
-//! (TERM-02), and `style.rs` what SGR does to the colors and attributes of the cells (TERM-03
+//! the modes, and `screen.rs` to the rows. `scrollback.rs` keeps the rows that scroll off the
+//! primary screen (TERM-14) and wraps the lines again when the grid's width changes (TERM-16).
+//! `width.rs` says how many cells a character takes (TERM-02), and `style.rs` what SGR does to the colors and attributes of the cells (TERM-03
 //! to TERM-05). `keyboard.rs` keeps the kitty keyboard protocol's flags (TERM-09).
 //! `report.rs` reads what shell integration reports. DESIGN.md §3 lists what is supported and
 //! what is ignored on purpose.
 //!
 //! Filled in by #16 (interpreter and screen model), #17 (conformance suite and fuzzing),
-//! #18 (Unicode), #19 (colors and attributes), #20 (keyboard flags), #21 (mouse modes) and
-//! #26–#30.
+//! #18 (Unicode), #19 (colors and attributes), #20 (keyboard flags), #21 (mouse modes), #26
+//! (scrollback and reflow) and #27–#30.
 
 #![no_std]
 #![forbid(unsafe_code)]
@@ -37,6 +38,7 @@ pub mod fuzz;
 mod keyboard;
 mod report;
 mod screen;
+mod scrollback;
 mod style;
 mod terminal;
 #[cfg(test)]
@@ -50,6 +52,7 @@ use core::{mem, str};
 pub use keyboard::Keyboard;
 pub use report::Report;
 pub use screen::{Cell, Row, Screen};
+pub use scrollback::Scrollback;
 pub use style::{Color, Style, Underline};
 use terminal::Terminal;
 pub use terminal::{Cursor, CursorShape, CursorStyle, Modes, MouseFormat, MouseTracking};
@@ -126,9 +129,10 @@ impl TerminalCore {
         self.terminal.take_events()
     }
 
-    /// Makes the screens `size`. Lines are not reflowed yet (#26), and the scrolling region
-    /// becomes the whole screen. A size of zero is made one, and the same size changes
-    /// nothing.
+    /// Makes the screens `size`. The primary screen's lines, with its scrollback's, are wrapped
+    /// again to the new width (TERM-16), and the cursor moves with its cell. The scrolling
+    /// region becomes the whole screen. A size of zero is made one, and the same size changes
+    /// nothing. DESIGN.md §3 *Reflow* has the rules.
     pub fn resize(&mut self, size: Size) {
         self.terminal.resize(size);
     }
@@ -137,6 +141,25 @@ impl TerminalCore {
     /// program runs.
     pub fn screen(&self) -> &Screen {
         self.terminal.screen()
+    }
+
+    /// The rows that scrolled off the top of the primary screen (TERM-14). The alternate
+    /// screen keeps none.
+    pub fn scrollback(&self) -> &Scrollback {
+        self.terminal.scrollback()
+    }
+
+    /// Keeps no more than `rows` rows of scrollback, and no more than 100,000, dropping the
+    /// oldest at once: the Scrollback setting (TERM-14, Appendix B). Until it is called it keeps
+    /// 10,000, Appendix B's default.
+    pub fn set_scrollback(&mut self, rows: usize) {
+        self.terminal.set_scrollback(rows);
+    }
+
+    /// Clear (TERM-22): empties the scrollback, and on the primary screen keeps only the line
+    /// the cursor is on, at the top. On the alternate screen it empties only the scrollback.
+    pub fn clear(&mut self) {
+        self.terminal.clear();
     }
 
     pub fn cursor(&self) -> Cursor {

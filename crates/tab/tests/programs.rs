@@ -1,5 +1,5 @@
 //! Real programs, shown by the Terminal Core, typed into through the Input Handler and drawn by
-//! the Renderer (TERM-01 to TERM-06, TERM-08 to TERM-11, FONT-10).
+//! the Renderer (TERM-01 to TERM-06, TERM-08 to TERM-11, TERM-14, TERM-16, FONT-10, REL-03).
 //!
 //! Each test starts a program on a pseudo-terminal through the Session, as a tab does, and
 //! passes what it writes to a Terminal Core, which answers its queries. Keys, pastes, focus
@@ -252,7 +252,9 @@ impl Terminal {
     /// Passes `event` through the Input Handler, with the modes the program set, and writes
     /// what it sends.
     fn input(&mut self, event: InputEvent) {
-        if let Some(Action::Send(bytes)) = self.input.handle(event, self.core.modes()) {
+        if let Some(Action::Type(bytes) | Action::Send(bytes)) =
+            self.input.handle(event, self.core.modes())
+        {
             self.session.write(bytes);
         }
     }
@@ -299,6 +301,17 @@ impl Terminal {
             .screen()
             .rows()
             .iter()
+            .map(|row| row.text().trim_end().to_string())
+            .collect()
+    }
+
+    /// The rows of the scrollback, oldest first, then of the primary screen, without their
+    /// trailing blanks.
+    fn history(&self) -> Vec<String> {
+        let scrollback = self.core.scrollback();
+        (0..scrollback.len())
+            .map(|index| scrollback.get(index).unwrap())
+            .chain(self.core.screen().rows())
             .map(|row| row.text().trim_end().to_string())
             .collect()
     }
@@ -387,6 +400,78 @@ fn vim_shows_a_file_and_gives_the_screen_back() {
     vim.until_exit();
     assert!(!vim.alternate(), "{}", vim.dump());
     assert_eq!(vim.rows()[..3], ["before", "after", ""], "{}", vim.dump());
+}
+
+#[test]
+fn output_that_scrolls_off_is_kept_in_the_scrollback_and_shown_scrolled_back() {
+    let home = Folder::new();
+    let mut sh = Terminal::run(&home.0, "/bin/sh", &["/bin/sh", "-c", "seq 1 100"], &[]);
+    sh.until_exit();
+    let numbers: Vec<String> = (1..=100).map(|number| number.to_string()).collect();
+    let history = sh.history();
+    assert_eq!(history[..100], numbers, "{}", sh.dump());
+    assert_eq!(sh.core.scrollback().len(), 77);
+
+    // The view scrolled back 30 rows shows them, the window copying nothing it had.
+    let mut renderer = Renderer::new(palette());
+    renderer.measure(&measure()).unwrap();
+    renderer.frame(&sh.core, "").unwrap();
+    renderer.scroll(&sh.core, -30.0);
+    let frame = Json::read(&renderer.frame(&sh.core, "").unwrap().json());
+    assert_eq!(frame.get("full"), None);
+    assert_eq!(runs(&frame, 0)[0].1, "48");
+    assert_eq!(runs(&frame, 23)[0].1, "71");
+}
+
+#[test]
+fn a_resize_while_vim_runs_keeps_the_shells_lines() {
+    let Some(vim) = installed("vim") else { return };
+    let home = Folder::new();
+    fs::write(home.0.join("notes.txt"), "alpha\n").unwrap();
+    let long = "x".repeat(70);
+    let script = format!(
+        "seq 1 40; echo {long}; '{vim}' -u NONE -N -n -i NONE notes.txt; printf 'after\\n'"
+    );
+    let mut vim = Terminal::run(&home.0, &vim, &["/bin/sh", "-c", &script], &[]);
+    vim.until("the file", |vim| {
+        vim.alternate() && vim.rows()[0] == "alpha"
+    });
+
+    // The window becomes narrower and shorter while vim runs (REL-03).
+    let size = Size { cols: 50, rows: 20 };
+    vim.core.resize(size);
+    vim.session.resize(size).unwrap();
+    // vim writes on the last row of the new size.
+    vim.keys(":echo 'resized'\r");
+    vim.until("vim at the new size", |vim| {
+        vim.rows()[19].contains("resized") && vim.rows()[0] == "alpha"
+    });
+    vim.keys(":q!\r");
+    vim.until_exit();
+    assert!(!vim.alternate(), "{}", vim.dump());
+
+    // Every line the shell printed is there, the long one wrapped again to the new width.
+    let history = vim.history();
+    let numbers: Vec<String> = (1..=40).map(|number| number.to_string()).collect();
+    assert_eq!(history[..40], numbers, "{}", vim.dump());
+    assert_eq!(
+        history[40..43],
+        ["x".repeat(50), "x".repeat(20), "after".to_string()]
+    );
+}
+
+#[test]
+fn clear_empties_the_scrollback() {
+    let Some(clear) = installed("clear") else {
+        return;
+    };
+    let home = Folder::new();
+    let script = format!("seq 1 50; '{clear}'; echo done");
+    let mut sh = Terminal::run(&home.0, &clear, &["/bin/sh", "-c", &script], &[]);
+    sh.until_exit();
+    // ncurses' clear sends E3, which xterm-256color has, before it clears the screen.
+    assert!(sh.core.scrollback().is_empty(), "{:?}", sh.history());
+    assert_eq!(sh.rows()[0], "done");
 }
 
 #[test]

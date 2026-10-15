@@ -80,23 +80,29 @@ fn rep_is_the_character_printed_again() {
             b"\x1b[H\xe6\x97\xa5\x1b[D",
         ] {
             // Past two screenfuls and a row, 88 for `a` here, the core cuts the count by whole
-            // rows, where xterm prints them all. The state must not show it.
+            // rows, where xterm prints them all. The state must not show it, but for the rows of
+            // the character the cut leaves out of the scrollback.
+            let fit = cols as usize / width(char.chars().next().unwrap()).max(1);
             let counts = [
                 1, 2, 7, 8, 9, 23, 26, 32, 33, 34, 39, 47, 48, 49, 50, 55, 56, 57, 87, 88, 89, 90,
                 95, 96, 97, 100, 333,
             ];
             for count in counts {
                 let prefix = [&text[..], modes].concat();
-                let repeated = core(
+                let mut repeated = core(
                     cols,
                     rows,
                     &[&prefix[..], format!("{char}\x1b[{count}b").as_bytes()].concat(),
                 );
-                let printed = core(
+                let mut printed = core(
                     cols,
                     rows,
                     &[&prefix[..], char.repeat(count + 1).as_bytes()].concat(),
                 );
+                if fit > 0 && count > fit * (2 * usize::from(rows) + 1) {
+                    repeated.terminal.forget_scrollback();
+                    printed.terminal.forget_scrollback();
+                }
                 assert!(
                     repeated.terminal == printed.terminal,
                     "{cols}x{rows} {char} {modes:?} {count}"
@@ -246,31 +252,68 @@ fn a_report_over_the_limit_is_dropped_and_what_follows_is_read() {
     assert_eq!(rows(&core), ["after"]);
 }
 
-// Resizing
+// Resizing and the scrollback (TERM-14, TERM-16)
 
-#[test]
-fn resizing_cuts_and_pads_rows() {
-    let mut core = core(10, 2, b"abcdefghij");
-    core.resize(Size { cols: 5, rows: 2 });
-    assert_eq!(rows(&core), ["abcde", ""]);
-    assert_eq!(cursor(&core), (0, 4));
-    core.resize(Size { cols: 8, rows: 3 });
-    assert_eq!(rows(&core), ["abcde", "", ""]);
-    assert_eq!(core.screen().rows()[0].cells().len(), 8);
+/// The scrollback's rows, without their trailing blanks.
+fn scrollback(core: &TerminalCore) -> Vec<String> {
+    let scrollback = core.scrollback();
+    (0..scrollback.len())
+        .map(|index| scrollback.get(index).unwrap().text().trim_end().to_string())
+        .collect()
 }
 
 #[test]
-fn fewer_rows_go_from_the_top_only_to_keep_the_cursor() {
+fn narrowing_wraps_lines_again_and_widening_joins_them() {
+    let mut core = core(10, 2, b"abcdefghij");
+    core.resize(Size { cols: 5, rows: 2 });
+    assert_eq!(rows(&core), ["abcde", "fghij"]);
+    assert!(core.screen().rows()[0].wrapped());
+    // The cursor waits to wrap after the j, where it was.
+    assert_eq!(cursor(&core), (1, 4));
+    core.interpret(b"k");
+    assert_eq!(rows(&core), ["fghij", "k"]);
+    assert_eq!(scrollback(&core), ["abcde"]);
+
+    core.resize(Size { cols: 8, rows: 3 });
+    assert_eq!(rows(&core), ["abcdefgh", "ijk", ""]);
+    assert!(core.scrollback().is_empty());
+    assert_eq!(cursor(&core), (1, 3));
+    assert_eq!(core.screen().rows()[0].cells().len(), 8);
+    core.terminal.check();
+}
+
+#[test]
+fn fewer_rows_go_into_the_scrollback_and_more_come_back() {
     let mut core = core(5, 4, &numbered(4));
     core.resize(Size { cols: 5, rows: 2 });
     assert_eq!(rows(&core), ["3", "4"]);
+    assert_eq!(scrollback(&core), ["1", "2"]);
     assert_eq!(cursor(&core), (1, 1));
+    core.resize(Size { cols: 5, rows: 4 });
+    assert_eq!(rows(&core), ["1", "2", "3", "4"]);
+    assert!(core.scrollback().is_empty());
+    assert_eq!(cursor(&core), (3, 1));
+}
 
-    let mut core = self::core(5, 4, &numbered(4));
+#[test]
+fn rows_below_the_cursor_that_no_longer_fit_are_lost() {
+    let mut core = core(5, 4, &numbered(4));
     core.interpret(b"\x1b[2H");
     core.resize(Size { cols: 5, rows: 2 });
-    assert_eq!(rows(&core), ["1", "2"]);
-    assert_eq!(cursor(&core), (1, 0));
+    assert_eq!(rows(&core), ["2", "3"]);
+    assert_eq!(scrollback(&core), ["1"]);
+    assert_eq!(cursor(&core), (0, 0));
+}
+
+#[test]
+fn a_screen_with_blank_rows_below_keeps_its_top() {
+    // As after Ctrl+L: the old rows stay in the scrollback.
+    let mut core = core(5, 3, &numbered(5));
+    core.interpret(b"\x1b[H\x1b[2Jtop");
+    core.resize(Size { cols: 5, rows: 5 });
+    assert_eq!(rows(&core), ["top", "", "", "", ""]);
+    assert_eq!(scrollback(&core), ["1", "2"]);
+    assert_eq!(cursor(&core), (0, 3));
 }
 
 #[test]
@@ -281,6 +324,7 @@ fn the_primary_screen_keeps_its_rows_while_the_alternate_is_shown() {
     assert_eq!(rows(&core), ["vim", ""]);
     core.interpret(b"\x1b[?1049l");
     assert_eq!(rows(&core), ["3", "4"]);
+    assert_eq!(scrollback(&core), ["1", "2"]);
     assert_eq!(cursor(&core), (1, 1));
 }
 
@@ -294,21 +338,31 @@ fn resizing_resets_the_region_and_extends_the_tab_stops() {
 }
 
 #[test]
-fn resizing_blanks_a_wide_character_it_cuts_in_two() {
+fn a_wide_character_that_would_start_in_the_last_column_starts_the_next_row() {
     let mut core = core(6, 2, "ab日本".as_bytes());
-    core.resize(Size { cols: 4, rows: 2 });
-    assert_eq!(rows(&core), ["ab日", ""]);
-    core.resize(Size { cols: 3, rows: 2 });
-    assert_eq!(rows(&core), ["ab", ""]);
-    let cells = core.screen().rows()[0].cells();
-    assert_eq!(cells[2].width(), 1);
+    core.resize(Size { cols: 5, rows: 2 });
+    assert_eq!(rows(&core), ["ab日", "本"]);
+    // The last column of the first row is not part of the line.
+    let first = &core.screen().rows()[0];
+    assert!(first.wrapped());
+    assert_eq!(first.line().len(), 4);
+    core.resize(Size { cols: 6, rows: 2 });
+    assert_eq!(rows(&core), ["ab日本", ""]);
     core.terminal.check();
 }
 
 #[test]
-fn resizing_pads_with_the_default_style() {
-    // The window changed the size, not the program, so what it adds or cuts has no colors.
-    let mut core = core(3, 1, "\x1b[44m\x1b[2Ja日".as_bytes());
+fn a_grid_one_column_wide_drops_wide_characters() {
+    let mut core = core(4, 3, "a日b".as_bytes());
+    core.resize(Size { cols: 1, rows: 3 });
+    assert_eq!(rows(&core), ["a", "b", ""]);
+    core.terminal.check();
+}
+
+#[test]
+fn resizing_the_alternate_screen_cuts_and_pads_it_in_the_default_style() {
+    // The window changed the size, not the program, so what it adds has no colors.
+    let mut core = core(3, 1, "\x1b[?1049h\x1b[44m\x1b[2Ja日".as_bytes());
     core.resize(Size { cols: 4, rows: 2 });
     let background = |core: &TerminalCore, row: usize, col: usize| {
         core.screen().rows()[row].cells()[col].style().background
@@ -321,6 +375,98 @@ fn resizing_pads_with_the_default_style() {
     assert_eq!(rows(&core), ["a", ""]);
     assert_eq!(background(&core, 0, 1), Color::Default);
     core.terminal.check();
+}
+
+#[test]
+fn resizes_keep_the_text_of_every_line() {
+    // Random lines, some wide characters among them, through random resizes: joined, every
+    // line has the text it had, while the scrollback has room for them all (REL-03).
+    let mut random = Random::new(0x0026_0026);
+    let alphabet = ["a", "b", " ", "日", "é", "x"];
+    for _ in 0..200 {
+        let mut core = TerminalCore::new(Size { cols: 7, rows: 4 }, None);
+        let mut lines = Vec::new();
+        for _ in 0..random.below(12) {
+            let line: String = (0..random.below(20))
+                .map(|_| alphabet[random.below(alphabet.len())])
+                .collect();
+            lines.push(line.trim_end().to_string());
+        }
+        core.interpret(lines.join("\r\n").as_bytes());
+        while lines.last().is_some_and(String::is_empty) {
+            lines.pop();
+        }
+        for _ in 0..6 {
+            let size = Size {
+                cols: 1 + random.below(12) as u16,
+                rows: 1 + random.below(6) as u16,
+            };
+            core.resize(size);
+            core.terminal.check();
+            // A grid one column wide drops wide characters.
+            if size.cols == 1 {
+                break;
+            }
+            assert_eq!(logical_lines(&core), lines, "{size:?}");
+        }
+    }
+}
+
+/// The lines of the scrollback and the primary screen, each row's line joined to the next where
+/// it wraps, without trailing blanks or the screen's blank rows at the end.
+fn logical_lines(core: &TerminalCore) -> Vec<String> {
+    let scrollback = core.scrollback();
+    let rows = (0..scrollback.len())
+        .map(|index| scrollback.get(index).unwrap())
+        .chain(core.screen().rows());
+    let mut lines = Vec::new();
+    let mut line = String::new();
+    for row in rows {
+        line.extend(row.line().iter().flat_map(|cell| cell.chars()));
+        if !row.wrapped() {
+            lines.push(line.trim_end().to_string());
+            line.clear();
+        }
+    }
+    while lines.last().is_some_and(String::is_empty) {
+        lines.pop();
+    }
+    lines
+}
+
+#[test]
+fn the_scrollback_numbers_its_rows() {
+    let mut core = core(5, 2, &numbered(5));
+    let scrollback = core.scrollback();
+    assert_eq!((scrollback.start(), scrollback.len()), (0, 3));
+    core.set_scrollback(2);
+    let scrollback = core.scrollback();
+    assert_eq!((scrollback.start(), scrollback.len()), (1, 2));
+    assert_eq!(self::scrollback(&core), ["2", "3"]);
+    // Rows dropped past the limit, or emptied, keep the numbers of the rest.
+    core.interpret(b"\r\n6");
+    assert_eq!(core.scrollback().start(), 2);
+    core.clear();
+    assert_eq!((core.scrollback().start(), core.scrollback().len()), (4, 0));
+    core.set_scrollback(1_000_000);
+    assert_eq!(core.scrollback().limit(), 100_000);
+}
+
+#[test]
+fn the_scrollback_keeps_short_rows_in_little_memory() {
+    // PERF-10: a row is kept without the blanks at the end of its line, in no more memory than
+    // its cells take. 32-byte cells: 10,000 full rows of 80 columns take 25.6 MB.
+    assert_eq!(core::mem::size_of::<crate::Cell>(), 32);
+    let mut core = TerminalCore::new(Size { cols: 80, rows: 24 }, None);
+    let line = [&[b'x'; 40][..], b"\r\n"].concat();
+    core.interpret(&line.repeat(10_100));
+    let scrollback = core.scrollback();
+    assert_eq!(scrollback.len(), 10_000);
+    for index in 0..scrollback.len() {
+        let row = scrollback.get(index).unwrap();
+        assert_eq!(row.cells().len(), 40);
+        assert_eq!(row.capacity(), 40);
+    }
 }
 
 #[test]

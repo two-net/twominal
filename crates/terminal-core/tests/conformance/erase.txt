@@ -37,13 +37,18 @@ screen
 cursor 2;2
 
 ## ED 3 erases the scrollback, not the screen
-# The scrollback comes with #26.
+# xterm's do_erase_display, with eraseSavedLines on as it is by default.
 size 4x3
-send abcd\r\nefgh\r\nijkl\e[2;2H\e[3J
+send 0123\r\nabcd\r\nefgh\r\nijkl\e[2;2H
+scrollback 1
+|0123|
+send \e[3J
 screen
 |abcd|
 |efgh|
 |ijkl|
+scrollback 0
+cursor 2;2
 
 ## DECSED is done as ED
 # Twominal has no protected characters, so selective erase erases everything.

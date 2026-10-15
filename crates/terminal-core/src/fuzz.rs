@@ -3,9 +3,10 @@
 //! output they make up.
 //!
 //! An input's first two bytes are the size, the next eight the seed that says where the
-//! output is cut and when the grid is resized, and the rest is the output. The size stands
-//! for the window, which Twominal trusts, so it is kept small enough to fuzz quickly. Only
-//! the output is hostile.
+//! output is cut, when the grid is resized and how many rows the scrollback keeps, and the
+//! rest is the output. The size and the scrollback stand for the window and the settings,
+//! which Twominal trusts, so they are kept small enough to fuzz quickly: a resize reflows
+//! every row the scrollback keeps. Only the output is hostile.
 
 use alloc::vec::Vec;
 
@@ -18,6 +19,9 @@ pub const NONCE: &str = "n1";
 /// parameters, so a larger grid only makes each input slower.
 const MAX_COLS: u16 = 160;
 const MAX_ROWS: u16 = 60;
+
+/// The scrollback's limits fuzzed: none, one row, a few, and more than a screenful.
+const LIMITS: [usize; 4] = [0, 1, 7, 64];
 
 /// xorshift64: the same numbers for the same seed, on every machine.
 pub struct Random(u64);
@@ -46,6 +50,11 @@ impl Random {
             cols: self.below(usize::from(MAX_COLS) + 1) as u16,
             rows: self.below(usize::from(MAX_ROWS) + 1) as u16,
         }
+    }
+
+    /// One of the scrollback's limits fuzzed.
+    fn limit(&mut self) -> usize {
+        LIMITS[self.below(LIMITS.len())]
     }
 
     /// How much of the `left` bytes to interpret next: one byte, a few, many, or all.
@@ -85,6 +94,14 @@ impl<'a> Input<'a> {
             output: data.get(10..).unwrap_or_default(),
         }
     }
+
+    /// A terminal of the input's size, which keeps as many rows of scrollback as its seed's
+    /// top bits say.
+    fn core(&self) -> TerminalCore {
+        let mut core = TerminalCore::new(self.size, Some(NONCE));
+        core.set_scrollback(LIMITS[(self.seed >> 62) as usize]);
+        core
+    }
 }
 
 /// The input for a fuzz target that gives `output` to a terminal of `size`, made no larger than
@@ -97,11 +114,11 @@ pub fn input(size: Size, seed: u64, output: &[u8]) -> Vec<u8> {
 
 /// Hostile output never breaks the rules the Terminal Core keeps (REL-02), and never gets a
 /// reply that holds anything the program wrote (SEC-05). The output comes in pieces, with the
-/// grid resized between some of them.
+/// grid resized, the scrollback's limit changed or Clear between some of them.
 pub fn interpret(data: &[u8]) {
     let input = Input::read(data);
     let mut random = Random::new(input.seed);
-    let mut core = TerminalCore::new(input.size, Some(NONCE));
+    let mut core = input.core();
     check(&core);
     let mut rest = input.output;
     while !rest.is_empty() {
@@ -112,10 +129,13 @@ pub fn interpret(data: &[u8]) {
             }
         }
         check(&core);
-        if random.below(8) == 0 {
-            core.resize(random.size());
-            check(&core);
+        match random.below(32) {
+            0..4 => core.resize(random.size()),
+            4 => core.set_scrollback(random.limit()),
+            5 => core.clear(),
+            _ => {}
         }
+        check(&core);
         rest = after;
     }
 }
@@ -139,7 +159,7 @@ pub fn split(data: &[u8]) {
 /// A terminal that has interpreted `input`'s output, in pieces as long as `cut` says, and the
 /// events it gave.
 fn run(input: Input, mut cut: impl FnMut(usize) -> usize) -> (TerminalCore, Vec<Event>) {
-    let mut core = TerminalCore::new(input.size, Some(NONCE));
+    let mut core = input.core();
     let mut events = Vec::new();
     let mut rest = input.output;
     while !rest.is_empty() {
