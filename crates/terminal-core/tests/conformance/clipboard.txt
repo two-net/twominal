@@ -1,0 +1,53 @@
+# The clipboard (TERM-13, SEC-04). OSC 52 ; Pc ; Pd writes base64 text to the clipboard or the
+# primary selection, or with ? asks what one holds. Whether a program may is the Clipboard
+# writes and reads settings', which the Tab follows (DESIGN.md §3). ctlseqs: OSC 52.
+
+## OSC 52 writes text in base64 to the clipboard
+size 10x1
+send \e]52;c;aGk=\a\e]52;c;aGVsbG8gd29ybGQ\e\\
+clipboard write c hi
+clipboard write c hello\x20world
+
+## p names the primary selection, and s or no name the clipboard
+# xterm's s is the selection its settings choose, and no name is s 0.
+size 10x1
+send \e]52;p;aGk=\a\e]52;s;aGk=\a\e]52;;aGk=\a\e]52;pc;aGk=\a\e]52;s0;aGk=\a
+clipboard write p hi
+clipboard write c hi
+clipboard write c hi
+clipboard write cp hi
+clipboard write c hi
+
+## Names of anything else are passed over, and with none left nothing is written
+# q is the secondary selection, and 0 to 7 the cut buffers.
+size 10x1
+send \e]52;q01;aGk=\a\e]52;q0p;aGk=\a
+clipboard write p hi
+
+## Data that is not base64 clears, as in xterm
+size 10x1
+send \e]52;c;\a\e]52;c;a!b\a\e]52;c;a;b\a\e]52;c;aGk=;\a\e]52;c;a\a\e]52;c;aGk==\a
+clipboard write c
+clipboard write c
+clipboard write c
+clipboard write c
+clipboard write c
+clipboard write c
+
+## Text that is not UTF-8 is read as well as it can be
+size 10x1
+send \e]52;c;/w==\a
+clipboard write c �
+
+## ? asks what the first place named holds
+size 10x1
+send \e]52;c;?\a\e]52;pc;?\e\\\e]52;;?\a
+clipboard read c
+clipboard read p
+clipboard read c
+
+## An OSC 52 without data does nothing
+size 10x1
+send \e]52;c\a\e]52\a
+screen
+|          |

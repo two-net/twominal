@@ -10,6 +10,11 @@
 //! A tab knows nothing of the stores and managers above it. Settings and theme arrive as
 //! messages, and the shared command history through a trait the Command Line defines.
 //!
+//! What the Terminal Core hears besides the screen is the Tab's to act on: replies go back to
+//! the Session, questions about colors are answered with the Renderer's, and titles, the working
+//! directory, the bell and the clipboard go up, as DESIGN.md §3 *What a program tells the tab*
+//! says (TERM-12, TERM-13).
+//!
 //! Filled in by #16 (Terminal Core), #20 (Input Handler), #22 (Renderer) and #31 (tabs).
 
 pub mod command_line;

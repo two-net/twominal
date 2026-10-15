@@ -24,7 +24,13 @@
 //! limit 5                                                 keeps 5 rows of scrollback
 //! clear                                                   Clear (TERM-22)
 //! cursor 2;2                                              counted from 1, as CUP counts
-//! reply \e[?62;22c                                        the next reply not yet checked
+//! reply \e[?62;22c                                        the next event not yet checked,
+//! title vim - a.txt                                       which must be this: a reply, a
+//! title                                                   title, or none, the directory
+//! directory //host/tmp                                    OSC 7 gave, the bell, a write to
+//! bell                                                    the clipboard (`c`), the primary
+//! clipboard write cp text                                 selection (`p`) or both, or a
+//! clipboard read c                                        read of one
 //! mode bracketed_paste on                                 a field of `Modes`: `on` or
 //! mode keyboard 5                                         `off`, the mouse's tracking or
 //! mode cursor_style steady bar                            format, the keyboard flags'
@@ -35,6 +41,11 @@
 //! styles                                                  every row again, a letter for the
 //! |rr..|                                                  style of each cell
 //! |....|
+//! |....|
+//! link a https://example.com id1                          `a` stands for this link below:
+//! links                                                   its URI, and its id if it has one
+//! |aa.b|                                                  every row again, a letter for the
+//! |....|                                                  link of each cell
 //! |....|
 //! ```
 //!
@@ -49,9 +60,18 @@
 //! `inverse`, `hidden`, and `foreground`, `background` or `underline-color` and a color, which is
 //! a number of the palette from 0 to 255 or `#rrggbb`.
 //!
-//! `send` and `reply` take `\e`, `\a`, `\b`, `\t`, `\n`, `\r`, `\\` and `\xHH`; the rest is
-//! UTF-8 as written. No line may end in a space, so a trailing space is written `\x20`.
-//! Every reply must be checked: one left over at the end of a case fails it (SEC-05).
+//! A row of links has a letter for each cell. `.` is no link, and `a` to `z` the links the case
+//! named before with `link`. Cells with the same letter are one link, and cells with letters of
+//! their own are links of their own, even when the URIs are the same.
+//!
+//! `send`, `reply`, `title`, `directory`, `clipboard`'s text, and `link`'s URI and id take
+//! `\e`, `\a`, `\b`, `\t`, `\n`, `\r`, `\\` and `\xHH`; the rest is UTF-8 as written. No line
+//! may end in a space, so a trailing space is written `\x20`. Every event must be checked: one
+//! left over at the end of a case fails it (SEC-05).
+//!
+//! The Tab answers a question about a color with the theme's, unless the program set one. Here
+//! the theme is made up: the foreground is `#c0c0c0`, the background `#101010`, the cursor
+//! `#f0f000`, and color n of the palette n, n and n. The answer is checked as a `reply`.
 //!
 //! Each case runs twice: as written, and with every `send` given a byte at a time (ARC-03).
 
@@ -60,8 +80,8 @@ use std::fs;
 use std::path::Path;
 
 use terminal_core::{
-    Color, CursorShape, Event, Modes, MouseFormat, MouseTracking, Size, Style, TerminalCore,
-    Underline,
+    Clipboard, Color, CursorShape, Event, LinkId, Modes, MouseFormat, MouseTracking, Selection,
+    Size, Style, TerminalCore, ThemeColor, Underline,
 };
 
 #[test]
@@ -115,7 +135,16 @@ struct Case {
     size: Size,
     /// The styles its letters stand for, as `style` named them.
     letters: Vec<(char, Style)>,
+    /// The links its letters stand for, as `link` named them.
+    links: Vec<(char, Target)>,
     steps: Vec<Step>,
+}
+
+/// Where a link leads: its URI, and its id if it has one.
+#[derive(Clone, PartialEq, Debug)]
+struct Target {
+    uri: String,
+    id: Option<String>,
 }
 
 struct Step {
@@ -131,9 +160,108 @@ enum Kind {
     Limit(usize),
     Clear,
     Styles(Vec<Vec<Style>>),
+    /// The rows of links, as the case drew them.
+    Links(Vec<String>),
     Cursor(u16, u16),
-    Reply(Vec<u8>),
+    Said(Said),
     Mode(String, String),
+}
+
+/// What the core said besides the screen, as a case writes it: an event, or for a question
+/// about a color, the answer.
+#[derive(Clone, PartialEq, Debug)]
+enum Said {
+    Reply(Vec<u8>),
+    Title(Option<String>),
+    Directory {
+        host: Vec<u8>,
+        path: Vec<u8>,
+    },
+    Bell,
+    Write {
+        clipboard: bool,
+        primary: bool,
+        text: Vec<u8>,
+    },
+    Read(Selection),
+    /// A report of the shell integration, which no case can have: it runs without a nonce.
+    Report(String),
+}
+
+impl std::fmt::Display for Said {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        match self {
+            Self::Reply(bytes) => write!(f, "reply {}", escape(bytes)),
+            Self::Title(None) => write!(f, "title"),
+            Self::Title(Some(title)) => write!(f, "title {}", escape(title.as_bytes())),
+            Self::Directory { host, path } => {
+                write!(f, "directory //{}{}", escape(host), escape(path))
+            }
+            Self::Bell => write!(f, "bell"),
+            Self::Write {
+                clipboard,
+                primary,
+                text,
+            } => {
+                let targets = match (clipboard, primary) {
+                    (true, true) => "cp",
+                    (true, false) => "c",
+                    (false, _) => "p",
+                };
+                write!(f, "clipboard write {targets}")?;
+                if !text.is_empty() {
+                    write!(f, " {}", escape(text))?;
+                }
+                Ok(())
+            }
+            Self::Read(from) => write!(f, "clipboard read {}", selection_name(*from)),
+            Self::Report(report) => write!(f, "report {report}"),
+        }
+    }
+}
+
+fn selection_name(selection: Selection) -> &'static str {
+    match selection {
+        Selection::Clipboard => "c",
+        Selection::Primary => "p",
+    }
+}
+
+/// What a case expects of `event`, a question about a color answered with the made-up theme.
+fn said(event: Event) -> Said {
+    match event {
+        Event::Reply(reply) => Said::Reply(reply),
+        Event::Title(title) => Said::Title(title),
+        Event::Directory(directory) => Said::Directory {
+            host: directory.host.into_bytes(),
+            path: directory.path,
+        },
+        Event::Bell => Said::Bell,
+        Event::Color(query) => Said::Reply(query.reply(theme(query.color()))),
+        Event::Clipboard(clipboard) => match *clipboard {
+            Clipboard::Write {
+                clipboard,
+                primary,
+                text,
+            } => Said::Write {
+                clipboard,
+                primary,
+                text: text.into_bytes(),
+            },
+            Clipboard::Read(query) => Said::Read(query.from()),
+        },
+        Event::Report(report) => Said::Report(format!("{report:?}")),
+    }
+}
+
+/// The made-up theme's colors, which the start of this file lists.
+fn theme(color: ThemeColor) -> [u8; 3] {
+    match color {
+        ThemeColor::Foreground => [0xc0, 0xc0, 0xc0],
+        ThemeColor::Background => [0x10, 0x10, 0x10],
+        ThemeColor::Cursor => [0xf0, 0xf0, 0x00],
+        ThemeColor::Palette(index) => [index; 3],
+    }
 }
 
 /// A row of the screen as a case draws it.
@@ -186,6 +314,7 @@ fn parse(file: &str, text: &str, problems: &mut Vec<String>) -> Vec<Case> {
                 name: name.to_string(),
                 size: Size { cols: 0, rows: 0 },
                 letters: Vec::new(),
+                links: Vec::new(),
                 steps: Vec::new(),
             });
             continue;
@@ -240,10 +369,25 @@ fn parse(file: &str, text: &str, problems: &mut Vec<String>) -> Vec<Case> {
                 }
                 Err(why) => Err(why),
             },
+            "link" => match parse_link(rest, &current.links) {
+                Ok(link) => {
+                    current.links.push(link);
+                    continue;
+                }
+                Err(why) => Err(why),
+            },
             "send" if rest.is_empty() => Err("`send` with nothing to send".to_string()),
             "send" => unescape(rest).map(Kind::Send),
             "reply" if rest.is_empty() => Err("`reply` with no reply".to_string()),
-            "reply" => unescape(rest).map(Kind::Reply),
+            "reply" => unescape(rest).map(|reply| Kind::Said(Said::Reply(reply))),
+            "title" if rest.is_empty() => Ok(Kind::Said(Said::Title(None))),
+            "title" => unescape(rest).and_then(|title| match String::from_utf8(title) {
+                Ok(title) => Ok(Kind::Said(Said::Title(Some(title)))),
+                Err(_) => Err("a title that is not UTF-8".to_string()),
+            }),
+            "directory" => parse_directory(rest).map(Kind::Said),
+            "bell" if rest.is_empty() => Ok(Kind::Said(Said::Bell)),
+            "clipboard" => parse_clipboard(rest).map(Kind::Said),
             "cursor" => parse_cursor(rest)
                 .map(|(row, col)| Kind::Cursor(row, col))
                 .ok_or(format!("{rest:?} is not a position such as 3;5")),
@@ -273,6 +417,24 @@ fn parse(file: &str, text: &str, problems: &mut Vec<String>) -> Vec<Case> {
                     }
                 }
                 why.map_or(Ok(Kind::Styles(rows)), Err)
+            }
+            "links" if rest.is_empty() => {
+                let mut rows = Vec::new();
+                let mut why = None;
+                for _ in 0..now.rows {
+                    match lines.next() {
+                        Some((at, row)) => match parse_links(row, now.cols, &current.links) {
+                            Ok(()) => rows.push(row.to_string()),
+                            Err(error) => {
+                                why.get_or_insert(format!("row on line {at}: {error}"));
+                            }
+                        },
+                        None => {
+                            why.get_or_insert("the file ends inside the links".to_string());
+                        }
+                    }
+                }
+                why.map_or(Ok(Kind::Links(rows)), Err)
             }
             _ => Err(format!("{keyword:?} is not something a case can say")),
         };
@@ -425,6 +587,95 @@ fn parse_color(text: Option<&str>) -> Result<Color, String> {
     ))
 }
 
+/// The directory `//host/path` says.
+fn parse_directory(text: &str) -> Result<Said, String> {
+    let url = unescape(text)?;
+    let rest = url
+        .strip_prefix(b"//")
+        .ok_or(format!("{text:?} is not //host/path"))?;
+    let slash = rest
+        .iter()
+        .position(|&byte| byte == b'/')
+        .ok_or(format!("{text:?} has no path"))?;
+    Ok(Said::Directory {
+        host: rest[..slash].to_vec(),
+        path: rest[slash..].to_vec(),
+    })
+}
+
+/// `write`, the targets and the text, or `read` and the target.
+fn parse_clipboard(text: &str) -> Result<Said, String> {
+    let words: Vec<&str> = text.split(' ').collect();
+    match words[..] {
+        ["read", target @ ("c" | "p")] => Ok(Said::Read(if target == "c" {
+            Selection::Clipboard
+        } else {
+            Selection::Primary
+        })),
+        ["write", targets @ ("c" | "p" | "cp"), ref text @ ..] if text.len() < 2 => {
+            Ok(Said::Write {
+                clipboard: targets.contains('c'),
+                primary: targets.contains('p'),
+                text: text
+                    .first()
+                    .map(|text| unescape(text))
+                    .transpose()?
+                    .unwrap_or_default(),
+            })
+        }
+        _ => Err(format!(
+            "{text:?} is not `write`, c, p or cp and a text, or `read` and c or p"
+        )),
+    }
+}
+
+/// The letter `link` names and the link it stands for, from `a https://example.com id`. A
+/// letter is named once.
+fn parse_link(text: &str, links: &[(char, Target)]) -> Result<(char, Target), String> {
+    let words: Vec<&str> = text.split(' ').collect();
+    let (letter, uri, id) = match words[..] {
+        [letter, uri] => (letter, uri, None),
+        [letter, uri, id] => (letter, uri, Some(id)),
+        _ => return Err(format!("{text:?} is not a letter, a URI and maybe an id")),
+    };
+    let mut chars = letter.chars();
+    let letter = match (chars.next(), chars.next()) {
+        (Some(letter @ 'a'..='z'), None) => letter,
+        _ => return Err(format!("{letter:?} is not a letter from a to z")),
+    };
+    if links.iter().any(|(named, _)| *named == letter) {
+        return Err(format!("a second link named {letter}"));
+    }
+    let text = |text: &str| -> Result<String, String> {
+        String::from_utf8(unescape(text)?).map_err(|_| format!("{text:?} is not UTF-8"))
+    };
+    Ok((
+        letter,
+        Target {
+            uri: text(uri)?,
+            id: id.map(text).transpose()?,
+        },
+    ))
+}
+
+/// Checks a row of links drawn as `|`, a letter for each of the `cols` cells, and `|`.
+fn parse_links(text: &str, cols: u16, links: &[(char, Target)]) -> Result<(), String> {
+    let inside = text
+        .strip_prefix('|')
+        .and_then(|inside| inside.strip_suffix('|'))
+        .ok_or(format!("{text:?} is not a row of links between two |"))?;
+    for letter in inside.chars() {
+        if letter != '.' && !links.iter().any(|(named, _)| *named == letter) {
+            return Err(format!("{letter:?} is no link the case names"));
+        }
+    }
+    let cells = inside.chars().count();
+    if cells != usize::from(cols) {
+        return Err(format!("{cells} cells on a screen {cols} wide"));
+    }
+    Ok(())
+}
+
 /// A row of styles drawn as `|`, a letter for each of the `cols` cells, and `|`.
 fn parse_styles(text: &str, cols: u16, letters: &[(char, Style)]) -> Result<Vec<Style>, String> {
     let inside = text
@@ -574,7 +825,7 @@ fn report(file: &str, case: &Case, how: &str, problems: Vec<(usize, String)>) ->
 /// The lines whose expectations `case` does not meet, and why.
 fn run(case: &Case, bytewise: bool) -> Vec<(usize, String)> {
     let mut core = TerminalCore::new(case.size, None);
-    let mut replies = VecDeque::new();
+    let mut events = VecDeque::new();
     let mut problems = Vec::new();
     let mut last = case.line;
 
@@ -589,12 +840,7 @@ fn run(case: &Case, bytewise: bool) -> Vec<(usize, String)> {
                     vec![bytes]
                 };
                 for piece in pieces {
-                    for event in core.interpret(piece) {
-                        match event {
-                            Event::Reply(reply) => replies.push_back(reply),
-                            other => problem(format!("an event that is not a reply: {other:?}")),
-                        }
-                    }
+                    events.extend(core.interpret(piece).into_iter().map(said));
                 }
             }
             Kind::Screen(expected) => {
@@ -640,14 +886,19 @@ fn run(case: &Case, bytewise: bool) -> Vec<(usize, String)> {
                     ));
                 }
             }
-            Kind::Reply(expected) => match replies.pop_front() {
+            Kind::Links(expected) => {
+                let actual = draw_links(&core, &case.links);
+                if actual != expected.join("\n") {
+                    problem(format!(
+                        "the links differ\nexpected\n{}\ngot\n{actual}",
+                        expected.join("\n")
+                    ));
+                }
+            }
+            Kind::Said(expected) => match events.pop_front() {
                 Some(actual) if &actual == expected => {}
-                Some(actual) => problem(format!(
-                    "expected reply {}, got reply {}",
-                    escape(expected),
-                    escape(&actual)
-                )),
-                None => problem(format!("expected reply {}, got none", escape(expected))),
+                Some(actual) => problem(format!("expected {expected}, got {actual}")),
+                None => problem(format!("expected {expected}, got nothing")),
             },
             Kind::Mode(name, expected) => {
                 let actual = mode(core.modes(), name);
@@ -659,11 +910,11 @@ fn run(case: &Case, bytewise: bool) -> Vec<(usize, String)> {
             }
         }
     }
-    if !replies.is_empty() {
-        let unchecked: Vec<String> = replies.iter().map(|reply| escape(reply)).collect();
+    if !events.is_empty() {
+        let unchecked: Vec<String> = events.iter().map(Said::to_string).collect();
         problems.push((
             last,
-            format!("replies no line checks: {}", unchecked.join(" ")),
+            format!("events no line checks: {}", unchecked.join(", ")),
         ));
     }
     problems
@@ -702,7 +953,7 @@ fn styles(core: &TerminalCore) -> Vec<Vec<Style>> {
     core.screen()
         .rows()
         .iter()
-        .map(|row| row.cells().iter().map(|cell| *cell.style()).collect())
+        .map(|row| row.cells().iter().map(|cell| cell.style()).collect())
         .collect()
 }
 
@@ -732,6 +983,60 @@ fn draw_styles(rows: &[Vec<Style>], letters: &[(char, Style)]) -> String {
     }
     for (at, style) in others.iter().enumerate() {
         lines.push(format!("{} is {}", capital(at), describe(style)));
+    }
+    lines.join("\n")
+}
+
+/// The screen's links as a case draws them. Each link takes the first of the case's `letters`
+/// that stands for its URI and id and no other link before it, in the order the cells are read.
+/// A link no letter is left for gets a capital, and is said in words after the rows.
+fn draw_links(core: &TerminalCore, letters: &[(char, Target)]) -> String {
+    let mut given: Vec<(LinkId, char)> = Vec::new();
+    let mut others: Vec<Target> = Vec::new();
+    let mut lines = Vec::new();
+    for row in core.screen().rows() {
+        let mut line = String::from("|");
+        for cell in row.cells() {
+            let Some(link) = cell.link() else {
+                line.push('.');
+                continue;
+            };
+            if let Some((_, letter)) = given.iter().find(|(given, _)| *given == link) {
+                line.push(*letter);
+                continue;
+            }
+            let target = core.link(link).map_or(
+                Target {
+                    uri: "a link the core does not keep".to_string(),
+                    id: None,
+                },
+                |kept| Target {
+                    uri: kept.uri().to_string(),
+                    id: kept.id().map(str::to_string),
+                },
+            );
+            let free = letters.iter().find(|(letter, named)| {
+                *named == target && !given.iter().any(|(_, taken)| taken == letter)
+            });
+            let letter = match free {
+                Some((letter, _)) => *letter,
+                None => {
+                    others.push(target);
+                    capital(others.len() - 1)
+                }
+            };
+            given.push((link, letter));
+            line.push(letter);
+        }
+        line.push('|');
+        lines.push(line);
+    }
+    for (at, target) in others.iter().enumerate() {
+        let id = target
+            .id
+            .as_ref()
+            .map_or(String::new(), |id| format!(" {id}"));
+        lines.push(format!("{} is {}{id}", capital(at), target.uri));
     }
     lines.join("\n")
 }
@@ -932,6 +1237,28 @@ fn what_cannot_be_read_is_a_problem() {
         ),
         ("## a\nsize 2x2\nstyles\n|..|\n", "ends inside the styles"),
         ("## a\nsize 2x1\nstyles\n..\n", "is not a row of styles"),
+        ("## a\nsize 2x1\ndirectory /tmp\n", "is not //host/path"),
+        ("## a\nsize 2x1\ndirectory //host\n", "has no path"),
+        (
+            "## a\nsize 2x1\nbell now\n",
+            "is not something a case can say",
+        ),
+        ("## a\nsize 2x1\ntitle \\xff\n", "not UTF-8"),
+        ("## a\nsize 2x1\nclipboard write q hi\n", "is not `write`"),
+        ("## a\nsize 2x1\nclipboard read cp\n", "is not `write`"),
+        ("## a\nsize 2x1\nclipboard write c a b\n", "is not `write`"),
+        ("## a\nsize 2x1\nlink a\n", "a URI and maybe an id"),
+        ("## a\nsize 2x1\nlink A u\n", "is not a letter"),
+        (
+            "## a\nsize 2x1\nlink a u\nlink a v\n",
+            "a second link named a",
+        ),
+        ("## a\nsize 2x1\nlinks\n|.a|\n", "is no link the case names"),
+        (
+            "## a\nsize 2x1\nlinks\n|...|\n",
+            "3 cells on a screen 2 wide",
+        ),
+        ("## a\nsize 2x2\nlinks\n|..|\n", "ends inside the links"),
     ] {
         let mut problems = Vec::new();
         let cases = parse("f.txt", text, &mut problems);
@@ -971,6 +1298,32 @@ fn a_case_fails_where_it_is_not_met() {
     let cases = parse("f.txt", "## b\nsize 3x1\nsend \\e[5n\n", &mut Vec::new());
     assert_eq!(
         check("f.txt", &cases[0]),
-        ["f.txt:3: b: replies no line checks: \\e[0n"]
+        ["f.txt:3: b: events no line checks: reply \\e[0n"]
+    );
+
+    // Events of another kind, or none, where the case expects one.
+    let text = "## d\nsize 3x1\nsend \\e]2;x\\a\\a\nbell\ntitle y\n";
+    let cases = parse("f.txt", text, &mut Vec::new());
+    assert_eq!(
+        check("f.txt", &cases[0]),
+        [
+            "f.txt:4: d: expected bell, got title x",
+            "f.txt:5: d: expected title y, got bell",
+        ]
+    );
+    let text = "## e\nsize 3x1\nsend x\nclipboard read c\n";
+    let cases = parse("f.txt", text, &mut Vec::new());
+    assert_eq!(
+        check("f.txt", &cases[0]),
+        ["f.txt:4: e: expected clipboard read c, got nothing"]
+    );
+
+    // Links: one letter for two links, and a link no letter stands for.
+    let text =
+        "## f\nsize 3x1\nlink a u\nsend \\e]8;;u\\aa\\e]8;;u\\ab\\e]8;;v\\ac\nlinks\n|aaa|\n";
+    let cases = parse("f.txt", text, &mut Vec::new());
+    assert_eq!(
+        check("f.txt", &cases[0]),
+        ["f.txt:5: f: the links differ\nexpected\n|aaa|\ngot\n|aAB|\nA is u\nB is v"]
     );
 }

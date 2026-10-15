@@ -2,9 +2,11 @@
 //! and 24-bit colors, and what inverse, dim and hidden do to them.
 //!
 //! The Terminal Core keeps a color as the program named it. Here it becomes what the window
-//! draws, so a new palette recolors what is already on the screen (THM-02, THM-03).
+//! draws, so a new palette recolors what is already on the screen (THM-02, THM-03). A program
+//! may set any of the 256 colors, the foreground, the background and the cursor over the
+//! palette's (OSC 4, 10 to 12; TERM-12), and those are drawn in their place.
 
-use terminal_core::{Color, Style, Underline};
+use terminal_core::{Color, Style, ThemeColor, Underline};
 
 /// A color as the window draws it.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
@@ -54,20 +56,76 @@ pub struct Palette {
 const LEVELS: [u8; 6] = [0, 95, 135, 175, 215, 255];
 
 impl Palette {
-    /// What `color` looks like, with `default` for the default color.
-    pub(crate) fn rgb(&self, color: Color, default: Rgb) -> Rgb {
-        match color {
-            Color::Default => default,
-            Color::Palette(index @ 0..=15) => self.ansi[usize::from(index)],
-            Color::Palette(index @ 16..=231) => {
+    /// Color `index` of the 256.
+    fn indexed(&self, index: u8) -> Rgb {
+        match index {
+            0..=15 => self.ansi[usize::from(index)],
+            16..=231 => {
                 let cube = usize::from(index - 16);
                 Rgb::new(LEVELS[cube / 36], LEVELS[cube / 6 % 6], LEVELS[cube % 6])
             }
             // The 24 grays, from 8 to 238.
-            Color::Palette(index) => {
+            _ => {
                 let gray = 8 + 10 * (index - 232);
                 Rgb::new(gray, gray, gray)
             }
+        }
+    }
+
+    /// The theme's `color`, as a program that asks for it is told (TERM-12).
+    pub(crate) fn theme(&self, color: ThemeColor) -> Rgb {
+        match color {
+            ThemeColor::Palette(index) => self.indexed(index),
+            ThemeColor::Foreground => self.foreground,
+            ThemeColor::Background => self.background,
+            ThemeColor::Cursor => self.cursor,
+        }
+    }
+
+    /// The colors the palette draws with where no program set any.
+    #[cfg(test)]
+    pub(crate) fn colors(&self) -> Colors {
+        Colors::new(self, &terminal_core::Colors::default())
+    }
+}
+
+/// The colors a frame is drawn with: the palette's, with those a program set in their place.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Colors {
+    /// The text's color where a program set none.
+    pub(crate) foreground: Rgb,
+    /// The background's color where a program set none, and around the grid.
+    pub(crate) background: Rgb,
+    pub(crate) cursor: Rgb,
+    /// The theme's: no program sets it.
+    pub(crate) cursor_text: Rgb,
+    /// The 256 colors SGR names by number.
+    indexed: [Rgb; 256],
+}
+
+impl Colors {
+    /// `palette`, with what a program `set` over it.
+    pub(crate) fn new(palette: &Palette, set: &terminal_core::Colors) -> Self {
+        let color = |color| {
+            set.get(color).map_or_else(
+                || palette.theme(color),
+                |[red, green, blue]| Rgb::new(red, green, blue),
+            )
+        };
+        Self {
+            foreground: color(ThemeColor::Foreground),
+            background: color(ThemeColor::Background),
+            cursor: color(ThemeColor::Cursor),
+            cursor_text: palette.cursor_text,
+            indexed: std::array::from_fn(|index| color(ThemeColor::Palette(index as u8))),
+        }
+    }
+
+    /// What `color` looks like, with `default` for the default color.
+    pub(crate) fn rgb(&self, color: Color, default: Rgb) -> Rgb {
+        match color {
+            Color::Default => default,
+            Color::Palette(index) => self.indexed[usize::from(index)],
             Color::Rgb(red, green, blue) => Rgb::new(red, green, blue),
         }
     }

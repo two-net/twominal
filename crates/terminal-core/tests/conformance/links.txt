@@ -1,0 +1,123 @@
+# Hyperlinks programs make (TERM-13). OSC 8 ; params ; URI starts a link and OSC 8 ; ; ends it,
+# and the cells printed between are part of it. Showing and opening it is the user's to do
+# (#30). xterm has no links, so this follows VTE, with which the specification of OSC 8 came.
+
+## OSC 8 makes the cells printed after it part of a link
+size 10x2
+link a https://example.com
+send x\e]8;;https://example.com\alink\e]8;;\e\\y
+links
+|.aaaa.....|
+|..........|
+screen
+|xlinky    |
+|          |
+
+## A link with an id is one link wherever it is drawn again
+# As a full-screen program draws a link on two lines.
+size 10x2
+link a file:///tmp id1
+send \e]8;id=id1;file:///tmp\aab\e]8;;\a\r\n\e]8;id=id1;file:///tmp\e\\cd\e]8;;\e\\
+links
+|aa........|
+|aa........|
+
+## Without an id, each OSC 8 makes a link of its own
+size 10x1
+link a https://example.com
+link b https://example.com
+send \e]8;;https://example.com\aab\e]8;;https://example.com\acd\e]8;;\a
+links
+|aabb......|
+
+## The same id with another URI is another link
+size 10x1
+link a u id1
+link b v id1
+send \e]8;id=id1;u\aa\e]8;id=id1;v\ab\e]8;id=id1;u\ac\e]8;;\a
+links
+|aba.......|
+
+## The id is one of the parameters, which colons separate
+size 10x1
+link a u id1
+link b u
+send \e]8;x=1:id=id1:y=2;u\aab\e]8;id=;u\acd\e]8;;\a
+links
+|aabb......|
+
+## A URI keeps its semicolons
+size 10x1
+link a https://h/a;b;c
+send \e]8;;https://h/a;b;c\ax\e]8;;\a
+links
+|a.........|
+
+## Both halves of a wide character are part of its link
+size 10x1
+link a u
+send \e]8;;u\a日\e]8;;\ax
+links
+|aa........|
+
+## REP repeats the character in its link
+size 10x1
+link a u
+send \e]8;;u\ax\e[3b\e]8;;\ay\e[2b
+links
+|aaaa......|
+screen
+|xxxxyyy   |
+
+## Erasing leaves no link, and printing over a cell gives it the link in use
+size 10x1
+link a u
+link b v
+send \e]8;;u\aabcdef\e]8;;v\a\e[3G\e[2Xxy\e]8;;\a\e[K
+links
+|aabb......|
+screen
+|abxy      |
+
+## DECSC does not save the link, and DECSTR ends it
+size 10x1
+link a u
+send \e]8;;u\ax\e7\e]8;;\a\e8y\e]8;;u\a\e[!pz
+links
+|a.........|
+screen
+|xyz       |
+
+## RIS ends the link
+size 10x1
+send \e]8;;u\a\ecx
+links
+|..........|
+screen
+|x         |
+
+## A URI with a byte outside space to ~ makes no link, and ends the one in use
+size 10x1
+link a u
+send \e]8;;u\ax\e]8;;a\x7fb\ay\e]8;;u\a\e]8;;é\az
+links
+|a.........|
+
+## A link cut short is not made
+size 10x1
+link a u
+send \e]8;;u\ax\e]8;;v\e[1my\e]8;;\a
+links
+|aa........|
+
+## A link moves with its text when the grid is made narrower
+size 6x2
+link a u
+send ab\e]8;;u\acdef\e]8;;\a
+resize 3x2
+links
+|..a|
+|aaa|
+screen
+|abc|>
+|def|

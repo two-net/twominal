@@ -1,8 +1,10 @@
 //! Real programs, shown by the Terminal Core, typed into through the Input Handler and drawn by
-//! the Renderer (TERM-01 to TERM-06, TERM-08 to TERM-11, TERM-14, TERM-16, FONT-10, REL-03).
+//! the Renderer (TERM-01 to TERM-06, TERM-08 to TERM-14, TERM-16, FONT-10, REL-03).
 //!
 //! Each test starts a program on a pseudo-terminal through the Session, as a tab does, and
-//! passes what it writes to a Terminal Core, which answers its queries. Keys, pastes, focus
+//! passes what it writes to a Terminal Core, which answers its queries. Its questions about
+//! colors are answered with a Renderer's palette, in their place among the replies, and what
+//! else it tells the core, as titles, the bell and the clipboard, is kept. Keys, pastes, focus
 //! changes, the mouse and the wheel go through the Input Handler, by the modes the program set,
 //! as DOM events, on cells of 10 by 20 pixels. The Renderer turns the screen into frames, which
 //! are read back as the webview reads them. The Tab will do that itself with #31; here the test
@@ -30,8 +32,8 @@ use tab::input::{
 use tab::render::{Measure, Palette, Renderer, Rgb};
 use tab::session::{Output, Session, Shell, Start};
 use terminal_core::{
-    Color, CursorShape, Event, Keyboard, MouseFormat, MouseTracking, Size, Style, TerminalCore,
-    Underline,
+    Clipboard, Color, CursorShape, Event, Keyboard, MouseFormat, MouseTracking, Size, Style,
+    TerminalCore, ThemeColor, Underline,
 };
 
 /// How long a test waits for a program before it fails.
@@ -146,6 +148,10 @@ struct Terminal {
     output: Receiver<Output>,
     core: TerminalCore,
     input: InputHandler,
+    /// Answers the program's questions about colors with its palette, as the Tab will (#31).
+    renderer: Renderer,
+    /// What the core said but replies and the answers to questions about colors, oldest first.
+    said: Vec<Event>,
 }
 
 impl Terminal {
@@ -209,6 +215,8 @@ impl Terminal {
             output,
             core: TerminalCore::new(size, None),
             input,
+            renderer: Renderer::new(palette()),
+            said: Vec::new(),
         }
     }
 
@@ -239,10 +247,26 @@ impl Terminal {
 
     fn show(&mut self, bytes: &[u8]) {
         for event in self.core.interpret(bytes) {
-            if let Event::Reply(reply) = event {
-                self.session.write(reply);
+            match event {
+                Event::Reply(reply) => self.session.write(reply),
+                Event::Color(query) => {
+                    let Rgb { red, green, blue } = self.renderer.color(query.color());
+                    self.session.write(query.reply([red, green, blue]));
+                }
+                other => self.said.push(other),
             }
         }
+    }
+
+    /// The titles the program set, oldest first. None gives the tab its own back.
+    fn titles(&self) -> Vec<Option<&str>> {
+        self.said
+            .iter()
+            .filter_map(|event| match event {
+                Event::Title(title) => Some(title.as_deref()),
+                _ => None,
+            })
+            .collect()
     }
 
     fn keys(&self, keys: &str) {
@@ -556,8 +580,8 @@ fn vim_draws_in_the_colors_and_attributes_it_asks_for() {
         vim.alternate()
             && vim.rows()[..3] == ["alpha", "beta", "~"]
             && painted
-            && *rows[0].cells()[0].style() == normal
-            && *rows[2].cells()[0].style() == tilde
+            && rows[0].cells()[0].style() == normal
+            && rows[2].cells()[0].style() == tilde
     });
 
     vim.keys(":q!\r");
@@ -1045,6 +1069,140 @@ fn less_with_its_mouse_option_scrolls_by_reported_wheel_events() {
 
     less.keys("q");
     less.until_exit();
+}
+
+// ---------------------------------------------------------------------------------------
+// What programs tell Twominal (TERM-12, TERM-13)
+// ---------------------------------------------------------------------------------------
+
+#[test]
+fn fish_learns_the_background_from_the_palette_and_says_where_it_is() {
+    let Some(fish) = installed("fish") else {
+        return;
+    };
+    // fish asks for the background before each prompt, DA1 after it, and calls the theme dark
+    // or light by its answer. With a configuration of its own, which a home folder of the
+    // test's own leaves empty, it says where it is with OSC 7, and sets the title.
+    for (background, theme) in [
+        (Rgb::new(10, 10, 10), "dark"),
+        (Rgb::new(250, 250, 250), "light"),
+    ] {
+        let home = Folder::new();
+        let mut fish = Terminal::run(
+            &home.0,
+            &fish,
+            &[
+                &fish,
+                "--private",
+                "--init-command",
+                "set -g fish_greeting; function fish_prompt; echo -n 'prompt> '; end",
+            ],
+            &[],
+        );
+        fish.renderer.set_palette(Palette {
+            background,
+            ..palette()
+        });
+        fish.until("the prompt", |fish| fish.shows("prompt>"));
+        fish.keys("cd /tmp; echo theme=$fish_terminal_color_theme\r");
+        let shown = format!("theme={theme}");
+        fish.until("the theme and the next prompt", |fish| {
+            fish.shows(&shown)
+                && fish
+                    .rows()
+                    .iter()
+                    .filter(|row| row.starts_with("prompt>"))
+                    .count()
+                    == 2
+        });
+        assert!(
+            !fish.shows("terminal-compatibility") && !fish.shows("waiting for"),
+            "{}",
+            fish.dump()
+        );
+        let directory = fish.said.iter().rev().find_map(|event| match event {
+            Event::Directory(directory) => Some(directory),
+            _ => None,
+        });
+        assert!(
+            directory
+                .is_some_and(|directory| directory.path == b"/tmp" && !directory.host.is_empty()),
+            "{:?}",
+            fish.said
+        );
+        assert_eq!(fish.titles().last(), Some(&Some("/tmp")), "{:?}", fish.said);
+    }
+}
+
+#[test]
+fn vim_sets_the_title_and_gives_the_one_before_back() {
+    let Some(vim) = installed("vim") else { return };
+    let home = Folder::new();
+    fs::write(home.0.join("notes.txt"), "alpha\n").unwrap();
+    // vim saves the title with CSI 22 t before it sets its own, and gives it back with CSI 23 t
+    // after it said goodbye in it.
+    let script = format!(
+        "printf '\\033]2;shell\\007'; '{vim}' -u NONE -N -n -i NONE -c 'set title' notes.txt; printf 'after\\n'"
+    );
+    let mut vim = Terminal::run(&home.0, &vim, &["/bin/sh", "-c", &script], &[]);
+    vim.until("vim's title", |vim| {
+        vim.titles().iter().any(|title| {
+            title.is_some_and(|title| title.contains("notes.txt") && title.ends_with("VIM"))
+        })
+    });
+    vim.keys(":q!\r");
+    vim.until_exit();
+    let titles = vim.titles();
+    assert_eq!(titles.first(), Some(&Some("shell")), "{titles:?}");
+    assert_eq!(titles.last(), Some(&Some("shell")), "{titles:?}");
+    assert!(titles.len() >= 3, "{titles:?}");
+}
+
+#[test]
+fn sh_rings_the_bell_writes_the_clipboard_links_and_sets_colors() {
+    let home = Folder::new();
+    let script = "printf 'a\\007'; \
+                  printf '\\033]52;c;%s\\007' \"$(printf hi | base64)\"; \
+                  printf '\\033]8;;https://example.com/\\007link\\033]8;;\\007\\n'; \
+                  printf '\\033]11;#204060\\033\\\\\\033]4;1;rgb:ff/80/00\\007\\033[31mred\\033[m\\n'";
+    let mut sh = Terminal::run(&home.0, "/bin/sh", &["/bin/sh", "-c", script], &[]);
+    sh.until_exit();
+    assert!(sh.said.contains(&Event::Bell), "{:?}", sh.said);
+    let hi = Clipboard::Write {
+        clipboard: true,
+        primary: false,
+        text: "hi".to_string(),
+    };
+    assert!(
+        sh.said
+            .iter()
+            .any(|event| matches!(event, Event::Clipboard(clipboard) if **clipboard == hi)),
+        "{:?}",
+        sh.said
+    );
+    assert_eq!(sh.rows()[..2], ["alink", "red"], "{}", sh.dump());
+    let cells = sh.core.screen().rows()[0].cells();
+    assert_eq!(cells[0].link(), None);
+    let link = cells[1].link().expect("a link");
+    assert!(cells[1..5].iter().all(|cell| cell.link() == Some(link)));
+    assert_eq!(cells[5].link(), None);
+    assert_eq!(sh.core.link(link).unwrap().uri(), "https://example.com/");
+
+    // The Renderer draws with the colors sh set, and answers with the theme's.
+    let mut renderer = Renderer::new(palette());
+    renderer.measure(&measure()).unwrap();
+    let frame = Json::read(&renderer.frame(&sh.core, "").unwrap().json());
+    let background = frame.get("full").unwrap().get("background").unwrap();
+    assert_eq!(background.text(), "#204060");
+    assert_eq!(runs(&frame, 1)[0].3, "#ff8000");
+    assert_eq!(renderer.color(ThemeColor::Background), palette().background);
+
+    // Given back, they are the palette's again, and every row is sent.
+    sh.show(b"\x1b]111\x07\x1b]104\x07");
+    let frame = Json::read(&renderer.frame(&sh.core, "").unwrap().json());
+    let background = frame.get("full").expect("every row").get("background");
+    assert_eq!(background.unwrap().text(), hex(palette().background));
+    assert_eq!(runs(&frame, 1)[0].3, hex(palette().ansi[1]));
 }
 
 // ---------------------------------------------------------------------------------------

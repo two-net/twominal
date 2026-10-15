@@ -127,13 +127,16 @@ reply \e[1;1R
 ## Nothing that would echo the program's text is answered
 # SEC-05: a reply that held text the program chose would be typed into the shell. These are
 # the title and icon reports, the other window reports, ENQ's answerback, DECRQSS, the
-# cursor's shape's among them, XTGETTCAP, XTVERSION, and the color and clipboard queries.
+# cursor's shape's among them, XTGETTCAP and XTVERSION. Setting the title, and saving it and
+# giving it back, answer nothing. The questions about colors and the clipboard are answered
+# with numbers and base64 (colors.txt, clipboard.txt).
 size 10x2
 send \e[20t\e[21t\e]2;rm -rf ~\a\e[21t\e[18t\e[14t\e[22;0t\e[23;0t
 send \x05
 send \eP$qm\e\\\eP$q"p\e\\\eP$q q\e\\\eP+q696e646e\e\\
 send \e[>q\e[>0q
-send \e]11;?\a\e]10;?\e\\\e]4;1;?\a\e]52;c;?\a
+title rm -rf ~
+title rm -rf ~
 screen
 |          |
 |          |

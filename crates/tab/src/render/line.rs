@@ -8,7 +8,7 @@
 
 use terminal_core::{width, Row, Style};
 
-use super::color::{Ink, Look, Palette, Rgb};
+use super::color::{Colors, Ink, Look, Rgb};
 
 /// The most characters a cell holds: its own and two joined to it, as the core keeps them.
 const CHARS: usize = 3;
@@ -54,20 +54,21 @@ impl Drawn {
 /// A row as it is drawn: a cell for each column.
 pub(crate) type Line = Vec<Drawn>;
 
-/// `row` as it is drawn with `palette`, `cols` wide. A row of the scrollback may be narrower:
+/// `row` as it is drawn with `colors`, `cols` wide. A row of the scrollback may be narrower:
 /// the rest of it is blanks in the default style.
-pub(crate) fn draw(row: &Row, cols: usize, palette: &Palette) -> Line {
+pub(crate) fn draw(row: &Row, cols: usize, colors: &Colors) -> Line {
     let mut last = None;
     let mut line: Line = row
         .cells()
         .iter()
         .map(|cell| {
             // Neighbouring cells mostly share a style, so its look is kept.
+            let style = cell.style();
             let look = match last {
-                Some((style, look)) if style == *cell.style() => look,
+                Some((last, look)) if last == style => look,
                 _ => {
-                    let look = palette.look(cell.style());
-                    last = Some((*cell.style(), look));
+                    let look = colors.look(&style);
+                    last = Some((style, look));
                     look
                 }
             };
@@ -86,7 +87,7 @@ pub(crate) fn draw(row: &Row, cols: usize, palette: &Palette) -> Line {
         })
         .collect();
     if line.len() < cols {
-        line.resize(cols, Drawn::blank(palette.look(&Style::default())));
+        line.resize(cols, Drawn::blank(colors.look(&Style::default())));
     }
     line
 }
@@ -96,8 +97,8 @@ pub(crate) fn draw(row: &Row, cols: usize, palette: &Palette) -> Line {
 /// would pass the last column starts further left, and text longer than the row shows its end.
 /// Returns the column it starts in, the caret, or None when it takes no cell, as control
 /// characters and marks with nothing before them take none.
-pub(crate) fn compose(line: &mut Line, col: usize, text: &str, palette: &Palette) -> Option<usize> {
-    let look = palette.composing();
+pub(crate) fn compose(line: &mut Line, col: usize, text: &str, colors: &Colors) -> Option<usize> {
+    let look = colors.composing();
     let mut cells: Vec<Drawn> = Vec::new();
     for char in text.chars().filter(|char| !char.is_control()) {
         match width(char) {

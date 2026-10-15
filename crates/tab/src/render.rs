@@ -1,7 +1,7 @@
 //! Renderer (SRS §6.1).
 //!
 //! Draws the Terminal Core's state and the command line with the active font, ligatures and
-//! palette, and the cursor.
+//! palette, the colors programs set over it, and the cursor.
 //!
 //! Must not change terminal state. This half only reads: it lays out the grid in whole device
 //! pixels from what the webview measured, and turns what the Terminal Core holds, with the text
@@ -38,11 +38,12 @@ use std::collections::{BTreeMap, HashMap};
 use std::mem;
 use std::sync::Arc;
 
-use terminal_core::{Cursor, CursorShape, Row, Size, TerminalCore};
+use terminal_core::{Cursor, CursorShape, Row, Size, TerminalCore, ThemeColor};
 
 pub use color::{Palette, Rgb};
 pub use layout::{Layout, Measure};
 
+use color::Colors;
 use layout::Geometry;
 use line::{Cells, Line, Run, Span};
 use shapes::{CursorLook, Primitive};
@@ -50,6 +51,8 @@ use shapes::{CursorLook, Primitive};
 /// One tab's render state: what the window was last sent and what has changed since.
 pub struct Renderer {
     palette: Palette,
+    /// The colors of the last frame: the palette's, with those a program set over them.
+    colors: Option<Colors>,
     /// Whether the font's ligatures are drawn: the Font ligatures setting (FONT-03).
     ligatures: bool,
     /// The cursor settings (TERM-07, ANIM-08).
@@ -175,7 +178,8 @@ pub enum Motion {
 #[derive(Clone, Debug, PartialEq)]
 struct Full {
     geometry: Arc<Geometry>,
-    /// The palette's background, which every row is painted on.
+    /// The background where a program set none, which every row is painted on: the palette's,
+    /// or the one a program set over it.
     background: Rgb,
 }
 
@@ -193,6 +197,7 @@ impl Renderer {
     pub fn new(palette: Palette) -> Self {
         Self {
             palette,
+            colors: None,
             // Appendix B's default.
             ligatures: true,
             cursor_settings: CursorSettings::default(),
@@ -210,12 +215,16 @@ impl Renderer {
         }
     }
 
-    /// A new palette: the theme changed (THM-03). The next frame has every row.
+    /// A new palette: the theme changed (THM-03). The colors a program set stay over it. When
+    /// the colors drawn change, the next frame has every row.
     pub fn set_palette(&mut self, palette: Palette) {
-        if palette != self.palette {
-            self.palette = palette;
-            self.full = true;
-        }
+        self.palette = palette;
+    }
+
+    /// The theme's `color`, which a program that asks for it is told unless it set one itself
+    /// (TERM-12): the Tab gives it to the question's [`terminal_core::ColorQuery::reply`].
+    pub fn color(&self, color: ThemeColor) -> Rgb {
+        self.palette.theme(color)
     }
 
     /// Whether the font's ligatures are drawn: the Font ligatures setting changed (FONT-03). The
@@ -324,10 +333,15 @@ impl Renderer {
     }
 
     /// What changed since the last frame: what `core` holds, with `composing`, the text an input
-    /// method is composing, over the cursor, in the view. None when nothing did, and before the
-    /// webview has measured.
+    /// method is composing, over the cursor, in the view, in the palette's colors and those the
+    /// program set over them. None when nothing did, and before the webview has measured. When
+    /// the colors changed, every row is sent.
     pub fn frame(&mut self, core: &TerminalCore, composing: &str) -> Option<Frame> {
         let geometry = self.geometry.clone()?;
+        let colors = Colors::new(&self.palette, core.colors());
+        if self.colors.as_ref() != Some(&colors) {
+            self.full = true;
+        }
         let layout = &geometry.layout;
         let size = core.size();
         let height = layout.cell_height;
@@ -346,7 +360,7 @@ impl Renderer {
             }
         };
         let mut lines: Vec<Line> = (top..top + count as u64)
-            .map(|number| line::draw(row(number), usize::from(size.cols), &self.palette))
+            .map(|number| line::draw(row(number), usize::from(size.cols), &colors))
             .collect();
 
         // The line the cursor is on, if it is in the view.
@@ -361,9 +375,7 @@ impl Renderer {
             .filter(|_| !composing.is_empty())
             .and_then(|index| lines.get_mut(index))
         {
-            if let Some(col) =
-                line::compose(line, usize::from(cursor.col), composing, &self.palette)
-            {
+            if let Some(col) = line::compose(line, usize::from(cursor.col), composing, &colors) {
                 caret.col = col as u16;
                 composed = true;
             }
@@ -388,7 +400,7 @@ impl Renderer {
         let shown = core.modes().cursor_visible && !composed;
         let cursor = cursor_line
             .filter(|_| shown)
-            .and_then(|index| self.cursor(core, &lines, &geometry, index, moved));
+            .and_then(|index| self.cursor(core, &lines, &geometry, &colors, index, moved));
 
         let full = mem::take(&mut self.full) || self.size != Some(size);
         // A row is drawn `offset` pixels up from its cell, and the grid cuts it.
@@ -418,7 +430,7 @@ impl Renderer {
                 && whole(before, sent_offset)
                 && self.sent.get(before) == Some(line)
         };
-        let background = self.palette.background;
+        let background = colors.background;
         let rows: Vec<RowFrame> = lines
             .iter()
             .enumerate()
@@ -432,6 +444,7 @@ impl Renderer {
         self.sent = lines;
         self.sent_at = Some((top, offset, live));
         self.size = Some(size);
+        self.colors = Some(colors);
         if !full
             && rows.is_empty()
             && shift == 0
@@ -484,13 +497,15 @@ impl Renderer {
 
     /// The cursor as it is drawn over `lines`, where `core` has it, on the line `index` of the
     /// view: in the shape the program asked for or the settings give, or an outline in a window
-    /// without the focus. None when it is outside the grid laid out, as before the Tab has
-    /// resized the core to it. It does not glide when the view `moved` against the screen.
+    /// without the focus, in the color of `colors`. None when it is outside the grid laid out, as
+    /// before the Tab has resized the core to it. It does not glide when the view `moved`
+    /// against the screen.
     fn cursor(
         &self,
         core: &TerminalCore,
         lines: &[Line],
         geometry: &Geometry,
+        colors: &Colors,
         index: usize,
         moved: bool,
     ) -> Option<CursorFrame> {
@@ -517,7 +532,7 @@ impl Renderer {
         let blinks = self.focused && settings.blink && asked.is_none_or(|style| style.blinking);
         let text = if look == CursorLook::Block {
             line::under(line, col).map(|run| Run {
-                ink: self.palette.under_cursor(run.ink),
+                ink: colors.under_cursor(run.ink),
                 ..run
             })
         } else {
@@ -527,7 +542,7 @@ impl Renderer {
             row: index as u16,
             col: col as u16,
             cells: cells as u16,
-            color: self.palette.cursor,
+            color: colors.cursor,
             shape: shapes::cursor(
                 look,
                 cells as u32,

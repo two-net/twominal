@@ -4,18 +4,30 @@
 //! xterm is the model (TERM-01). There is one cursor, and it stays where it is when the screen
 //! switches. Each screen keeps a saved cursor of its own. There is one style too, which
 //! characters are printed in and whose colors every blank keeps.
+//!
+//! It also keeps what programs set through operating system commands (TERM-12, TERM-13): the
+//! title and the titles saved, the colors set over the theme's, and the link what is printed is
+//! part of, with every link the cells hold.
 
+use alloc::boxed::Box;
+use alloc::string::String;
 use alloc::vec::Vec;
 use core::mem;
 use core::ops::Range;
 
+use crate::colors::{ColorQuery, Colors};
 use crate::keyboard::{Keyboard, Stack};
+use crate::links::{Link, LinkId, Links};
+use crate::osc::{ColorChange, NewLink, Osc};
 use crate::report::Report;
 use crate::screen::{Cell, Screen};
 use crate::scrollback::{self, Point, Scrollback};
 use crate::style::Style;
 use crate::width::{discarded, width};
 use crate::{Event, Size};
+
+/// How many titles `CSI 22 t` keeps, as xterm's `MAX_SAVED_TITLES`.
+const TITLES: usize = 10;
 
 /// Where the cursor is, counted in cells from the top left of the screen.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -326,7 +338,20 @@ pub(crate) struct Terminal {
     written: Option<(usize, usize)>,
     /// The nonce that marks a report of the shell integration.
     nonce: Option<Vec<u8>>,
-    /// Replies and reports since the bytes were handed in.
+    /// The title a program set (OSC 0 and 2), or none for the tab's own.
+    title: Option<String>,
+    /// The titles `CSI 22 t` saved, the newest last.
+    titles: Vec<Option<String>>,
+    /// The colors programs set over the theme's (OSC 4, 10 to 12).
+    colors: Colors,
+    /// The link what is printed is part of (OSC 8).
+    link: Option<LinkId>,
+    /// Every link a cell may hold.
+    links: Links,
+    /// An OSC that ended with ESC, which acts only if the next byte is `\`: then the ESC was
+    /// the start of ST, and not of another sequence that cut the OSC short.
+    waiting: Option<Osc>,
+    /// Replies, reports and the rest since the bytes were handed in.
     events: Vec<Event>,
 }
 
@@ -356,6 +381,12 @@ impl Terminal {
             last: None,
             written: None,
             nonce: nonce.map(|nonce| nonce.as_bytes().to_vec()),
+            title: None,
+            titles: Vec::new(),
+            colors: Colors::default(),
+            link: None,
+            links: Links::default(),
+            waiting: None,
             events: Vec::new(),
         }
     }
@@ -420,6 +451,107 @@ impl Terminal {
 
     pub(crate) fn take_events(&mut self) -> Vec<Event> {
         mem::take(&mut self.events)
+    }
+
+    /// BEL: the program rang the bell (TERM-12).
+    pub(crate) fn bell(&mut self) {
+        self.events.push(Event::Bell);
+    }
+
+    pub(crate) fn colors(&self) -> &Colors {
+        &self.colors
+    }
+
+    pub(crate) fn link(&self, link: LinkId) -> Option<&Link> {
+        self.links.get(link)
+    }
+
+    // Operating system commands
+
+    /// Does what an OSC asks for.
+    pub(crate) fn act(&mut self, osc: Osc) {
+        match osc {
+            Osc::Title(title) => self.set_title(title),
+            Osc::Directory(directory) => self.events.push(Event::Directory(Box::new(directory))),
+            Osc::Colors(changes, end) => {
+                for change in changes {
+                    match change {
+                        ColorChange::Set(color, rgb) => self.colors.set(color, Some(rgb)),
+                        ColorChange::Reset(color) => self.colors.set(color, None),
+                        ColorChange::ResetPalette => self.colors.reset_palette(),
+                        ColorChange::Query(color) => {
+                            let set = self.colors.get(color);
+                            self.events
+                                .push(Event::Color(ColorQuery::new(color, set, end)));
+                        }
+                    }
+                }
+            }
+            Osc::Link(link) => self.open_link(link),
+            Osc::Clipboard(clipboard) => self.events.push(Event::Clipboard(Box::new(clipboard))),
+        }
+    }
+
+    /// Holds an OSC that ended with ESC until the next byte says whether that was ST.
+    pub(crate) fn wait(&mut self, osc: Osc) {
+        self.waiting = Some(osc);
+    }
+
+    /// Whether an OSC waits for the byte after its ESC.
+    pub(crate) fn waiting(&self) -> bool {
+        self.waiting.is_some()
+    }
+
+    /// Acts on the OSC waiting if its ESC was the start of ST, and else drops it.
+    pub(crate) fn settle(&mut self, terminated: bool) {
+        if let Some(osc) = self.waiting.take() {
+            if terminated {
+                self.act(osc);
+            }
+        }
+    }
+
+    fn set_title(&mut self, title: Option<String>) {
+        self.title.clone_from(&title);
+        self.events.push(Event::Title(title));
+    }
+
+    /// `CSI 22 ; which ; at t`: saves the title, for `which` 0 or 2, which name the window's
+    /// title, and `at` 0. A full stack drops its oldest, as xterm's ring does. The icon label
+    /// alone, and xterm's places on the stack, are not kept.
+    pub(crate) fn push_title(&mut self, which: usize, at: usize) {
+        if matches!(which, 0 | 2) && at == 0 {
+            if self.titles.len() == TITLES {
+                self.titles.remove(0);
+            }
+            self.titles.push(self.title.clone());
+        }
+    }
+
+    /// `CSI 23 ; which ; at t`: gives back the title saved last, as `push_title` takes them.
+    pub(crate) fn pop_title(&mut self, which: usize, at: usize) {
+        if matches!(which, 0 | 2) && at == 0 {
+            if let Some(title) = self.titles.pop() {
+                self.set_title(title);
+            }
+        }
+    }
+
+    /// Makes what is printed from now on part of `link`, or of none. A link that does not fit
+    /// in the table, once the links no cell holds are freed, is not made.
+    fn open_link(&mut self, link: Option<NewLink>) {
+        let Self {
+            primary,
+            alternate,
+            scrollback,
+            links,
+            ..
+        } = self;
+        self.link = link.and_then(|link| {
+            links.make(&link.uri, link.id.as_deref(), || {
+                cells(primary, alternate, scrollback)
+            })
+        });
     }
 
     // Printing
@@ -543,12 +675,12 @@ impl Terminal {
         }
     }
 
-    /// Writes `char`, which takes `width` cells, under the cursor in the style in use, and
-    /// moves the cursor on: past the character, or in the last column to a pending wrap. The
+    /// Writes `char`, which takes `width` cells, under the cursor in the style and the link in
+    /// use, and moves the cursor on: past the character, or in the last column to a pending wrap. The
     /// cells must fit in the row.
     fn write(&mut self, char: char, width: usize) {
         let (row, col, blank) = (self.row, self.col, self.blank());
-        let cell = Cell::new(char, width, self.style);
+        let cell = Cell::new(char, width, self.style).linked(self.link);
         self.screen_mut().write(row, col, cell, blank);
         self.written = Some((row, col));
         if col + width < self.cols {
@@ -1060,16 +1192,25 @@ impl Terminal {
 
     /// RIS: everything as it was at the start, but the size, the nonce, the scrollback's limit,
     /// which is a setting, and the replies and reports not yet handed out. The scrollback is
-    /// emptied, as xterm's RIS empties it, and its rows keep their numbers.
+    /// emptied, as xterm's RIS empties it, and its rows keep their numbers. As in xterm's
+    /// `ReallyReset`, the title and the titles saved stay, and so do the foreground, the
+    /// background and the cursor a program set, while the palette goes back to the theme's.
+    /// The link ends, and the links go with the cells that held them.
     pub(crate) fn reset(&mut self) {
         let events = mem::take(&mut self.events);
         let nonce = self.nonce.take();
         let mut scrollback = mem::replace(&mut self.scrollback, Scrollback::new(0));
         scrollback.clear();
+        let (title, titles) = (self.title.take(), mem::take(&mut self.titles));
+        let mut colors = mem::take(&mut self.colors);
+        colors.reset_palette();
         *self = Self {
             nonce,
             events,
             scrollback,
+            title,
+            titles,
+            colors,
             ..Self::new(self.size(), None)
         };
     }
@@ -1111,7 +1252,8 @@ impl Terminal {
     /// double-underlined text on. The cursor's shape goes back to the settings', as xterm's
     /// goes back to its resources. The kitty keyboard protocol's flags are forgotten on both
     /// screens, as kitty forgets them. The mouse modes stay, as in xterm, which resets them only
-    /// for RIS.
+    /// for RIS. As in xterm, the palette goes back to the theme's, and the title and the other
+    /// colors a program set stay. The link ends, as VTE ends it.
     pub(crate) fn soft_reset(&mut self) {
         self.modes.cursor_visible = true;
         self.modes.cursor_style = None;
@@ -1127,6 +1269,8 @@ impl Terminal {
         self.saved[self.modes.alternate_screen as usize] = None;
         self.keyboard = [Stack::default(); 2];
         self.keyboard_changed();
+        self.colors.reset_palette();
+        self.link = None;
     }
 
     // Resizing
@@ -1242,7 +1386,30 @@ impl Terminal {
         }
         // A zero-width character is joined, never printed on its own.
         assert!(self.last.is_none_or(|char| width(char) > 0), "{self:?}");
+        self.links.check();
+        for link in cells(&self.primary, &self.alternate, &self.scrollback)
+            .filter_map(Cell::link)
+            .chain(self.link)
+        {
+            assert!(self.links.get(link).is_some(), "{link:?} in {self:?}");
+        }
+        assert!(self.titles.len() <= TITLES, "{self:?}");
     }
+}
+
+/// Every cell of both screens and of the scrollback: those that may hold a link.
+fn cells<'a>(
+    primary: &'a Screen,
+    alternate: &'a Screen,
+    scrollback: &'a Scrollback,
+) -> impl Iterator<Item = &'a Cell> {
+    let kept = (0..scrollback.len()).filter_map(|index| scrollback.get(index));
+    primary
+        .rows()
+        .iter()
+        .chain(alternate.rows())
+        .chain(kept)
+        .flat_map(|row| row.cells())
 }
 
 /// A size in cells, never zero.

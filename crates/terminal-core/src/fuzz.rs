@@ -8,9 +8,10 @@
 //! which Twominal trusts, so they are kept small enough to fuzz quickly: a resize reflows
 //! every row the scrollback keeps. Only the output is hostile.
 
+use alloc::string::String;
 use alloc::vec::Vec;
 
-use crate::{Event, Size, TerminalCore};
+use crate::{Clipboard, Event, Size, TerminalCore};
 
 /// The nonce of the reports in fuzzed output, so that reports are read and not only skipped.
 pub const NONCE: &str = "n1";
@@ -113,8 +114,10 @@ pub fn input(size: Size, seed: u64, output: &[u8]) -> Vec<u8> {
 }
 
 /// Hostile output never breaks the rules the Terminal Core keeps (REL-02), and never gets a
-/// reply that holds anything the program wrote (SEC-05). The output comes in pieces, with the
-/// grid resized, the scrollback's limit changed or Clear between some of them.
+/// reply that holds anything the program wrote (SEC-05): neither the core's own, nor the answers
+/// to questions about colors and the clipboard, whatever the theme and the clipboard hold. The
+/// output comes in pieces, with the grid resized, the scrollback's limit changed or Clear
+/// between some of them.
 pub fn interpret(data: &[u8]) {
     let input = Input::read(data);
     let mut random = Random::new(input.seed);
@@ -124,8 +127,21 @@ pub fn interpret(data: &[u8]) {
     while !rest.is_empty() {
         let (piece, after) = rest.split_at(random.cut(rest.len()));
         for event in core.interpret(piece) {
-            if let Event::Reply(reply) = event {
-                assert!(is_reply(&reply), "a reply of {reply:?}");
+            match event {
+                Event::Reply(reply) => assert!(is_reply(&reply), "a reply of {reply:?}"),
+                Event::Color(query) => {
+                    let theme = random.number().to_le_bytes();
+                    let reply = query.reply([theme[0], theme[1], theme[2]]);
+                    assert!(is_color_reply(&reply), "a reply of {reply:?}");
+                }
+                Event::Clipboard(clipboard) => {
+                    if let Clipboard::Read(query) = *clipboard {
+                        // The program may have put anything there.
+                        let reply = query.reply(&String::from_utf8_lossy(piece));
+                        assert!(is_clipboard_reply(&reply), "a reply of {reply:?}");
+                    }
+                }
+                _ => {}
             }
         }
         check(&core);
@@ -197,4 +213,64 @@ fn is_reply(reply: &[u8]) -> bool {
             .iter()
             .all(|&byte| byte.is_ascii_digit() || byte == b';')
     })
+}
+
+/// `reply` without the BEL or ST it ends with, if it ends with one.
+fn ended(reply: &[u8]) -> Option<&[u8]> {
+    reply
+        .strip_suffix(b"\x07")
+        .or_else(|| reply.strip_suffix(b"\x1b\\"))
+}
+
+/// Whether `reply` is the answer to a question about a color: `OSC 4 ; n`, `OSC 10`, 11 or 12,
+/// then `; rgb:` and three components of four hex digits, ended by BEL or ST.
+fn is_color_reply(reply: &[u8]) -> bool {
+    let Some(rest) = reply.strip_prefix(b"\x1b]").and_then(ended) else {
+        return false;
+    };
+    let Some((number, color)) = rest.split_once_at(b";rgb:") else {
+        return false;
+    };
+    let named = match number.strip_prefix(b"4;") {
+        Some(index) => {
+            !index.is_empty() && index.len() <= 3 && index.iter().all(u8::is_ascii_digit)
+        }
+        None => matches!(number, b"10" | b"11" | b"12"),
+    };
+    let components: Vec<&[u8]> = color.split(|&byte| byte == b'/').collect();
+    named
+        && components.len() == 3
+        && components
+            .iter()
+            .all(|component| component.len() == 4 && component.iter().all(u8::is_ascii_hexdigit))
+}
+
+/// Whether `reply` is the answer to a question about the clipboard: `OSC 52 ; c` or `p`, `;`
+/// and base64, ended by BEL or ST.
+fn is_clipboard_reply(reply: &[u8]) -> bool {
+    let Some(rest) = reply.strip_prefix(b"\x1b]52;").and_then(ended) else {
+        return false;
+    };
+    let Some(data) = rest
+        .strip_prefix(b"c;")
+        .or_else(|| rest.strip_prefix(b"p;"))
+    else {
+        return false;
+    };
+    data.iter()
+        .all(|&byte| byte.is_ascii_alphanumeric() || matches!(byte, b'+' | b'/' | b'='))
+}
+
+trait SplitOnce {
+    /// The bytes before the first `separator` and those after it.
+    fn split_once_at(&self, separator: &[u8]) -> Option<(&[u8], &[u8])>;
+}
+
+impl SplitOnce for [u8] {
+    fn split_once_at(&self, separator: &[u8]) -> Option<(&[u8], &[u8])> {
+        let at = self
+            .windows(separator.len())
+            .position(|window| window == separator)?;
+        Some((&self[..at], &self[at + separator.len()..]))
+    }
 }

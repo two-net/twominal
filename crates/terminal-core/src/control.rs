@@ -8,13 +8,19 @@
 //! the program wrote, so no program can make Twominal type for it (SEC-05). For that reason
 //! these are never answered: the window title and icon label reports (`CSI 20 t`, `CSI 21 t`),
 //! the answerback to ENQ, and every device control string, DECRQSS and XTGETTCAP among them.
+//! The questions about colors and the clipboard are handed to the Tab, which answers them in
+//! the same way, with the theme's colors and what the clipboard holds in base64 (`osc.rs`).
 //!
-//! Left to their own issues: the bell, titles and the other operating system commands (#27).
+//! An operating system command acts once it has ended with BEL or ST, as in xterm. vte hands
+//! over one that ESC ended at that ESC, and so one that another sequence cut short too. Such an
+//! OSC waits, and `terminated` stops vte there, so that `TerminalCore::interpret` can see
+//! whether the next byte is the `\` of ST.
 
 use alloc::format;
 
 use vte::{Params, Perform};
 
+use crate::osc::{self, End};
 use crate::report;
 use crate::terminal::{Charset, Mode, Terminal};
 
@@ -45,7 +51,10 @@ impl Perform for Terminal {
 
     fn execute(&mut self, byte: u8) {
         self.forget_last();
+        // vte executes CAN and SUB right after the OSC they cut short.
+        self.settle(false);
         match byte {
+            0x07 => self.bell(),
             0x08 => self.backspace(),
             0x09 => self.tab_forward(1),
             0x0a..=0x0c => self.line_feed(),
@@ -54,8 +63,8 @@ impl Perform for Terminal {
             0x0f => self.shift(0),
             // vte has already ended any sequence that CAN or SUB cut short.
             0x1a => self.substitute(),
-            // BEL is #27's. ENQ asks for an answerback, which would be typed (SEC-05). vte
-            // reads escape sequences only in their 7-bit form, so no C1 control is acted on.
+            // ENQ asks for an answerback, which would be typed (SEC-05). vte reads escape
+            // sequences only in their 7-bit form, so no C1 control is acted on.
             _ => {}
         }
     }
@@ -68,7 +77,19 @@ impl Perform for Terminal {
         self.forget_last();
         if let Some(report) = report::read(params, bell_terminated, self.nonce()) {
             self.report(report);
+        } else if bell_terminated {
+            if let Some(osc) = osc::read(params, End::Bel) {
+                self.act(osc);
+            }
+        } else if let Some(osc) = osc::read(params, End::St) {
+            self.wait(osc);
         }
+    }
+
+    /// Stops vte after the ESC that ended an OSC, for `TerminalCore::interpret` to see the
+    /// byte after it.
+    fn terminated(&self) -> bool {
+        self.waiting()
     }
 
     fn esc_dispatch(&mut self, intermediates: &[u8], ignore: bool, byte: u8) {
@@ -208,6 +229,13 @@ impl Perform for Terminal {
                 self.reply(format!("\x1b[?{number};{state}$y").into_bytes());
             }
             ([b'!'], 'p') => self.soft_reset(),
+            // The title stack, which vim's `t_ST` and `t_RT` use. Every other window operation
+            // is ignored, the title reports among them (SEC-05).
+            ([], 't') => match arg(0) {
+                22 => self.push_title(arg(1), arg(2)),
+                23 => self.pop_title(arg(1), arg(2)),
+                _ => {}
+            },
             _ => {}
         }
     }

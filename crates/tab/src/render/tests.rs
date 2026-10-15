@@ -1,11 +1,11 @@
-//! Tests of the Renderer (HW-03, FONT-10, TERM-03 to TERM-05, TERM-07, ANIM-07, ANIM-08): what
+//! Tests of the Renderer (HW-03, FONT-10, TERM-03 to TERM-05, TERM-07, TERM-12, ANIM-07, ANIM-08): what
 //! the webview measured in and the layout out, the Terminal Core's screen in and frames out, the
 //! cursor, and every shape drawn into pixels here, to see that it stays in its cell and meets its
 //! neighbours.
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use terminal_core::{Color, CursorShape, Size, Style, TerminalCore, Underline};
+use terminal_core::{Color, CursorShape, Size, Style, TerminalCore, ThemeColor, Underline};
 
 use super::color::Ink;
 use super::shapes::{arms, decorations, is_shape, shape, CursorLook, Weight};
@@ -101,7 +101,7 @@ fn ink_at(frame: &Frame, col: u16) -> Ink {
 fn the_first_sixteen_colors_are_the_palettes() {
     let palette = palette();
     for index in 0..16 {
-        let color = palette.rgb(Color::Palette(index), Rgb::default());
+        let color = palette.colors().rgb(Color::Palette(index), Rgb::default());
         assert_eq!(color, palette.ansi[usize::from(index)]);
     }
 }
@@ -109,7 +109,7 @@ fn the_first_sixteen_colors_are_the_palettes() {
 #[test]
 fn the_other_colors_are_xterms_cube_and_grays() {
     let palette = palette();
-    let rgb = |index| palette.rgb(Color::Palette(index), Rgb::default());
+    let rgb = |index| palette.colors().rgb(Color::Palette(index), Rgb::default());
     let levels = [0, 95, 135, 175, 215, 255];
     for index in 16..=231u8 {
         let cube = usize::from(index - 16);
@@ -133,10 +133,10 @@ fn the_other_colors_are_xterms_cube_and_grays() {
 fn rgb_colors_and_defaults_are_drawn_as_they_are() {
     let palette = palette();
     assert_eq!(
-        palette.rgb(Color::Rgb(1, 2, 3), Rgb::default()),
+        palette.colors().rgb(Color::Rgb(1, 2, 3), Rgb::default()),
         Rgb::new(1, 2, 3)
     );
-    let look = palette.look(&Style::default());
+    let look = palette.colors().look(&Style::default());
     assert_eq!(look.ink.color, palette.foreground);
     assert_eq!(look.background, palette.background);
 }
@@ -144,14 +144,14 @@ fn rgb_colors_and_defaults_are_drawn_as_they_are() {
 #[test]
 fn inverse_swaps_the_colors_once_the_defaults_are_filled_in() {
     let palette = palette();
-    let look = palette.look(&Style {
+    let look = palette.colors().look(&Style {
         inverse: true,
         ..Style::default()
     });
     assert_eq!(look.ink.color, palette.background);
     assert_eq!(look.background, palette.foreground);
 
-    let look = palette.look(&Style {
+    let look = palette.colors().look(&Style {
         foreground: Color::Palette(1),
         inverse: true,
         ..Style::default()
@@ -163,13 +163,13 @@ fn inverse_swaps_the_colors_once_the_defaults_are_filled_in() {
 #[test]
 fn dim_text_is_halfway_to_its_background() {
     let palette = palette();
-    let look = palette.look(&Style {
+    let look = palette.colors().look(&Style {
         dim: true,
         ..Style::default()
     });
     assert_eq!(look.ink.color, Rgb::new(105, 105, 105));
     // After inverse, toward the background it is drawn on.
-    let look = palette.look(&Style {
+    let look = palette.colors().look(&Style {
         dim: true,
         inverse: true,
         background: Color::Rgb(100, 0, 0),
@@ -183,7 +183,7 @@ fn dim_text_is_halfway_to_its_background() {
 fn bold_never_brightens_a_color() {
     let palette = palette();
     for index in 0..8 {
-        let look = palette.look(&Style {
+        let look = palette.colors().look(&Style {
             foreground: Color::Palette(index),
             bold: true,
             ..Style::default()
@@ -196,7 +196,7 @@ fn bold_never_brightens_a_color() {
 #[test]
 fn an_underline_takes_the_text_color_unless_it_has_its_own() {
     let palette = palette();
-    let look = palette.look(&Style {
+    let look = palette.colors().look(&Style {
         underline: Underline::Curly,
         inverse: true,
         ..Style::default()
@@ -204,7 +204,7 @@ fn an_underline_takes_the_text_color_unless_it_has_its_own() {
     assert_eq!(look.ink.underline, 3);
     assert_eq!(look.ink.underline_color, palette.background);
 
-    let look = palette.look(&Style {
+    let look = palette.colors().look(&Style {
         underline: Underline::Single,
         underline_color: Color::Palette(196),
         ..Style::default()
@@ -225,6 +225,101 @@ fn hidden_text_draws_only_its_background() {
             color: palette().ansi[1],
         }]
     );
+}
+
+#[test]
+fn colors_a_program_sets_are_drawn_in_the_palettes_place() {
+    // OSC 4 for numbers of the palette, OSC 10 and 11 for the defaults (TERM-12).
+    let frame = first(&core(
+        10,
+        2,
+        "\x1b]4;1;#ff0000\x07\x1b]4;200;rgb:00/ff/00\x07\x1b]10;#0000ff\x07\x1b]11;#202020\x07\
+         \x1b[31ma\x1b[38;5;200mb\x1b[39mc\x1b[7md\x1b[27;2me\x1b[32mf",
+    ));
+    assert_eq!(
+        frame.full.as_ref().unwrap().background,
+        Rgb::new(32, 32, 32)
+    );
+    assert_eq!(ink_at(&frame, 0).color, Rgb::new(255, 0, 0));
+    assert_eq!(ink_at(&frame, 1).color, Rgb::new(0, 255, 0));
+    assert_eq!(ink_at(&frame, 2).color, Rgb::new(0, 0, 255));
+    // Inverse and dim take the defaults the program set too.
+    assert_eq!(ink_at(&frame, 3).color, Rgb::new(32, 32, 32));
+    assert_eq!(ink_at(&frame, 4).color, Rgb::new(16, 16, 144));
+    // The colors it did not set are the palette's.
+    // Dim green, halfway to the background the program set.
+    assert_eq!(ink_at(&frame, 5).color, Rgb::new(17, 16, 67));
+}
+
+#[test]
+fn a_cursor_color_a_program_sets_is_drawn_and_the_text_under_it_stays_the_themes() {
+    let frame = first(&core(10, 2, "\x1b]12;#00ff00\x07xy\x1b[D"));
+    let cursor = frame.cursor.unwrap();
+    assert_eq!(cursor.color, Rgb::new(0, 255, 0));
+    assert_eq!(cursor.text.unwrap().ink.color, palette().cursor_text);
+}
+
+#[test]
+fn composed_text_takes_the_defaults_a_program_set() {
+    let core = core(10, 1, "\x1b]10;#00ff00\x07\x1b]11;#000080\x07");
+    let frame = renderer(10, 1).frame(&core, "x").unwrap();
+    let ink = ink_at(&frame, 0);
+    assert_eq!(
+        (ink.color, ink.underline_color),
+        (Rgb::new(0, 255, 0), Rgb::new(0, 255, 0))
+    );
+    assert_eq!(frame.full.unwrap().background, Rgb::new(0, 0, 128));
+}
+
+#[test]
+fn colors_set_or_given_back_draw_every_row_and_outlive_a_new_palette() {
+    let mut core = core(10, 2, "\x1b[31mhi");
+    let mut renderer = renderer(10, 2);
+    renderer.frame(&core, "").unwrap();
+    core.interpret(b"\x1b]4;1;#ff0000\x07");
+    let frame = renderer.frame(&core, "").unwrap();
+    assert!(frame.full.is_some());
+    assert_eq!(frame.rows.len(), 2);
+    assert_eq!(ink_at(&frame, 0).color, Rgb::new(255, 0, 0));
+    // The same color again changes nothing.
+    core.interpret(b"\x1b]4;1;#ff0000\x07");
+    assert_eq!(renderer.frame(&core, ""), None);
+
+    // A new palette draws every row, and the color the program set stays over it.
+    let mut other = palette();
+    other.ansi[1] = Rgb::new(1, 1, 1);
+    other.background = Rgb::new(9, 9, 9);
+    renderer.set_palette(other);
+    let frame = renderer.frame(&core, "").unwrap();
+    assert_eq!(frame.full.as_ref().unwrap().background, Rgb::new(9, 9, 9));
+    assert_eq!(ink_at(&frame, 0).color, Rgb::new(255, 0, 0));
+
+    // Given back, it is the new palette's.
+    core.interpret(b"\x1b]104;1\x07");
+    let frame = renderer.frame(&core, "").unwrap();
+    assert!(frame.full.is_some());
+    assert_eq!(ink_at(&frame, 0).color, Rgb::new(1, 1, 1));
+}
+
+#[test]
+fn a_question_about_a_color_is_answered_with_the_themes() {
+    // Whatever the program set: the core answers with that itself.
+    let mut renderer = renderer(10, 1);
+    renderer
+        .frame(&core(10, 1, "\x1b]11;#ffffff\x07\x1b]4;3;#ffffff\x07"), "")
+        .unwrap();
+    let theme = palette();
+    for (color, rgb) in [
+        (ThemeColor::Foreground, theme.foreground),
+        (ThemeColor::Background, theme.background),
+        (ThemeColor::Cursor, theme.cursor),
+        (ThemeColor::Palette(3), theme.ansi[3]),
+        (ThemeColor::Palette(16), Rgb::new(0, 0, 0)),
+        (ThemeColor::Palette(196), Rgb::new(255, 0, 0)),
+        (ThemeColor::Palette(255), Rgb::new(238, 238, 238)),
+    ] {
+        assert_eq!(renderer.color(color), rgb, "{color:?}");
+    }
 }
 
 // ---------------------------------------------------------------------------------------
@@ -626,6 +721,20 @@ fn frames_add_up_to_what_a_full_frame_draws() {
                     core.interpret(b"\x1b[3J");
                 }
                 12 => core.set_scrollback([0, 1, 3, 50][random.below(4)]),
+                // A program sets colors, or gives them back.
+                13 => {
+                    let set = random.pick(&[
+                        "\x1b]4;1;#ff0000\x07",
+                        "\x1b]4;200;rgb:12/34/56\x1b\\",
+                        "\x1b]10;#00ff00\x07",
+                        "\x1b]11;#102030\x07",
+                        "\x1b]12;#ff00ff\x07",
+                        "\x1b]104\x07",
+                        "\x1b]110\x07",
+                        "\x1b]111\x07",
+                    ]);
+                    core.interpret(set.as_bytes());
+                }
                 _ => {}
             }
             let composing = random.pick(&composings);
@@ -831,7 +940,7 @@ fn rows_of_the_scrollback_are_drawn_the_grid_wide() {
     renderer.frame(&core, "").unwrap();
     assert!(renderer.sent.iter().all(|line| line.len() == 6));
     // As a blank of a row of the screen is drawn.
-    let mut screen_row = line::draw(&core.screen().rows()[0], 6, &palette());
+    let mut screen_row = line::draw(&core.screen().rows()[0], 6, &palette().colors());
     line::ligatures(&mut screen_row, None);
     assert_eq!(renderer.sent[0][5], screen_row[5]);
 }

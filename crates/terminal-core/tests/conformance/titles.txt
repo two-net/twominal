@@ -1,0 +1,129 @@
+# Titles (TERM-12): OSC 0 and OSC 2 set the title, which the Tab shows on the tab and the
+# window (TAB-12, GEN-04), and CSI 22 t and CSI 23 t save it and give it back. ctlseqs: OSC Ps ;
+# Pt ST, CSI Ps ; Ps ; Ps t. DESIGN.md §3 *What programs tell Twominal* has the rules.
+
+## OSC 0 and OSC 2 set the title, ended with BEL or ST
+size 10x2
+send a\e]0;one\ab\e]2;two\e\\c
+title one
+title two
+screen
+|abc       |
+|          |
+cursor 1;4
+
+## OSC 1 sets the icon label, which Twominal has none of
+size 10x1
+send \e]1;icon\a
+screen
+|          |
+
+## A title keeps its semicolons
+size 10x1
+send \e]2;a;b;;c\a
+title a;b;;c
+
+## A title is UTF-8, without control characters
+# vte drops the C0 controls of an OSC itself, but for BEL, CAN, SUB and ESC, which end it. DEL
+# and the C1 controls are taken out here, and what is not UTF-8 becomes U+FFFD.
+size 10x1
+send \e]2;é\x7fx\xc2\x85y\xffz\a
+title éxy�z
+
+## An empty title gives the tab its own back
+# xterm shows an empty title. kitty, as Twominal, gives the window its own (DESIGN.md §3).
+size 10x1
+send \e]2;x\a\e]2;\a\e]0;\a
+title x
+title
+title
+
+## OSC 0 or 2 without text does nothing
+size 10x1
+send \e]2\a\e]0\e\\
+screen
+|          |
+
+## An OSC that another sequence cuts short does nothing
+# Only BEL or ST ends an OSC. vte hands it over at an ESC whatever follows, so the core waits
+# for the byte after the ESC (DESIGN.md §3): here a CSI, an APC, an ESC, CAN and SUB.
+size 10x1
+send \e]2;one\e[1mA\e]2;two\e_x\e\\B\e]2;three\e\e\\C\e]2;four\x18D\e]2;five\x1aE
+screen
+|ABCD␦E    |
+cursor 1;7
+
+## An OSC acts when its ST comes in the next read
+size 10x1
+send \e]2;one\e
+send \\x
+title one
+screen
+|x         |
+
+## An OSC whose ESC starts something else in the next read does nothing
+size 10x1
+send \e]2;one\e
+send [1mx
+screen
+|x         |
+
+## CSI 22 t saves the title, and CSI 23 t gives it back
+# vim saves it with 22;2 and gives it back with 23;2 (t_ST, t_RT). 0, or no parameter, is the
+# icon label and the title, which is the title.
+size 10x1
+send \e]2;shell\a\e[22;2t\e]2;vim\a\e[23;2t\e[22;0t\e[22t\e[23;0t\e[23t\e[23t
+title shell
+title vim
+title shell
+title shell
+title shell
+
+## The icon label alone, and places on the stack, are not saved
+# xterm's third parameter reads and writes a place on the stack, which is not done.
+size 10x1
+send \e]2;one\a\e[22;1t\e[22;2;3t\e]2;two\a\e[23;1t\e[23;2;3t\e[23;2t
+title one
+title two
+
+## A title saved before any was set gives the tab its own back
+size 10x1
+send \e[22t\e]2;vim\a\e[23t
+title vim
+title
+
+## The stack keeps ten titles, and drops the oldest
+# As xterm's MAX_SAVED_TITLES.
+size 10x1
+send \e]2;0\a\e[22t\e]2;1\a\e[22t\e]2;2\a\e[22t\e]2;3\a\e[22t\e]2;4\a\e[22t\e]2;5\a\e[22t
+send \e]2;6\a\e[22t\e]2;7\a\e[22t\e]2;8\a\e[22t\e]2;9\a\e[22t\e]2;10\a\e[22t
+send \e[23t\e[23t\e[23t\e[23t\e[23t\e[23t\e[23t\e[23t\e[23t\e[23t\e[23t
+title 0
+title 1
+title 2
+title 3
+title 4
+title 5
+title 6
+title 7
+title 8
+title 9
+title 10
+title 10
+title 9
+title 8
+title 7
+title 6
+title 5
+title 4
+title 3
+title 2
+title 1
+
+## RIS and DECSTR keep the title and the stack
+# xterm's ReallyReset touches neither.
+size 10x1
+send \e]2;one\a\e[22t\e]2;two\a\ec\e[!p\e[23t
+title one
+title two
+title one

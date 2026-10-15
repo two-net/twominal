@@ -351,7 +351,7 @@ fn wrap(
     while index < cells.len() {
         // A right half on its own, which no line starts with, is a blank.
         let (cell, width) = match cells[index].width() {
-            0 => (Cell::blank(*cells[index].style()), 1),
+            0 => (Cell::blank(cells[index].style()), 1),
             width => (cells[index], width),
         };
         if row.len() + width > cols {

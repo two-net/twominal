@@ -1,0 +1,23 @@
+# The working directory (TERM-12): OSC 7 says where a program is, as a file URL. The Tab takes
+# it for a new tab's directory (TAB-03) when the host is this machine, which only it can tell
+# (DESIGN.md §3). fish sends it by itself.
+
+## OSC 7 gives the host and the path
+size 10x1
+send \e]7;file://mac.local/Users/two\a\e]7;file:///tmp\e\\\e]7;FILE://localhost/\a
+directory //mac.local/Users/two
+directory ///tmp
+directory //localhost/
+
+## %XX is read back as its byte, and the rest is kept as it came
+# fish escapes the path. A hook written by hand may send $PWD as it is.
+size 10x1
+send \e]7;file://h/a%20b%3Bc%25d%C3%A9\a\e]7;file://h%2Dx/a b;c%zz\xc3\xa9%4\a
+directory //h/a b;c%dé
+directory //h-x/a b;c%zzé%4
+
+## Only a file URL with a path is a directory
+size 10x1
+send \e]7;http://h/tmp\a\e]7;file://h\a\e]7;/tmp\a\e]7;file:/tmp\a\e]7\a
+screen
+|          |

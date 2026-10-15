@@ -16,12 +16,14 @@
 //! primary screen (TERM-14) and wraps the lines again when the grid's width changes (TERM-16).
 //! `width.rs` says how many cells a character takes (TERM-02), and `style.rs` what SGR does to the colors and attributes of the cells (TERM-03
 //! to TERM-05). `keyboard.rs` keeps the kitty keyboard protocol's flags (TERM-09).
-//! `report.rs` reads what shell integration reports. DESIGN.md §3 lists what is supported and
-//! what is ignored on purpose.
+//! `report.rs` reads what shell integration reports. `osc.rs` reads what the other operating
+//! system commands ask for: titles, the working directory, colors, links and the clipboard
+//! (TERM-12, TERM-13). `colors.rs` keeps the colors programs set, and `links.rs` the links
+//! they make. DESIGN.md §3 lists what is supported and what is ignored on purpose.
 //!
 //! Filled in by #16 (interpreter and screen model), #17 (conformance suite and fuzzing),
 //! #18 (Unicode), #19 (colors and attributes), #20 (keyboard flags), #21 (mouse modes), #26
-//! (scrollback and reflow) and #27–#30.
+//! (scrollback and reflow), #27 (operating system commands and the bell) and #28–#30.
 
 #![no_std]
 #![forbid(unsafe_code)]
@@ -30,12 +32,15 @@ extern crate alloc;
 #[cfg(test)]
 extern crate std;
 
+mod colors;
 mod control;
 /// What the fuzz targets check. Only for them and for the tests.
 #[cfg(any(test, fuzzing))]
 #[doc(hidden)]
 pub mod fuzz;
 mod keyboard;
+mod links;
+mod osc;
 mod report;
 mod screen;
 mod scrollback;
@@ -46,10 +51,14 @@ mod tests;
 mod width;
 
 use alloc::boxed::Box;
+use alloc::string::String;
 use alloc::vec::Vec;
 use core::{mem, str};
 
+pub use colors::{ColorQuery, Colors, Rgb, ThemeColor};
 pub use keyboard::Keyboard;
+pub use links::{Link, LinkId};
+pub use osc::{Clipboard, ClipboardQuery, Directory, Selection};
 pub use report::Report;
 pub use screen::{Cell, Row, Screen};
 pub use scrollback::Scrollback;
@@ -81,7 +90,8 @@ pub struct TerminalCore {
     held: Vec<u8>,
 }
 
-/// What interpreting output gives besides the screen.
+/// What interpreting output gives besides the screen. DESIGN.md §3 *A tab* says what the Tab
+/// does with each.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Event {
     /// Bytes to send to the program, answering one of its queries. Made of fixed text and
@@ -89,6 +99,19 @@ pub enum Event {
     Reply(Vec<u8>),
     /// What the shell integration reported (FISH-05).
     Report(Report),
+    /// A program set the title (OSC 0, OSC 2), or gave back one `CSI 22 t` saved (TERM-12).
+    /// None gives the tab its own title back (TAB-12).
+    Title(Option<String>),
+    /// A program said where it is (OSC 7, TERM-12).
+    Directory(Box<Directory>),
+    /// A program rang the bell (BEL, TERM-12, TERM-21).
+    Bell,
+    /// A program asked for one of the theme's colors (TERM-12). Its answer goes to the program
+    /// in its place among the replies.
+    Color(ColorQuery),
+    /// A program asked to write or read the clipboard (TERM-13, SEC-04). The answer to a read
+    /// goes to the program in its place among the replies.
+    Clipboard(Box<Clipboard>),
 }
 
 impl TerminalCore {
@@ -108,13 +131,11 @@ impl TerminalCore {
         self.terminal.size()
     }
 
-    /// Interprets what the program wrote. Returns the replies to send it and what its shell
-    /// integration reported, in the order it asked and reported them. A sequence cut in two
-    /// by the end of `bytes` is finished by the next call.
+    /// Interprets what the program wrote. Returns the replies to send it, what its shell
+    /// integration reported and what else programs asked for, in the order they came. A
+    /// sequence cut in two by the end of `bytes` is finished by the next call.
     ///
-    /// The events come after all of `bytes` has been interpreted. If the command line ever
-    /// needs the screen as it was at a report, `vte::Parser::advance_until_terminated` can
-    /// stop there.
+    /// The events come after all of `bytes` has been interpreted.
     pub fn interpret(&mut self, bytes: &[u8]) -> Vec<Event> {
         let joined;
         let bytes = if self.held.is_empty() {
@@ -124,7 +145,18 @@ impl TerminalCore {
             &joined
         };
         let (whole, cut) = bytes.split_at(bytes.len() - unfinished(bytes));
-        self.parser.advance(&mut self.terminal, whole);
+        let mut rest = whole;
+        while let Some(&next) = rest.first() {
+            // vte stopped after the ESC that ended an OSC: it acts if that ESC starts ST. With
+            // no byte left, the next call decides.
+            if self.terminal.waiting() {
+                self.terminal.settle(next == b'\\');
+            }
+            let done = self
+                .parser
+                .advance_until_terminated(&mut self.terminal, rest);
+            rest = &rest[done..];
+        }
         self.held.extend_from_slice(cut);
         self.terminal.take_events()
     }
@@ -168,6 +200,16 @@ impl TerminalCore {
 
     pub fn modes(&self) -> &Modes {
         self.terminal.modes()
+    }
+
+    /// The colors programs set over the theme's, which the Renderer draws with (TERM-12).
+    pub fn colors(&self) -> &Colors {
+        self.terminal.colors()
+    }
+
+    /// The link a cell is part of, as [`Cell::link`] names it (TERM-13).
+    pub fn link(&self, link: LinkId) -> Option<&Link> {
+        self.terminal.link(link)
     }
 }
 

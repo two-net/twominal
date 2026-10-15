@@ -13,8 +13,9 @@ use alloc::vec;
 use alloc::vec::Vec;
 use core::ops::Range;
 
+use crate::links::LinkId;
 use crate::scrollback::Scrollback;
-use crate::style::Style;
+use crate::style::{Packed, Style};
 
 /// How many zero-width characters a cell keeps, as xterm keeps by default (its
 /// `combiningChars`). More are dropped.
@@ -25,8 +26,9 @@ const MARKS: usize = 2;
 const NO_MARKS: [Option<char>; MARKS] = [None; MARKS];
 
 /// One cell of the grid: a character, the zero-width characters joined to it, such as
-/// combining marks, and the style it is drawn in. A wide character takes two cells, and the
-/// second, its right half, holds nothing of its own but the style.
+/// combining marks, the style it is drawn in and the link it is part of. A wide character
+/// takes two cells, and the second, its right half, holds nothing of its own but the style and
+/// the link.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Cell {
     char: char,
@@ -34,7 +36,9 @@ pub struct Cell {
     marks: [Option<char>; MARKS],
     /// 1, 2 for a wide character, or 0 for its right half.
     width: u8,
-    style: Style,
+    style: Packed,
+    /// The hyperlink a program made of the cell (OSC 8, TERM-13).
+    link: Option<LinkId>,
 }
 
 impl Cell {
@@ -42,24 +46,36 @@ impl Cell {
     pub(crate) const BLANK: Self = Self::blank(Style::PLAIN);
 
     /// A cell holding `char` in `style`, which takes `width` cells: 1, or 2 for a wide
-    /// character.
+    /// character. It is part of no link.
     pub(crate) const fn new(char: char, width: usize, style: Style) -> Self {
         Self {
             char,
             marks: NO_MARKS,
             width: width as u8,
-            style,
+            style: Packed::new(style),
+            link: None,
         }
     }
 
-    /// An empty cell in `style`.
+    /// An empty cell in `style`, part of no link.
     pub(crate) const fn blank(style: Style) -> Self {
         Self::new(' ', 1, style)
     }
 
-    /// The right half of a wide character drawn in `style`.
-    const fn right_half(style: Style) -> Self {
-        Self::new(' ', 0, style)
+    /// The cell, part of `link`.
+    pub(crate) fn linked(self, link: Option<LinkId>) -> Self {
+        Self { link, ..self }
+    }
+
+    /// The right half of the wide character `left`: its style and its link.
+    const fn right_half(left: Self) -> Self {
+        Self {
+            char: ' ',
+            marks: NO_MARKS,
+            width: 0,
+            style: left.style,
+            link: left.link,
+        }
     }
 
     /// Whether the cell is a space with nothing joined to it, in any style: what a wide
@@ -83,8 +99,14 @@ impl Cell {
 
     /// The colors and attributes the cell is drawn in. A wide character's right half has the
     /// character's.
-    pub fn style(&self) -> &Style {
-        &self.style
+    pub fn style(&self) -> Style {
+        self.style.style()
+    }
+
+    /// The hyperlink the cell is part of, which [`crate::TerminalCore::link`] gives. A wide
+    /// character's right half is part of the character's.
+    pub fn link(&self) -> Option<LinkId> {
+        self.link
     }
 }
 
@@ -260,7 +282,7 @@ impl Screen {
         row.blank_across(col + width, blank);
         row.cells[col] = cell;
         if width == 2 {
-            row.cells[col + 1] = Cell::right_half(cell.style);
+            row.cells[col + 1] = Cell::right_half(cell);
         }
         row.joined_last(col + width - 1);
     }
@@ -426,15 +448,15 @@ impl Row {
         self.cells.capacity()
     }
 
-    /// Panics if the row holds half a wide character, or a right half whose style is not its
-    /// character's, or marks a last cell that is not a space as left by a wide character.
+    /// Panics if the row holds half a wide character, or a right half whose style or link is not
+    /// its character's, or marks a last cell that is not a space as left by a wide character.
     #[cfg(any(test, fuzzing))]
     pub(crate) fn check(&self) {
         for (col, cell) in self.cells.iter().enumerate() {
             let follows_wide = col > 0 && self.cells[col - 1].width == 2;
             assert_eq!(cell.width == 0, follows_wide, "column {col} of {self:?}");
             assert!(
-                cell.width != 0 || *cell == Cell::right_half(self.cells[col - 1].style),
+                cell.width != 0 || *cell == Cell::right_half(self.cells[col - 1]),
                 "{self:?}"
             );
         }

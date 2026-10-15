@@ -8,7 +8,7 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use crate::REPORT_LIMIT;
+use crate::osc;
 
 /// What the shell integration reported (FISH-05).
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -39,10 +39,8 @@ pub(crate) fn read(
     if !bell_terminated {
         return None;
     }
-    // vte keeps no more than this, so one that long was cut short too.
-    let length =
-        params.iter().map(|param| param.len()).sum::<usize>() + params.len().saturating_sub(1);
-    if length >= REPORT_LIMIT {
+    // vte keeps no more than its buffer holds, so one that long was cut short too.
+    if osc::cut_short(params) {
         return None;
     }
     match params {

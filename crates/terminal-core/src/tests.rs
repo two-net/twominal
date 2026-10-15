@@ -10,7 +10,9 @@ use alloc::{format, vec};
 
 use crate::fuzz::{self, Random};
 use crate::width::width;
-use crate::{Color, Event, Report, Size, TerminalCore};
+use crate::{
+    osc, Cell, Clipboard, Color, Event, LinkId, Report, Selection, Size, TerminalCore, ThemeColor,
+};
 
 /// A terminal of `cols` × `rows` that has interpreted `bytes`.
 fn core(cols: u16, rows: u16, bytes: &[u8]) -> TerminalCore {
@@ -250,6 +252,238 @@ fn a_report_over_the_limit_is_dropped_and_what_follows_is_read() {
     assert!(text.len() > crate::REPORT_LIMIT);
     assert_eq!(core.interpret(&text), [Event::Report(Report::Ready)]);
     assert_eq!(rows(&core), ["after"]);
+}
+
+// Operating system commands (TERM-12, TERM-13)
+
+/// What `bytes` gave a terminal of 10 × 2, but replies.
+fn events(bytes: &[u8]) -> Vec<Event> {
+    TerminalCore::new(Size { cols: 10, rows: 2 }, None).interpret(bytes)
+}
+
+/// The links of the screen's first row, cell by cell.
+fn links(core: &TerminalCore) -> Vec<Option<LinkId>> {
+    core.screen().rows()[0]
+        .cells()
+        .iter()
+        .map(Cell::link)
+        .collect()
+}
+
+#[test]
+fn text_past_the_sixteenth_parameter_is_lost() {
+    // vte keeps 16 parameters, so a title keeps 15 of its parts, and a link that may have lost
+    // part of its URI is not made.
+    let parts: Vec<String> = (0..20).map(|part| part.to_string()).collect();
+    let title = parts.join(";");
+    assert_eq!(
+        events(format!("\x1b]2;{title}\x07").as_bytes()),
+        [Event::Title(Some(parts[..15].join(";")))]
+    );
+    let core = core(
+        10,
+        1,
+        format!("\x1b]8;;{title}\x07x\x1b]8;;a;b\x07y").as_bytes(),
+    );
+    assert_eq!(links(&core)[0], None);
+    assert_eq!(core.link(links(&core)[1].unwrap()).unwrap().uri(), "a;b");
+}
+
+#[test]
+fn a_title_keeps_its_first_1024_characters() {
+    let title = "é".repeat(1100);
+    let [Event::Title(Some(kept))] = &events(format!("\x1b]2;{title}\x07").as_bytes())[..] else {
+        panic!("one title");
+    };
+    assert_eq!(kept.chars().count(), 1024);
+}
+
+#[test]
+fn an_osc_that_fills_the_buffer_is_dropped_and_what_follows_is_read() {
+    // A clipboard cut short would hold part of what the program sent.
+    let data = "aGVs".repeat(crate::REPORT_LIMIT / 4);
+    for osc in [
+        format!("52;c;{data}"),
+        format!("2;{data}"),
+        format!("7;file:///{data}"),
+    ] {
+        let mut core = core(10, 1, b"");
+        let text = format!("\x1b]{osc}\x07after\x07");
+        assert_eq!(core.interpret(text.as_bytes()), [Event::Bell], "{osc:.10}");
+        assert_eq!(rows(&core), ["after"]);
+    }
+    // A link cut short is not made, and ends the one open, as any link that cannot be.
+    let core = core(
+        10,
+        1,
+        format!("\x1b]8;;u\x07a\x1b]8;;{data}\x07b").as_bytes(),
+    );
+    assert!(links(&core)[0].is_some());
+    assert_eq!(links(&core)[1], None);
+    // One just short of it arrives whole.
+    let data = "aGVs".repeat(crate::REPORT_LIMIT / 4 - 2);
+    let [Event::Clipboard(clipboard)] = &events(format!("\x1b]52;c;{data}\x07").as_bytes())[..]
+    else {
+        panic!("one write");
+    };
+    let Clipboard::Write { text, .. } = &**clipboard else {
+        panic!("a write");
+    };
+    assert_eq!(text.len(), data.len() / 4 * 3);
+}
+
+#[test]
+fn base64_reads_back_what_it_writes() {
+    let mut random = Random::new(52);
+    for length in 0..40 {
+        let bytes: Vec<u8> = (0..length).map(|_| random.number() as u8).collect();
+        let text = osc::encode(&bytes);
+        assert_eq!(text.len() % 4, 0);
+        assert_eq!(osc::decode(text.as_bytes()), Some(bytes.clone()), "{text}");
+        // Without its padding too.
+        let bare = text.trim_end_matches('=');
+        assert_eq!(osc::decode(bare.as_bytes()), Some(bytes), "{bare}");
+    }
+    assert_eq!(osc::encode(b"hello world"), "aGVsbG8gd29ybGQ=");
+    for bad in [
+        &b"a"[..],
+        b"abcde",
+        b"a=",
+        b"ab=",
+        b"abc==",
+        b"a===",
+        b"ab c",
+        b"ab-_",
+        b"=",
+        b"ab===",
+    ] {
+        assert_eq!(osc::decode(bad), None, "{bad:?}");
+    }
+}
+
+#[test]
+fn a_clipboard_answer_is_base64_whatever_the_text() {
+    let [Event::Clipboard(clipboard)] = &events(b"\x1b]52;p;?\x1b\\")[..] else {
+        panic!("one read");
+    };
+    let Clipboard::Read(query) = **clipboard else {
+        panic!("a read");
+    };
+    assert_eq!(query.from(), Selection::Primary);
+    let text = "rm -rf ~\r\x1b[2J\x07\u{9b}é";
+    let reply = query.reply(text);
+    let data = reply
+        .strip_prefix(b"\x1b]52;p;")
+        .and_then(|rest| rest.strip_suffix(b"\x1b\\"))
+        .expect("an OSC 52 ended by ST");
+    assert_eq!(osc::decode(data).unwrap(), text.as_bytes());
+    assert!(data
+        .iter()
+        .all(|byte| byte.is_ascii_alphanumeric() || b"+/=".contains(byte)));
+}
+
+#[test]
+fn a_color_answer_is_the_color_set_or_else_the_theme() {
+    let answers = |bytes: &[u8]| -> Vec<Vec<u8>> {
+        events(bytes)
+            .into_iter()
+            .map(|event| match event {
+                Event::Color(query) => query.reply([0x12, 0xab, 0xff]),
+                other => panic!("not a question about a color: {other:?}"),
+            })
+            .collect()
+    };
+    assert_eq!(
+        answers(b"\x1b]4;7;?\x07\x1b]10;?\x1b\\\x1b]4;7;#010203\x07\x1b]4;7;?\x07"),
+        [
+            b"\x1b]4;7;rgb:1212/abab/ffff\x07".to_vec(),
+            b"\x1b]10;rgb:1212/abab/ffff\x1b\\".to_vec(),
+            b"\x1b]4;7;rgb:0101/0202/0303\x07".to_vec(),
+        ]
+    );
+    // What was set when the program asked, not what was set after.
+    assert_eq!(
+        answers(b"\x1b]11;?\x07\x1b]11;#ffffff\x07\x1b]11;?\x07\x1b]111\x07"),
+        [
+            b"\x1b]11;rgb:1212/abab/ffff\x07".to_vec(),
+            b"\x1b]11;rgb:ffff/ffff/ffff\x07".to_vec(),
+        ]
+    );
+    let core = core(10, 1, b"\x1b]4;200;rgb:ffff/8000/0\x07\x1b]12;#00ff00\x07");
+    assert_eq!(
+        core.colors().get(ThemeColor::Palette(200)),
+        Some([0xff, 0x80, 0])
+    );
+    assert_eq!(core.colors().get(ThemeColor::Cursor), Some([0, 0xff, 0]));
+    assert_eq!(core.colors().get(ThemeColor::Palette(1)), None);
+    assert_eq!(core.colors().get(ThemeColor::Foreground), None);
+}
+
+#[test]
+fn a_link_with_an_id_takes_one_place_however_often_it_is_drawn() {
+    // A full-screen program draws its links again and again.
+    let mut core = core(10, 1, b"");
+    for _ in 0..100 {
+        core.interpret(b"\x1b[H\x1b]8;id=1;u\x07a\x1b]8;;\x07\x1b]8;id=2;u\x07b\x1b]8;;\x07");
+    }
+    // The other places are free.
+    for n in 0..crate::links::MOST - 2 {
+        core.interpret(format!("\x1b]8;;v{n}\x07x").as_bytes());
+    }
+    let links = links(&core);
+    assert!(
+        links[..crate::links::MOST].iter().all(Option::is_some),
+        "{links:?}"
+    );
+    assert_ne!(links[0], links[1]);
+    core.terminal.check();
+}
+
+#[test]
+fn a_full_table_frees_the_links_no_cell_holds() {
+    let most = crate::links::MOST;
+    let mut core = core(20, 2, b"");
+    for n in 0..most {
+        core.interpret(format!("\x1b]8;;u{n}\x07x").as_bytes());
+    }
+    // Every link is on the screen, so none can be freed.
+    core.interpret(b"\x1b]8;;full\x07y");
+    assert_eq!(links(&core)[most], None);
+    // Now no cell holds one. The sweep that found none free is not run again until links that
+    // take as much as it kept have been asked for: until then the links are not made.
+    core.interpret(b"\x1b[2J\x1b[H");
+    for n in 1..most {
+        core.interpret(format!("\x1b]8;;w{n}\x07z").as_bytes());
+        assert_eq!(links(&core)[n - 1], None, "link {n}");
+    }
+    core.interpret(b"\x1b]8;;last\x07z");
+    let made = links(&core)[most - 1].expect("a link once the sweep ran");
+    assert_eq!(core.link(made).unwrap().uri(), "last");
+    core.terminal.check();
+}
+
+#[test]
+fn links_are_counted_by_what_they_take() {
+    // In tests the table holds three of the longest links.
+    let uri = "u".repeat(crate::links::URI_MOST - 1);
+    let id = "i".repeat(crate::links::ID_MOST);
+    let mut core = core(10, 1, b"");
+    for n in 0..4 {
+        core.interpret(format!("\x1b]8;id={id};{uri}{n}\x07x").as_bytes());
+    }
+    assert_eq!(
+        core.link(links(&core)[2].unwrap()).unwrap().id(),
+        Some(&*id)
+    );
+    assert_eq!(links(&core)[3], None);
+    // One byte longer, and none is made.
+    let core = self::core(
+        10,
+        1,
+        format!("\x1b]8;;{uri}uu\x07x\x1b]8;id={id}i;u\x07y").as_bytes(),
+    );
+    assert_eq!(links(&core)[..2], [None, None]);
+    core.terminal.check();
 }
 
 // Resizing and the scrollback (TERM-14, TERM-16)
@@ -632,6 +866,24 @@ const PIECES: &[&[u8]] = &[
     b"%",
     b"x",
     b"hello ",
+    b"\x1b]0;",
+    b"\x1b]2;",
+    b"\x1b]7;file://h/",
+    b"\x1b]8;id=a;",
+    b"\x1b]8;;",
+    b"\x1b]8;;u\x07",
+    b"\x1b]52;c;",
+    b"\x1b]52;p;?\x07",
+    b"\x1b]4;1;",
+    b"\x1b]10;?;?",
+    b"\x1b]11;",
+    b"rgb:ff/00/00",
+    b"#123",
+    b"\x1b]104",
+    b"\x1b]111",
+    b"\x1b[22;2t",
+    b"\x1b[23;2t",
+    b"aGk=",
 ];
 
 /// `length` bytes or so of hostile output.
@@ -653,7 +905,10 @@ const SAMPLE: &[u8] =
                        \x1b[0m\r\n\xe2\x94\x80 caf\xc3\xa9 \xe6\x97\xa5\xe6\x9c\xac e\xcc\x81\xcc\x88\
                        \xf0\x9f\x91\xa8\xe2\x80\x8d\xf0\x9f\x91\xa9 \xe2\x80\x8b\xe6\x97\xa5\xc2\x85\x1b[2;5r\x1b[5H\n\n\n\
                        \x1b]2222;n1;cwd;/tmp\x07\x1b[?1049hfull\x1b[6n\x1b[?1049l\x1b(0lqk\x1b(Bz\
-                       \x1b[3b\tx\x1b[c\x1b]2222;n1;ready\x07\xd0\xb9 \xd0\xbc\xf0\x9f\x98\x80!";
+                       \x1b[3b\tx\x1b[c\x1b]2222;n1;ready\x07\xd0\xb9 \xd0\xbc\xf0\x9f\x98\x80!\
+                       \x1b]2;a;title\x1b\\\x1b[22;2t\x07\x1b]8;id=1;https://e/x\x07link\x1b]8;;\x1b\\\
+                       \x1b]11;?\x1b\\\x1b]4;1;#ff0000\x07\x1b]52;c;aGk=\x07\x1b]7;file://h/tmp\x07\
+                       \x1b]2;cut\x1b[1m\x1b[23;2t\x1b]104\x07\x1b]52;p;?\x07";
 
 /// The state and events from `text`, given in pieces `cut` long.
 fn cut(text: &[u8], mut cut: impl FnMut() -> usize) -> (TerminalCore, Vec<Event>) {

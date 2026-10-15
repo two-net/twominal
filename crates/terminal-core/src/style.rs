@@ -75,6 +75,51 @@ impl Default for Style {
     }
 }
 
+/// A [`Style`] as a cell keeps it: the six attributes in one byte, so that a cell, its link
+/// included, takes no more than 32 bytes (PERF-10).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Packed {
+    foreground: Color,
+    background: Color,
+    underline_color: Color,
+    underline: Underline,
+    /// Bold, dim, italic, inverse, hidden and crossed out, from the lowest bit up.
+    attributes: u8,
+}
+
+impl Packed {
+    pub(crate) const fn new(style: Style) -> Self {
+        Self {
+            foreground: style.foreground,
+            background: style.background,
+            underline_color: style.underline_color,
+            underline: style.underline,
+            attributes: style.bold as u8
+                | (style.dim as u8) << 1
+                | (style.italic as u8) << 2
+                | (style.inverse as u8) << 3
+                | (style.hidden as u8) << 4
+                | (style.strikethrough as u8) << 5,
+        }
+    }
+
+    pub(crate) fn style(self) -> Style {
+        let on = |bit: u8| self.attributes & 1 << bit != 0;
+        Style {
+            foreground: self.foreground,
+            background: self.background,
+            underline_color: self.underline_color,
+            underline: self.underline,
+            bold: on(0),
+            dim: on(1),
+            italic: on(2),
+            inverse: on(3),
+            hidden: on(4),
+            strikethrough: on(5),
+        }
+    }
+}
+
 impl Style {
     /// The style of text no SGR has touched. A constant, for the blank cell.
     pub(crate) const PLAIN: Self = Self {
