@@ -14,12 +14,13 @@ size 10x2
 send \eZ
 reply \e[?62;22c
 
-## DA2 is answered as a VT220, version 10
+## DA2 is answered as a VT220, version 2500
+# vim asks for SGR mouse reports from 277, and keeps underline colors from 2500 (DESIGN.md §3).
 size 10x2
 send \e[>c
-reply \e[>1;10;0c
+reply \e[>1;2500;0c
 send \e[>0c
-reply \e[>1;10;0c
+reply \e[>1;2500;0c
 
 ## Other device attributes are not answered
 # DA3 (CSI = c) would report a unit ID.
@@ -68,6 +69,26 @@ send \e[?1002$p
 reply \e[?1002;1$y
 send \e[?1000$p
 reply \e[?1000;2$y
+
+## DECRQM reports the mouse's formats and alternate scroll
+size 10x2
+send \e[?1006$p\e[?1005$p\e[?1015$p\e[?1007$p
+reply \e[?1006;2$y
+reply \e[?1005;2$y
+reply \e[?1015;2$y
+reply \e[?1007;1$y
+send \e[?1015h\e[?1007l
+send \e[?1006$p\e[?1005$p\e[?1015$p\e[?1007$p
+reply \e[?1006;2$y
+reply \e[?1005;2$y
+reply \e[?1015;1$y
+reply \e[?1007;2$y
+
+## DECRQM does not know SGR-pixel reports or highlight tracking
+size 10x2
+send \e[?1016$p\e[?1001$p
+reply \e[?1016;0$y
+reply \e[?1001;0$y
 
 ## DECRQM reports the ANSI modes
 size 10x2

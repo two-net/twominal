@@ -22,9 +22,13 @@ use crate::terminal::{Charset, Mode, Terminal};
 /// The answer to DA1: a VT220 with ANSI color. fish waits for it at startup.
 const PRIMARY_ATTRIBUTES: &[u8] = b"\x1b[?62;22c";
 
-/// The answer to DA2: a VT220, version 10. A low version keeps vim from probing for features
-/// of xterm's that are not here.
-const SECONDARY_ATTRIBUTES: &[u8] = b"\x1b[>1;10;0c";
+/// The answer to DA2: a VT220, version 2500. Programs choose by the version, vim's
+/// `handle_version_response` among them. vim before 9.0.1168, whose own entry for xterm has no
+/// `XM`, asks for SGR mouse reports and drags from 277 (TERM-10); later ones ask anyway. From
+/// 2500 vim keeps sending underline colors, which it stops between 95 and 2499 (TERM-05). From
+/// 141 it asks for terminal capabilities with XTGETTCAP, which is never answered. Emacs reads
+/// 2001 to 4000 as VTE, and so asks for nothing. 4000 to 4009 would be kitty to vim.
+const SECONDARY_ATTRIBUTES: &[u8] = b"\x1b[>1;2500;0c";
 
 /// The answer to DSR 5: no malfunction.
 const STATUS_OK: &[u8] = b"\x1b[0n";

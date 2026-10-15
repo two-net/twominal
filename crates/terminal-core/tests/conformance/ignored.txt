@@ -83,3 +83,13 @@ cursor 1;7
 size 10x5
 send \e[3;3H\e[1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1;1H
 cursor 3;3
+
+## Highlight tracking and the DEC locator are not done
+# xterm's 1001 needs the program to answer each press, and the locator reports in pixels.
+size 10x2
+send a\e[?1001hb\e[1;1'zc\e[1'{d
+screen
+|abcd      |
+|          |
+cursor 1;5
+mode mouse off

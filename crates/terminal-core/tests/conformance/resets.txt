@@ -2,7 +2,7 @@
 
 ## RIS resets everything but the size
 size 10x3
-send text\e[2;3r\e[?25l\e[?2004h\e[?1000h\e[3g\e(0\e[?1049hfull
+send text\e[2;3r\e[?25l\e[?2004h\e[?1000h\e[?1006h\e[?1007l\e[3g\e(0\e[?1049hfull
 send \ec
 screen
 |          |
@@ -13,6 +13,8 @@ mode alternate_screen off
 mode cursor_visible on
 mode bracketed_paste off
 mode mouse off
+mode mouse_format legacy
+mode alternate_scroll on
 # The region is the whole screen, the tab stops are back, and the characters are ASCII.
 send top\e[3H\n\tq
 screen
@@ -48,6 +50,14 @@ screen
 |w   |
 |    |
 |    |
+
+## DECSTR keeps the mouse modes
+# xterm resets them only for RIS.
+size 10x2
+send \e[?1002h\e[?1015h\e[?1007l\e[!p
+mode mouse drag
+mode mouse_format urxvt
+mode alternate_scroll off
 
 ## DECSTR forgets only the saved cursor of the screen being shown
 # xterm saves the cursor at home in that screen's slot, and leaves the other's.

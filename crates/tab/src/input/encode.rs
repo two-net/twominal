@@ -1,13 +1,14 @@
-//! The bytes a program reads for a key, a paste or a change of focus (TERM-08, TERM-09,
+//! The bytes a program reads for a key, a paste, a change of focus or the mouse (TERM-08 to
 //! TERM-11).
 //!
 //! With no kitty keyboard flag set, keys are encoded as xterm encodes them for
 //! `TERM=xterm-256color`. With flags set, as kitty encodes them: this follows kitty's
-//! `key_encoding.c`, the protocol's reference. DESIGN.md §3 lists where either is not followed.
+//! `key_encoding.c`, the protocol's reference. The mouse is reported as xterm's `button.c`
+//! reports it. DESIGN.md §3 lists where any of them is not followed.
 
 use std::fmt::Write as _;
 
-use terminal_core::{Keyboard, Modes};
+use terminal_core::{Keyboard, Modes, MouseFormat};
 
 use super::key::{Key, Mods, Named, Pad, Press};
 use super::Kind;
@@ -62,6 +63,76 @@ pub(crate) fn focus(focused: bool) -> &'static [u8] {
         b"\x1b[I"
     } else {
         b"\x1b[O"
+    }
+}
+
+/// A mouse event, for a program that asked (TERM-10), in the format it chose: xterm's
+/// `EmitButtonCode` and `EmitMousePosition`. `code` is the button's number with the modifiers
+/// and the motion flag added, as SGR writes it. `row` and `col` count from 0.
+pub(crate) fn mouse(code: u8, release: bool, row: u16, col: u16, format: MouseFormat) -> Vec<u8> {
+    // Every format but SGR says only that some button came up: 3, with the modifiers.
+    let code = if release && format != MouseFormat::Sgr {
+        code & MOUSE_MODIFIERS | 3
+    } else {
+        code
+    };
+    let (row, col) = (u32::from(row) + 1, u32::from(col) + 1);
+    match format {
+        MouseFormat::Legacy => vec![
+            ESC,
+            b'[',
+            b'M',
+            32 + code,
+            legacy_coordinate(col),
+            legacy_coordinate(row),
+        ],
+        MouseFormat::Utf8 => {
+            let mut bytes = vec![ESC, b'[', b'M'];
+            push_utf8_mouse(&mut bytes, u32::from(code) + 32);
+            for coordinate in [col, row] {
+                // The limit is written as 0, as in the legacy format.
+                match coordinate.min(UTF8_MOUSE_LIMIT) {
+                    UTF8_MOUSE_LIMIT => bytes.push(0),
+                    coordinate => push_utf8_mouse(&mut bytes, coordinate + 32),
+                }
+            }
+            bytes
+        }
+        MouseFormat::Sgr => {
+            let end = if release { 'm' } else { 'M' };
+            format!("\x1b[<{code};{col};{row}{end}").into_bytes()
+        }
+        MouseFormat::Urxvt => format!("\x1b[{};{col};{row}M", u32::from(code) + 32).into_bytes(),
+    }
+}
+
+/// The modifiers in a mouse event's code: Shift 4, Alt 8 and Ctrl 16.
+const MOUSE_MODIFIERS: u8 = 4 | 8 | 16;
+
+/// The first coordinate, counted from 1, the legacy format cannot write: a byte holds 32 more
+/// than each up to 223. It and those past it are written as 0, as xterm writes them: what the
+/// byte came to before xterm had a limit, kept as a mark of the edge.
+const LEGACY_MOUSE_LIMIT: u32 = 224;
+
+/// The first coordinate, counted from 1, that 1005 cannot write: two bytes of UTF-8 hold 32
+/// more than each up to 2015. It and those past it are written as 0, as in the legacy format.
+const UTF8_MOUSE_LIMIT: u32 = 2016;
+
+fn legacy_coordinate(coordinate: u32) -> u8 {
+    match coordinate.min(LEGACY_MOUSE_LIMIT) {
+        LEGACY_MOUSE_LIMIT => 0,
+        // At most 223 + 32.
+        coordinate => (coordinate + 32) as u8,
+    }
+}
+
+/// `value` as 1005 writes it: one byte below 128, and two of UTF-8 from there to 2047.
+fn push_utf8_mouse(bytes: &mut Vec<u8>, value: u32) {
+    if value < 128 {
+        bytes.push(value as u8);
+    } else {
+        bytes.push(0xc0 | (value >> 6) as u8);
+        bytes.push(0x80 | (value & 0x3f) as u8);
     }
 }
 

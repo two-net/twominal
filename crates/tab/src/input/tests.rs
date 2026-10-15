@@ -1,11 +1,12 @@
-//! Tests of the Input Handler (TERM-08, TERM-09, TERM-11, HW-01): DOM key events, pastes,
-//! focus changes and input-method text in, the bytes a program reads out.
+//! Tests of the Input Handler (TERM-08 to TERM-11, HW-01, HW-02): DOM key events, pastes,
+//! focus changes, input-method text and mouse and wheel events in, the bytes a program reads
+//! or what Twominal does out.
 //!
 //! The legacy cases are what xterm sends for `TERM=xterm-256color`, with the deviations
 //! DESIGN.md §3 lists. The kitty cases are kitty's own, from `kitty_tests/keys.py`, given as
-//! the DOM would give the key.
+//! the DOM would give the key. The mouse's reports are xterm's, from `button.c`.
 
-use terminal_core::{Keyboard, Modes};
+use terminal_core::{Keyboard, Modes, MouseFormat, MouseTracking};
 
 use super::*;
 
@@ -122,7 +123,9 @@ fn sent_with(modes: &Modes, event: &Event) -> String {
 fn sent_on(macos: bool, modes: &Modes, event: &Event) -> String {
     match InputHandler::on(macos).handle(InputEvent::Key(event.0.clone()), modes) {
         Some(Action::Send(bytes)) => String::from_utf8(bytes).unwrap(),
-        Some(Action::Composing) => panic!("a key composed"),
+        Some(action @ (Action::Composing | Action::Pointer(_) | Action::Scroll(_))) => {
+            panic!("a key meant {action:?}")
+        }
         None => String::new(),
     }
 }
@@ -1179,4 +1182,1091 @@ fn focus_is_reported_when_the_program_asked() {
         input.handle(InputEvent::Focus(false), &Modes::default()),
         None
     );
+}
+
+// ---------------------------------------------------------------------------------------
+// The mouse (TERM-10, HW-02)
+// ---------------------------------------------------------------------------------------
+
+/// A screen of 80 by 24 cells of 10 by 20 CSS pixels.
+const GRID: Grid = Grid {
+    size: Size { cols: 80, rows: 24 },
+    cell_width: 10.0,
+    cell_height: 20.0,
+};
+
+/// A screen wider and taller than any format's coordinates reach.
+const HUGE: Grid = Grid {
+    size: Size {
+        cols: 3000,
+        rows: 3000,
+    },
+    ..GRID
+};
+
+fn mouse_input(grid: Grid) -> InputHandler {
+    let mut input = InputHandler::on(false);
+    input.resize(grid);
+    input
+}
+
+/// The modes of a program that asked for `mouse` reports in `format`.
+fn tracking(mouse: MouseTracking, format: MouseFormat) -> Modes {
+    Modes {
+        mouse,
+        mouse_format: format,
+        ..Modes::default()
+    }
+}
+
+/// The DOM's bit in `buttons` for its `button`.
+fn dom_bit(button: i16) -> u16 {
+    match button {
+        0 => 1,
+        1 => 4,
+        2 => 2,
+        3 => 8,
+        4 => 16,
+        _ => 0,
+    }
+}
+
+/// A mouse event in the left half of the cell at `row` and `col`, counted from 0.
+#[derive(Clone, Copy)]
+struct Click(MouseEvent);
+
+fn at(kind: MouseKind, row: i32, col: i32) -> Click {
+    Click(MouseEvent {
+        kind,
+        x: f64::from(col) * 10.0 + 2.0,
+        y: f64::from(row) * 20.0 + 10.0,
+        ..MouseEvent::default()
+    })
+}
+
+/// The main button going down.
+fn down(row: i32, col: i32) -> Click {
+    at(MouseKind::Down, row, col).button(0)
+}
+
+/// The main button coming up.
+fn up(row: i32, col: i32) -> Click {
+    at(MouseKind::Up, row, col).button(0)
+}
+
+/// The mouse moving with `buttons` held, as the DOM's `buttons` has them.
+fn moved(row: i32, col: i32, buttons: u16) -> Click {
+    let mut event = at(MouseKind::Move, row, col);
+    event.0.buttons = buttons;
+    event
+}
+
+impl Click {
+    /// The button, and `buttons` as the DOM gives them with it alone.
+    fn button(mut self, button: i16) -> Self {
+        self.0.button = button;
+        self.0.buttons = if self.0.kind == MouseKind::Down {
+            dom_bit(button)
+        } else {
+            0
+        };
+        self
+    }
+    fn buttons(mut self, buttons: u16) -> Self {
+        self.0.buttons = buttons;
+        self
+    }
+    fn x(mut self, x: f64) -> Self {
+        self.0.x = x;
+        self
+    }
+    fn y(mut self, y: f64) -> Self {
+        self.0.y = y;
+        self
+    }
+    fn detail(mut self, detail: u32) -> Self {
+        self.0.detail = detail;
+        self
+    }
+    fn shift(mut self) -> Self {
+        self.0.modifiers.shift = true;
+        self
+    }
+    fn alt(mut self) -> Self {
+        self.0.modifiers.alt = true;
+        self
+    }
+    fn ctrl(mut self) -> Self {
+        self.0.modifiers.ctrl = true;
+        self
+    }
+    fn meta(mut self) -> Self {
+        self.0.modifiers.meta = true;
+        self
+    }
+}
+
+/// A wheel event in the cell at row 1 and column 2, down and right positive.
+fn wheel(delta_x: f64, delta_y: f64, delta_mode: DeltaMode) -> WheelEvent {
+    WheelEvent {
+        delta_x,
+        delta_y,
+        delta_mode,
+        x: 25.0,
+        y: 30.0,
+        modifiers: Modifiers::default(),
+    }
+}
+
+/// A wheel turned down `pixels`, as a trackpad or a notch gives them.
+fn pixels(pixels: f64) -> WheelEvent {
+    wheel(0.0, pixels, DeltaMode::Pixel)
+}
+
+/// What `event` sends: the bytes, or none when it means nothing.
+#[track_caller]
+fn bytes(input: &mut InputHandler, modes: &Modes, event: impl Into<InputEvent>) -> Vec<u8> {
+    match input.handle(event.into(), modes) {
+        Some(Action::Send(bytes)) => bytes,
+        None => Vec::new(),
+        Some(action) => panic!("{action:?} is not for the program"),
+    }
+}
+
+/// The Pointer action `event` means.
+#[track_caller]
+fn pointer(input: &mut InputHandler, modes: &Modes, event: impl Into<InputEvent>) -> Pointer {
+    match input.handle(event.into(), modes) {
+        Some(Action::Pointer(pointer)) => pointer,
+        other => panic!("{other:?} is no Pointer action"),
+    }
+}
+
+/// Checks that each event in turn sends what it is paired with. A hover is Twominal's, and
+/// sends nothing.
+#[track_caller]
+fn reports(modes: &Modes, cases: &[(InputEvent, &[u8])]) {
+    let mut input = mouse_input(HUGE);
+    for (event, expected) in cases {
+        let sent = match input.handle(event.clone(), modes) {
+            Some(Action::Send(bytes)) => bytes,
+            Some(Action::Pointer(Pointer {
+                kind: PointerKind::Hover,
+                ..
+            }))
+            | None => Vec::new(),
+            Some(action) => panic!("{action:?} for {event:?} is not for the program"),
+        };
+        assert_eq!(sent, *expected, "{event:?} with {modes:?}");
+    }
+}
+
+/// Checks that each event, the first a handler is given, sends what it is paired with.
+#[track_caller]
+fn first_reports(modes: &Modes, cases: &[(Click, &[u8])]) {
+    for (event, expected) in cases {
+        let sent = bytes(&mut mouse_input(HUGE), modes, *event);
+        assert_eq!(sent, *expected, "{:?} with {modes:?}", event.0);
+    }
+}
+
+impl From<Click> for InputEvent {
+    fn from(click: Click) -> Self {
+        InputEvent::Mouse(click.0)
+    }
+}
+
+impl From<WheelEvent> for InputEvent {
+    fn from(event: WheelEvent) -> Self {
+        InputEvent::Wheel(event)
+    }
+}
+
+#[test]
+fn before_the_grid_is_known_the_mouse_means_nothing() {
+    let modes = tracking(MouseTracking::Motion, MouseFormat::Sgr);
+    let mut input = InputHandler::on(false);
+    assert_eq!(input.handle(down(0, 0).into(), &modes), None);
+    assert_eq!(input.handle(pixels(100.0).into(), &modes), None);
+    // A cell of no size, or of no number, is no grid.
+    for (width, height) in [
+        (0.0, 20.0),
+        (10.0, -1.0),
+        (f64::NAN, 20.0),
+        (10.0, f64::INFINITY),
+    ] {
+        input.resize(Grid {
+            cell_width: width,
+            cell_height: height,
+            ..GRID
+        });
+        assert_eq!(input.handle(down(0, 0).into(), &modes), None);
+        assert_eq!(input.handle(pixels(100.0).into(), &Modes::default()), None);
+    }
+    input.resize(GRID);
+    assert_eq!(
+        bytes(&mut input, &modes, down(0, 0)),
+        b"\x1b[<0;1;1M".to_vec()
+    );
+}
+
+#[test]
+fn a_click_is_reported_as_xterm_reports_it() {
+    // Each button's press, and its release as 3, with the column and the row after it, from
+    // 1, each a byte 32 more than its number.
+    let modes = tracking(MouseTracking::Click, MouseFormat::Legacy);
+    reports(
+        &modes,
+        &[
+            (down(0, 0).into(), b"\x1b[M !!"),
+            (up(0, 0).into(), b"\x1b[M#!!"),
+            (down(1, 2).button(1).into(), b"\x1b[M!#\""),
+            (up(1, 2).button(1).into(), b"\x1b[M##\""),
+            (down(23, 79).button(2).into(), b"\x1b[M\"p8"),
+            (up(23, 79).button(2).into(), b"\x1b[M#p8"),
+            // Back and forward are X's buttons 8 and 9.
+            (down(0, 0).button(3).into(), b"\x1b[M\xa0!!"),
+            (up(0, 0).button(3).into(), b"\x1b[M#!!"),
+            (down(0, 0).button(4).into(), b"\x1b[M\xa1!!"),
+            (up(0, 0).button(4).into(), b"\x1b[M#!!"),
+        ],
+    );
+}
+
+#[test]
+fn sgr_reports_say_which_button_came_up() {
+    let modes = tracking(MouseTracking::Click, MouseFormat::Sgr);
+    reports(
+        &modes,
+        &[
+            (down(0, 0).into(), b"\x1b[<0;1;1M"),
+            (up(0, 0).into(), b"\x1b[<0;1;1m"),
+            (down(2, 4).button(2).into(), b"\x1b[<2;5;3M"),
+            (up(2, 4).button(2).into(), b"\x1b[<2;5;3m"),
+            (down(2, 4).button(1).into(), b"\x1b[<1;5;3M"),
+            (up(2, 4).button(1).into(), b"\x1b[<1;5;3m"),
+            (down(2, 4).button(3).into(), b"\x1b[<128;5;3M"),
+            (up(2, 4).button(3).into(), b"\x1b[<128;5;3m"),
+            (down(2, 4).button(4).into(), b"\x1b[<129;5;3M"),
+            (up(2, 4).button(4).into(), b"\x1b[<129;5;3m"),
+            // Nothing stops them: SGR's coordinates are extended (TERM-10).
+            (down(2999, 2999).into(), b"\x1b[<0;3000;3000M"),
+            (up(2999, 2999).into(), b"\x1b[<0;3000;3000m"),
+        ],
+    );
+}
+
+#[test]
+fn urxvt_and_utf8_reports() {
+    reports(
+        &tracking(MouseTracking::Click, MouseFormat::Urxvt),
+        &[
+            (down(0, 0).into(), b"\x1b[32;1;1M"),
+            (up(0, 0).into(), b"\x1b[35;1;1M"),
+            (down(2, 4).button(3).ctrl().into(), b"\x1b[176;5;3M"),
+            (up(2, 4).button(3).ctrl().into(), b"\x1b[51;5;3M"),
+            (down(2999, 2999).into(), b"\x1b[32;3000;3000M"),
+        ],
+    );
+    // The legacy format's bytes, but past 94 two bytes of UTF-8, the button's code too.
+    reports(
+        &tracking(MouseTracking::Click, MouseFormat::Utf8),
+        &[
+            (down(0, 0).into(), b"\x1b[M !!"),
+            (up(0, 0).into(), b"\x1b[M#!!"),
+            (down(0, 100).into(), b"\x1b[M \xc2\x85!"),
+            (up(0, 100).into(), b"\x1b[M#\xc2\x85!"),
+            (down(0, 0).button(3).into(), b"\x1b[M\xc2\xa0!!"),
+        ],
+    );
+}
+
+#[test]
+fn legacy_coordinates_stop_at_223_with_a_zero_byte() {
+    // xterm clamps a coordinate to its limit, and writes the limit as 0: what the byte became
+    // before there was a limit.
+    let modes = tracking(MouseTracking::Click, MouseFormat::Legacy);
+    first_reports(
+        &modes,
+        &[
+            (down(0, 221), b"\x1b[M \xfe!"),
+            (down(0, 222), b"\x1b[M \xff!"),
+            (down(0, 223), b"\x1b[M \x00!"),
+            (down(0, 2000), b"\x1b[M \x00!"),
+            (down(222, 0), b"\x1b[M !\xff"),
+            (down(500, 500), b"\x1b[M \x00\x00"),
+        ],
+    );
+}
+
+#[test]
+fn utf8_coordinates_stop_at_2015() {
+    let modes = tracking(MouseTracking::Click, MouseFormat::Utf8);
+    first_reports(
+        &modes,
+        &[
+            (down(0, 93), b"\x1b[M ~!"),
+            (down(0, 94), b"\x1b[M \x7f!"),
+            (down(0, 95), b"\x1b[M \xc2\x80!"),
+            (down(0, 2014), b"\x1b[M \xdf\xbf!"),
+            (down(0, 2015), b"\x1b[M \x00!"),
+            (down(2999, 2999), b"\x1b[M \x00\x00"),
+        ],
+    );
+}
+
+#[test]
+fn x10_reports_only_presses_of_three_buttons() {
+    // Mode 9: no release, no move, no modifier, no wheel, and none of back and forward.
+    let modes = tracking(MouseTracking::Press, MouseFormat::Legacy);
+    reports(
+        &modes,
+        &[
+            (down(0, 0).into(), b"\x1b[M !!"),
+            (moved(0, 3, 1).into(), b""),
+            (up(0, 3).into(), b""),
+            (down(1, 1).button(2).ctrl().alt().into(), b"\x1b[M\"\"\""),
+            (up(1, 1).button(2).into(), b""),
+            (down(1, 1).button(1).into(), b"\x1b[M!\"\""),
+            (up(1, 1).button(1).into(), b""),
+            (down(1, 1).button(3).into(), b""),
+            (up(1, 1).button(3).into(), b""),
+            (pixels(100.0).into(), b""),
+        ],
+    );
+    // Not even on the alternate screen: xterm takes the wheel.
+    let mut input = mouse_input(GRID);
+    let full_screen = Modes {
+        alternate_screen: true,
+        ..modes
+    };
+    assert_eq!(input.handle(pixels(100.0).into(), &full_screen), None);
+}
+
+#[test]
+fn drags_are_reported_in_1002_and_every_move_in_1003() {
+    // 1000: presses and releases. A drag is the program's, and not reported.
+    reports(
+        &tracking(MouseTracking::Click, MouseFormat::Sgr),
+        &[
+            (down(0, 0).into(), b"\x1b[<0;1;1M"),
+            (moved(0, 1, 1).into(), b""),
+            (up(0, 1).into(), b"\x1b[<0;2;1m"),
+            (moved(0, 2, 0).into(), b""),
+        ],
+    );
+    // 1002: moves while a button is held, 32 added.
+    reports(
+        &tracking(MouseTracking::Drag, MouseFormat::Sgr),
+        &[
+            (down(0, 0).into(), b"\x1b[<0;1;1M"),
+            (moved(0, 1, 1).into(), b"\x1b[<32;2;1M"),
+            (moved(1, 1, 1).into(), b"\x1b[<32;2;2M"),
+            (up(1, 1).into(), b"\x1b[<0;2;2m"),
+            (moved(1, 2, 0).into(), b""),
+        ],
+    );
+    // 1003: every move, with no button 3.
+    reports(
+        &tracking(MouseTracking::Motion, MouseFormat::Legacy),
+        &[
+            (moved(0, 0, 0).into(), b"\x1b[MC!!"),
+            (down(0, 0).into(), b"\x1b[M !!"),
+            (moved(0, 1, 1).into(), b"\x1b[M@\"!"),
+            (up(0, 1).into(), b"\x1b[M#\"!"),
+            (moved(0, 2, 0).into(), b"\x1b[MC#!"),
+        ],
+    );
+}
+
+#[test]
+fn a_move_is_reported_only_in_another_cell() {
+    let modes = tracking(MouseTracking::Motion, MouseFormat::Sgr);
+    reports(
+        &modes,
+        &[
+            (moved(0, 0, 0).x(1.0).into(), b"\x1b[<35;1;1M"),
+            (moved(0, 0, 0).x(9.0).into(), b""),
+            (moved(0, 0, 0).x(11.0).into(), b"\x1b[<35;2;1M"),
+            // A press is where the next move is reported from, as in xterm.
+            (down(1, 1).into(), b"\x1b[<0;2;2M"),
+            (moved(1, 1, 1).x(19.0).into(), b""),
+            (moved(1, 2, 1).into(), b"\x1b[<32;3;2M"),
+        ],
+    );
+}
+
+#[test]
+fn motion_names_the_lowest_button_held() {
+    // xterm's FirstBitN: the middle button before the right one.
+    let modes = tracking(MouseTracking::Drag, MouseFormat::Sgr);
+    reports(
+        &modes,
+        &[
+            (down(0, 0).button(2).into(), b"\x1b[<2;1;1M"),
+            (down(0, 0).button(1).buttons(2 | 4).into(), b"\x1b[<1;1;1M"),
+            (moved(0, 1, 2 | 4).into(), b"\x1b[<33;2;1M"),
+            (up(0, 1).button(1).buttons(2).into(), b"\x1b[<1;2;1m"),
+            (moved(0, 2, 2).into(), b"\x1b[<34;3;1M"),
+            (up(0, 2).button(2).into(), b"\x1b[<2;3;1m"),
+        ],
+    );
+}
+
+#[test]
+fn alt_and_ctrl_are_reported_and_option_is_alt_on_macos() {
+    // xterm's Meta, which is Alt, is 8, and Ctrl 16.
+    let modes = tracking(MouseTracking::Drag, MouseFormat::Sgr);
+    reports(
+        &modes,
+        &[
+            (down(0, 0).alt().into(), b"\x1b[<8;1;1M"),
+            (moved(0, 1, 1).alt().ctrl().into(), b"\x1b[<56;2;1M"),
+            (up(0, 1).ctrl().into(), b"\x1b[<16;2;1m"),
+            (
+                WheelEvent {
+                    modifiers: Modifiers {
+                        ctrl: true,
+                        alt: true,
+                        ..Modifiers::default()
+                    },
+                    ..pixels(20.0)
+                }
+                .into(),
+                b"\x1b[<89;3;2M",
+            ),
+        ],
+    );
+    // Option is Alt on a key that types nothing, and a click types nothing.
+    let mut mac = InputHandler::on(true);
+    mac.resize(GRID);
+    assert_eq!(
+        bytes(&mut mac, &modes, down(0, 0).alt()),
+        b"\x1b[<8;1;1M".to_vec()
+    );
+}
+
+#[test]
+fn shift_keeps_the_gesture_for_selection() {
+    // Shift+drag selects while a program has the mouse (TERM-10, Appendix A), and Shift may be
+    // let go before the button: the gesture stays Twominal's.
+    let modes = tracking(MouseTracking::Motion, MouseFormat::Sgr);
+    let mut input = mouse_input(GRID);
+    let press = pointer(&mut input, &modes, down(1, 2).shift().detail(1));
+    assert_eq!(
+        press,
+        Pointer {
+            kind: PointerKind::Press,
+            button: Some(Button::Left),
+            row: 1,
+            col: 2,
+            right_half: false,
+            clicks: 1,
+            modifiers: Modifiers {
+                shift: true,
+                ..Modifiers::default()
+            },
+        }
+    );
+    let drag = pointer(&mut input, &modes, moved(1, 5, 1));
+    assert_eq!(
+        (drag.kind, drag.button, drag.col),
+        (PointerKind::Drag, Some(Button::Left), 5)
+    );
+    let release = pointer(&mut input, &modes, up(1, 6));
+    assert_eq!((release.kind, release.col), (PointerKind::Release, 6));
+    // A move with Shift is Twominal's too, and one without the program's again.
+    assert_eq!(
+        pointer(&mut input, &modes, moved(1, 7, 0).shift()).kind,
+        PointerKind::Hover
+    );
+    assert_eq!(
+        bytes(&mut input, &modes, down(1, 7)),
+        b"\x1b[<0;8;2M".to_vec()
+    );
+}
+
+#[test]
+fn cmd_keeps_the_gesture_for_links() {
+    // Cmd+click opens a link on macOS (TERM-20), and xterm's reports have no Cmd.
+    let modes = tracking(MouseTracking::Click, MouseFormat::Sgr);
+    let mut input = mouse_input(GRID);
+    let press = pointer(&mut input, &modes, down(3, 4).meta());
+    assert_eq!(
+        (press.kind, press.row, press.col),
+        (PointerKind::Press, 3, 4)
+    );
+    assert!(press.modifiers.meta);
+    assert_eq!(
+        pointer(&mut input, &modes, up(3, 4).meta()).kind,
+        PointerKind::Release
+    );
+    // The wheel with Cmd scrolls the view.
+    let turned = WheelEvent {
+        modifiers: Modifiers {
+            meta: true,
+            ..Modifiers::default()
+        },
+        ..pixels(40.0)
+    };
+    assert_eq!(
+        input.handle(turned.into(), &modes),
+        Some(Action::Scroll(2.0))
+    );
+}
+
+#[test]
+fn a_gesture_stays_with_whoever_it_started_with() {
+    // Shift pressed during the program's drag does not take it.
+    let modes = tracking(MouseTracking::Drag, MouseFormat::Sgr);
+    reports(
+        &modes,
+        &[
+            (down(0, 0).into(), b"\x1b[<0;1;1M"),
+            (moved(0, 1, 1).shift().into(), b"\x1b[<32;2;1M"),
+            (
+                down(0, 1).button(2).buttons(1 | 2).shift().into(),
+                b"\x1b[<2;2;1M",
+            ),
+            (
+                up(0, 1).button(2).buttons(1).shift().into(),
+                b"\x1b[<2;2;1m",
+            ),
+            (up(0, 1).shift().into(), b"\x1b[<0;2;1m"),
+        ],
+    );
+    // When the program stops asking in the middle of its gesture, the rest goes nowhere.
+    let mut input = mouse_input(GRID);
+    bytes(&mut input, &modes, down(0, 0));
+    let off = Modes::default();
+    assert_eq!(input.handle(moved(0, 3, 1).into(), &off), None);
+    assert_eq!(input.handle(up(0, 3).into(), &off), None);
+    // And Twominal's stays Twominal's when the program starts asking.
+    let mut input = mouse_input(GRID);
+    pointer(&mut input, &off, down(0, 0));
+    assert_eq!(
+        pointer(&mut input, &modes, up(0, 0)).kind,
+        PointerKind::Release
+    );
+}
+
+#[test]
+fn a_gesture_whose_release_was_lost_is_released() {
+    // The button came up where the window did not see it. The program hears the release
+    // where the mouse is now, before what the event itself sends.
+    let modes = tracking(MouseTracking::Drag, MouseFormat::Sgr);
+    reports(
+        &modes,
+        &[
+            (down(0, 0).into(), b"\x1b[<0;1;1M"),
+            (moved(0, 3, 0).into(), b"\x1b[<0;4;1m"),
+            (moved(0, 4, 0).into(), b""),
+            (down(0, 0).into(), b"\x1b[<0;1;1M"),
+            (down(1, 1).button(2).into(), b"\x1b[<0;2;2m\x1b[<2;2;2M"),
+            (up(1, 1).button(2).into(), b"\x1b[<2;2;2m"),
+        ],
+    );
+    // Twominal's gesture ends where the move is.
+    let mut input = mouse_input(GRID);
+    let off = Modes::default();
+    pointer(&mut input, &off, down(0, 0).detail(2));
+    let release = pointer(&mut input, &off, moved(2, 3, 0));
+    assert_eq!(
+        (
+            release.kind,
+            release.button,
+            release.row,
+            release.col,
+            release.clicks
+        ),
+        (PointerKind::Release, Some(Button::Left), 2, 3, 2)
+    );
+    assert_eq!(
+        pointer(&mut input, &off, moved(2, 4, 0)).kind,
+        PointerKind::Hover
+    );
+}
+
+#[test]
+fn a_button_going_down_again_was_let_go_unseen() {
+    // The DOM never presses a button that is down, so its release was lost.
+    let modes = tracking(MouseTracking::Drag, MouseFormat::Sgr);
+    reports(
+        &modes,
+        &[
+            (down(0, 0).into(), b"\x1b[<0;1;1M"),
+            (down(1, 1).into(), b"\x1b[<0;2;2m\x1b[<0;2;2M"),
+            (up(1, 1).into(), b"\x1b[<0;2;2m"),
+        ],
+    );
+    // Twominal's gesture is released, and ownership is chosen again at the next press.
+    let mut input = mouse_input(GRID);
+    pointer(&mut input, &modes, down(0, 0).shift());
+    assert_eq!(
+        pointer(&mut input, &modes, down(1, 1)).kind,
+        PointerKind::Release
+    );
+    // A program that stopped asking while its gesture was lost hears nothing, and the press is
+    // Twominal's.
+    let mut input = mouse_input(GRID);
+    bytes(&mut input, &modes, down(0, 0));
+    let off = Modes::default();
+    assert_eq!(
+        pointer(&mut input, &off, down(1, 1)).kind,
+        PointerKind::Press
+    );
+}
+
+#[test]
+fn an_event_that_cannot_go_with_a_lost_release_is_dropped() {
+    // One action an event: the release, and what the event sends the program with it, but
+    // nothing that is Twominal's. The event is then as if it had not come.
+    let modes = tracking(MouseTracking::Drag, MouseFormat::Sgr);
+    let mut input = mouse_input(GRID);
+    bytes(&mut input, &modes, down(0, 0));
+    assert_eq!(
+        bytes(&mut input, &modes, down(1, 1).button(2).shift()),
+        b"\x1b[<0;2;2m".to_vec()
+    );
+    // So the right button's drag and release are of no gesture.
+    assert_eq!(
+        pointer(&mut input, &modes, moved(1, 2, 2).shift()).kind,
+        PointerKind::Hover
+    );
+    assert_eq!(
+        input.handle(up(1, 2).button(2).shift().into(), &modes),
+        None
+    );
+    // Twominal's gesture is released, and the press that showed it was lost is dropped.
+    let off = Modes::default();
+    let mut input = mouse_input(GRID);
+    pointer(&mut input, &off, down(0, 0));
+    let release = pointer(&mut input, &off, down(1, 1).button(2));
+    assert_eq!(
+        (release.kind, release.button),
+        (PointerKind::Release, Some(Button::Left))
+    );
+    assert_eq!(input.handle(up(1, 1).button(2).into(), &off), None);
+}
+
+#[test]
+fn a_release_without_a_press_is_not_reported() {
+    // A button pressed outside the grid, then let go over it, is no gesture here.
+    reports(
+        &tracking(MouseTracking::Drag, MouseFormat::Sgr),
+        &[
+            (moved(0, 1, 1).into(), b""),
+            (up(0, 1).into(), b""),
+            (up(0, 1).button(9).into(), b""),
+        ],
+    );
+    // With every move asked for, the move counts as one with no button.
+    reports(
+        &tracking(MouseTracking::Motion, MouseFormat::Sgr),
+        &[
+            (moved(0, 1, 1).into(), b"\x1b[<35;2;1M"),
+            (up(0, 1).into(), b""),
+        ],
+    );
+    let mut input = mouse_input(GRID);
+    assert_eq!(input.handle(up(0, 1).into(), &Modes::default()), None);
+}
+
+#[test]
+fn reports_clamp_positions_outside_the_grid() {
+    // While a button is held the mouse is followed outside the grid, and xterm clamps it.
+    let modes = tracking(MouseTracking::Drag, MouseFormat::Sgr);
+    let mut input = mouse_input(GRID);
+    let cases: [(Click, &[u8]); 4] = [
+        (down(1, 1), b"\x1b[<0;2;2M"),
+        (moved(0, 0, 1).x(-50.0).y(-50.0), b"\x1b[<32;1;1M"),
+        (moved(0, 0, 1).x(5000.0).y(5000.0), b"\x1b[<32;80;24M"),
+        (up(0, 0).x(801.0).y(-1.0), b"\x1b[<0;80;1m"),
+    ];
+    for (event, expected) in cases {
+        assert_eq!(bytes(&mut input, &modes, event), expected.to_vec());
+    }
+}
+
+#[test]
+fn local_gestures_say_which_cell_and_half() {
+    let off = Modes::default();
+    let mut input = mouse_input(GRID);
+    let place = |pointer: Pointer| (pointer.row, pointer.col, pointer.right_half);
+    // The left half of the cell at row 1 and column 1, then its right half.
+    let press = pointer(&mut input, &off, down(0, 0).x(14.0).y(25.0).detail(3));
+    assert_eq!(place(press), (1, 1, false));
+    let drag = pointer(&mut input, &off, moved(0, 0, 1).x(16.0).y(25.0));
+    assert_eq!(
+        (drag.kind, place(drag), drag.clicks),
+        (PointerKind::Drag, (1, 1, true), 3)
+    );
+    // No action for a move that stays in the half.
+    assert_eq!(
+        input.handle(moved(0, 0, 1).x(19.0).y(39.0).into(), &off),
+        None
+    );
+    // Outside the grid it is not clamped, so a selection can scroll on.
+    let drag = pointer(&mut input, &off, moved(0, 0, 1).x(-15.0).y(-30.0));
+    assert_eq!(place(drag), (-2, -2, true));
+    let release = pointer(&mut input, &off, up(0, 0).x(805.0).y(500.0));
+    assert_eq!(
+        (release.kind, place(release), release.clicks),
+        (PointerKind::Release, (25, 80, true), 3)
+    );
+    // With no button, a move is a hover, for a link's target (TERM-20).
+    let hover = pointer(&mut input, &off, moved(3, 3, 0));
+    assert_eq!(
+        (hover.kind, hover.button, place(hover)),
+        (PointerKind::Hover, None, (3, 3, false))
+    );
+    assert_eq!(input.handle(moved(3, 3, 0).into(), &off), None);
+    // Cmd going down over a link shows where it goes, without a move to another cell.
+    assert!(
+        pointer(&mut input, &off, moved(3, 3, 0).meta())
+            .modifiers
+            .meta
+    );
+    // A right click, for the context menu (UI-04), and a middle one, for the primary
+    // selection (SW-05).
+    for button in [Button::Right, Button::Middle] {
+        let dom = if button == Button::Right { 2 } else { 1 };
+        let press = pointer(&mut input, &off, down(3, 3).button(dom));
+        assert_eq!(
+            (press.kind, press.button),
+            (PointerKind::Press, Some(button))
+        );
+        pointer(&mut input, &off, up(3, 3).button(dom));
+    }
+}
+
+#[test]
+fn a_wheel_notch_is_one_report() {
+    // However many rows the OS makes of a notch, a program hears one step, and scrolls by its
+    // own: 100 pixels is five rows here.
+    let modes = tracking(MouseTracking::Click, MouseFormat::Sgr);
+    reports(
+        &modes,
+        &[
+            (pixels(100.0).into(), b"\x1b[<65;3;2M"),
+            (pixels(-100.0).into(), b"\x1b[<64;3;2M"),
+            (wheel(0.0, 3.0, DeltaMode::Line).into(), b"\x1b[<65;3;2M"),
+            (wheel(0.0, -1.0, DeltaMode::Page).into(), b"\x1b[<64;3;2M"),
+        ],
+    );
+    reports(
+        &tracking(MouseTracking::Click, MouseFormat::Legacy),
+        &[(pixels(100.0).into(), b"\x1b[Ma#\"")],
+    );
+}
+
+#[test]
+fn trackpad_pixels_add_up_to_rows() {
+    // A trackpad gives a few pixels at a time: a report each time they make a row of 20.
+    let modes = tracking(MouseTracking::Click, MouseFormat::Sgr);
+    let mut input = mouse_input(GRID);
+    let sent: Vec<bool> = (0..9)
+        .map(|_| !bytes(&mut input, &modes, pixels(7.0)).is_empty())
+        .collect();
+    assert_eq!(
+        sent,
+        [false, false, true, false, false, true, false, false, true]
+    );
+}
+
+#[test]
+fn tenths_of_a_row_make_a_row() {
+    // Ten turns of 2 pixels of 20 make a row, though in floating point they come to a hair
+    // less.
+    let modes = tracking(MouseTracking::Click, MouseFormat::Sgr);
+    let mut input = mouse_input(GRID);
+    let sent: Vec<bool> = (0..10)
+        .map(|_| !bytes(&mut input, &modes, pixels(2.0)).is_empty())
+        .collect();
+    assert_eq!(sent.iter().position(|&sent| sent), Some(9));
+    let full_screen = Modes {
+        alternate_screen: true,
+        ..Modes::default()
+    };
+    let keys: Vec<Vec<u8>> = (0..10)
+        .map(|_| bytes(&mut input, &full_screen, wheel(0.0, 0.1, DeltaMode::Line)))
+        .collect();
+    assert_eq!(keys[9], b"\x1b[B".to_vec());
+    assert!(keys[..9].iter().all(Vec::is_empty));
+}
+
+#[test]
+fn a_flick_is_not_owed_later() {
+    // A large turn is one report, and what was left over is no more than part of a row, so
+    // the program does not keep scrolling once the trackpad stops.
+    let modes = tracking(MouseTracking::Click, MouseFormat::Sgr);
+    reports(
+        &modes,
+        &[
+            (pixels(250.0).into(), b"\x1b[<65;3;2M"),
+            (pixels(5.0).into(), b""),
+            (pixels(5.0).into(), b"\x1b[<65;3;2M"),
+            (pixels(1.0).into(), b""),
+        ],
+    );
+}
+
+#[test]
+fn the_wheel_turning_back_starts_again() {
+    // What was turned one way does not have to be undone the other.
+    let modes = tracking(MouseTracking::Click, MouseFormat::Sgr);
+    reports(
+        &modes,
+        &[
+            (pixels(15.0).into(), b""),
+            (pixels(-15.0).into(), b""),
+            (pixels(-10.0).into(), b"\x1b[<64;3;2M"),
+        ],
+    );
+}
+
+#[test]
+fn line_and_page_deltas() {
+    let modes = tracking(MouseTracking::Click, MouseFormat::Sgr);
+    reports(
+        &modes,
+        &[
+            (wheel(0.0, 0.5, DeltaMode::Line).into(), b""),
+            (wheel(0.0, 0.5, DeltaMode::Line).into(), b"\x1b[<65;3;2M"),
+        ],
+    );
+    // The view scrolls by rows, a page being the screen's.
+    let mut input = mouse_input(GRID);
+    let off = Modes::default();
+    for (event, rows) in [
+        (pixels(10.0), 0.5),
+        (pixels(-60.0), -3.0),
+        (wheel(0.0, 2.0, DeltaMode::Line), 2.0),
+        (wheel(0.0, -1.0, DeltaMode::Page), -24.0),
+    ] {
+        assert_eq!(input.handle(event.into(), &off), Some(Action::Scroll(rows)));
+    }
+}
+
+#[test]
+fn only_the_leading_axis_is_reported() {
+    // A trackpad drifts: only the axis the wheel turned most counts, sideways 66 and 67.
+    let modes = tracking(MouseTracking::Click, MouseFormat::Sgr);
+    reports(
+        &modes,
+        &[
+            (wheel(30.0, 10.0, DeltaMode::Pixel).into(), b"\x1b[<67;3;2M"),
+            (wheel(2.0, 40.0, DeltaMode::Pixel).into(), b"\x1b[<65;3;2M"),
+            (wheel(-30.0, 0.0, DeltaMode::Pixel).into(), b"\x1b[<66;3;2M"),
+            // Sideways drift adds nothing up.
+            (wheel(9.0, 20.0, DeltaMode::Pixel).into(), b"\x1b[<65;3;2M"),
+            (wheel(9.0, 20.0, DeltaMode::Pixel).into(), b"\x1b[<65;3;2M"),
+            // The pixels are compared, not the cells: 12 is less than 20, though more columns
+            // than rows.
+            (wheel(12.0, 20.0, DeltaMode::Pixel).into(), b"\x1b[<65;3;2M"),
+        ],
+    );
+    // The view does not scroll sideways.
+    let mut input = mouse_input(GRID);
+    assert_eq!(
+        input.handle(wheel(30.0, 0.0, DeltaMode::Pixel).into(), &Modes::default()),
+        None
+    );
+}
+
+#[test]
+fn alternate_scroll_sends_the_cursor_keys() {
+    // On the alternate screen, a program that did not ask for the mouse gets a cursor key for
+    // each row, as the key sends it (1007).
+    let full_screen = Modes {
+        alternate_screen: true,
+        ..Modes::default()
+    };
+    reports(
+        &full_screen,
+        &[
+            (pixels(60.0).into(), b"\x1b[B\x1b[B\x1b[B"),
+            (pixels(-25.0).into(), b"\x1b[A"),
+            (pixels(-10.0).into(), b""),
+            (pixels(-5.0).into(), b"\x1b[A"),
+            (wheel(0.0, 1.0, DeltaMode::Line).into(), b"\x1b[B"),
+            // Sideways is no key.
+            (wheel(-30.0, 0.0, DeltaMode::Pixel).into(), b""),
+        ],
+    );
+    // In application cursor mode, as less and vim have it.
+    reports(
+        &Modes {
+            application_cursor: true,
+            ..full_screen
+        },
+        &[(pixels(40.0).into(), b"\x1bOB\x1bOB")],
+    );
+    // With the kitty keyboard protocol, as kitty sends them: released too, when asked.
+    reports(
+        &Modes {
+            keyboard: Keyboard::new(0b11),
+            ..full_screen
+        },
+        &[(pixels(-20.0).into(), b"\x1b[A\x1b[1;1:3A")],
+    );
+    // No more than a screen of keys, however far it turned.
+    let mut input = mouse_input(GRID);
+    assert_eq!(
+        bytes(&mut input, &full_screen, pixels(1e9)),
+        b"\x1b[B".repeat(24)
+    );
+    // On the primary screen, or with 1007 off, the view scrolls instead.
+    for modes in [
+        Modes::default(),
+        Modes {
+            alternate_scroll: false,
+            ..full_screen
+        },
+    ] {
+        assert_eq!(
+            input.handle(pixels(60.0).into(), &modes),
+            Some(Action::Scroll(3.0))
+        );
+    }
+}
+
+#[test]
+fn the_wheel_scrolls_locally_otherwise() {
+    // With Shift over a program that has the mouse, the view scrolls. macOS and Chromium turn
+    // a wheel sideways while Shift is held, so a sideways turn is rows then.
+    let modes = tracking(MouseTracking::Motion, MouseFormat::Sgr);
+    let mut input = mouse_input(GRID);
+    let shift = Modifiers {
+        shift: true,
+        ..Modifiers::default()
+    };
+    for (event, rows) in [
+        (pixels(40.0), 2.0),
+        (wheel(40.0, 0.0, DeltaMode::Pixel), 2.0),
+        (wheel(-1.0, 0.0, DeltaMode::Line), -1.0),
+    ] {
+        let event = WheelEvent {
+            modifiers: shift,
+            ..event
+        };
+        assert_eq!(
+            input.handle(event.into(), &modes),
+            Some(Action::Scroll(rows))
+        );
+    }
+    // Shift on the alternate screen scrolls the view too, not the program.
+    let full_screen = Modes {
+        alternate_screen: true,
+        ..Modes::default()
+    };
+    let event = WheelEvent {
+        modifiers: shift,
+        ..pixels(40.0)
+    };
+    assert_eq!(
+        input.handle(event.into(), &full_screen),
+        Some(Action::Scroll(2.0))
+    );
+}
+
+#[test]
+fn nothing_the_webview_sends_can_panic_or_flood() {
+    // The webview's numbers are not trusted. Whatever they are, with whatever modes and grid,
+    // nothing panics, and no event sends more than a screen of cursor keys.
+    let numbers = [
+        0.0,
+        -0.0,
+        0.4,
+        -1.0,
+        19.9,
+        20.0,
+        1e300,
+        -1e300,
+        f64::MIN_POSITIVE,
+        f64::MAX,
+        f64::NAN,
+        f64::INFINITY,
+        f64::NEG_INFINITY,
+    ];
+    let cells = [10.0, 1e-300, 1e300, 0.0, -5.0, f64::NAN];
+    let sizes = [(0, 0), (1, 1), (80, 24), (u16::MAX, u16::MAX)];
+    let mut seed: u64 = 0x9e37_79b9_7f4a_7c15;
+    let mut next = |bound: usize| {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        (seed % bound as u64) as usize
+    };
+    let mut input = mouse_input(GRID);
+    let mut screen = GRID.size.rows;
+    for step in 0..50_000 {
+        if step % 500 == 0 {
+            let (cols, rows) = sizes[next(sizes.len())];
+            screen = rows;
+            input.resize(Grid {
+                size: Size { cols, rows },
+                cell_width: cells[next(cells.len())],
+                cell_height: cells[next(cells.len())],
+            });
+        }
+        let modifiers = Modifiers {
+            shift: next(4) == 0,
+            alt: next(2) == 1,
+            ctrl: next(2) == 1,
+            meta: next(4) == 0,
+            ..Modifiers::default()
+        };
+        let event = if next(3) == 0 {
+            InputEvent::Wheel(WheelEvent {
+                delta_x: numbers[next(numbers.len())],
+                delta_y: numbers[next(numbers.len())],
+                delta_mode: [DeltaMode::Pixel, DeltaMode::Line, DeltaMode::Page][next(3)],
+                x: numbers[next(numbers.len())],
+                y: numbers[next(numbers.len())],
+                modifiers,
+            })
+        } else {
+            InputEvent::Mouse(MouseEvent {
+                kind: [MouseKind::Down, MouseKind::Up, MouseKind::Move][next(3)],
+                button: [-1, 0, 1, 2, 3, 4, 5, 99, i16::MIN][next(9)],
+                buttons: [0, 1, 2, 3, 31, 0xffff][next(6)],
+                detail: [0, 1, 2, 3, u32::MAX][next(5)],
+                x: numbers[next(numbers.len())],
+                y: numbers[next(numbers.len())],
+                modifiers,
+            })
+        };
+        let modes = Modes {
+            mouse: [
+                MouseTracking::Off,
+                MouseTracking::Press,
+                MouseTracking::Click,
+                MouseTracking::Drag,
+                MouseTracking::Motion,
+            ][next(5)],
+            mouse_format: [
+                MouseFormat::Legacy,
+                MouseFormat::Utf8,
+                MouseFormat::Sgr,
+                MouseFormat::Urxvt,
+            ][next(4)],
+            alternate_screen: next(2) == 1,
+            alternate_scroll: next(2) == 1,
+            application_cursor: next(2) == 1,
+            keyboard: Keyboard::new(next(32) as u8),
+            ..Modes::default()
+        };
+        match input.handle(event.clone(), &modes) {
+            // A cursor key with the kitty protocol's release is 13 bytes, and a report or
+            // the releases of the five buttons less than 200.
+            Some(Action::Send(bytes)) => assert!(
+                bytes.len() <= usize::from(screen) * 13 + 200,
+                "{} bytes for {event:?}",
+                bytes.len()
+            ),
+            Some(Action::Scroll(rows)) => assert!(rows.is_finite(), "{rows} for {event:?}"),
+            _ => {}
+        }
+    }
 }

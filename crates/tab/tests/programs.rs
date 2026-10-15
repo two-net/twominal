@@ -1,11 +1,11 @@
 //! Real programs, shown by the Terminal Core and typed into through the Input Handler
-//! (TERM-01 to TERM-04, TERM-06, TERM-08, TERM-09, TERM-11).
+//! (TERM-01 to TERM-04, TERM-06, TERM-08 to TERM-11).
 //!
 //! Each test starts a program on a pseudo-terminal through the Session, as a tab does, and
-//! passes what it writes to a Terminal Core, which answers its queries. Keys, pastes and focus
-//! changes go through the Input Handler, by the modes the program set, as DOM events. The Tab
-//! will do that itself with #31; here the test does. A test whose program is not installed
-//! says so, and passes.
+//! passes what it writes to a Terminal Core, which answers its queries. Keys, pastes, focus
+//! changes, the mouse and the wheel go through the Input Handler, by the modes the program set,
+//! as DOM events, on cells of 10 by 20 pixels. The Tab will do that itself with #31; here the
+//! test does. A test whose program is not installed says so, and passes.
 //!
 //! Every program runs with an environment of its own and a home folder of the test's own, so
 //! nothing of the user's is read or written. These run on macOS and Linux.
@@ -20,14 +20,22 @@ use std::sync::mpsc::{sync_channel, Receiver};
 use std::time::{Duration, Instant};
 use std::{env, fs};
 
-use tab::input::{Action, InputEvent, InputHandler, KeyEvent, Modifiers};
+use tab::input::{
+    Action, DeltaMode, Grid, InputEvent, InputHandler, KeyEvent, Modifiers, MouseEvent, MouseKind,
+    WheelEvent,
+};
 use tab::session::{Output, Session, Shell, Start};
-use terminal_core::{Color, Event, Keyboard, Size, Style, TerminalCore, Underline};
+use terminal_core::{
+    Color, Event, Keyboard, MouseFormat, MouseTracking, Size, Style, TerminalCore, Underline,
+};
 
 /// How long a test waits for a program before it fails.
 const PATIENCE: Duration = Duration::from_secs(10);
 
 const SIZE: Size = Size { cols: 80, rows: 24 };
+
+/// The size of a cell, in CSS pixels.
+const CELL: (f64, f64) = (10.0, 20.0);
 
 /// A folder for one test, removed when the test ends.
 struct Folder(PathBuf);
@@ -89,6 +97,20 @@ fn press(key: &str, modifiers: Held) -> InputEvent {
     })
 }
 
+/// The DOM's event of the mouse's main button at the middle of the cell at `row` and `col`,
+/// counted from 0, with `buttons` held after it.
+fn mouse(kind: MouseKind, (row, col): (u16, u16), buttons: u16, modifiers: Held) -> InputEvent {
+    InputEvent::Mouse(MouseEvent {
+        kind,
+        button: 0,
+        buttons,
+        detail: u32::from(kind != MouseKind::Move),
+        x: (f64::from(col) + 0.5) * CELL.0,
+        y: (f64::from(row) + 0.5) * CELL.1,
+        modifiers: modifiers.0,
+    })
+}
+
 /// The modifiers held for a key.
 #[derive(Clone, Copy, Default)]
 struct Held(Modifiers);
@@ -125,6 +147,17 @@ impl Terminal {
     /// Runs `words` in `home`, which is also its home folder, with nothing in its environment
     /// but what a terminal gives, `program`'s folder on the `PATH`, and `environment`.
     fn run(home: &Path, program: &str, words: &[&str], environment: &[(&str, &str)]) -> Self {
+        Self::run_sized(home, program, words, environment, SIZE)
+    }
+
+    /// Runs `words` as `run` does, on a terminal of `size`.
+    fn run_sized(
+        home: &Path,
+        program: &str,
+        words: &[&str],
+        environment: &[(&str, &str)],
+        size: Size,
+    ) -> Self {
         let folder = Path::new(program).parent().unwrap().to_str().unwrap();
         let mut command: Vec<String> =
             ["/usr/bin/env", "-i", "TERM=xterm-256color", "LANG=C.UTF-8"]
@@ -150,7 +183,7 @@ impl Terminal {
         let start = Start {
             shell: Shell::Command(command),
             directory: Some(home.to_path_buf()),
-            size: SIZE,
+            size,
             name: "Twominal".to_string(),
             version: "9.9.9".to_string(),
             integration: false,
@@ -160,11 +193,17 @@ impl Terminal {
             let _ = sender.send(output);
         })
         .expect("the program starts");
+        let mut input = InputHandler::new();
+        input.resize(Grid {
+            size,
+            cell_width: CELL.0,
+            cell_height: CELL.1,
+        });
         Self {
             session,
             output,
-            core: TerminalCore::new(SIZE, None),
-            input: InputHandler::new(),
+            core: TerminalCore::new(size, None),
+            input,
         }
     }
 
@@ -211,6 +250,34 @@ impl Terminal {
         if let Some(Action::Send(bytes)) = self.input.handle(event, self.core.modes()) {
             self.session.write(bytes);
         }
+    }
+
+    /// The mouse's main button going down at the cell at `row` and `col`, from 0, and coming
+    /// up where `to` is, through each cell between them on its row.
+    fn drag(&mut self, (row, col): (u16, u16), to: (u16, u16), modifiers: Held) {
+        self.input(mouse(MouseKind::Down, (row, col), 1, modifiers));
+        let mut at = col;
+        while at != to.1 {
+            at = if at < to.1 { at + 1 } else { at - 1 };
+            self.input(mouse(MouseKind::Move, (row, at), 1, modifiers));
+        }
+        self.input(mouse(MouseKind::Move, to, 1, modifiers));
+        self.input(mouse(MouseKind::Up, to, 0, modifiers));
+    }
+
+    fn click(&mut self, at: (u16, u16), modifiers: Held) {
+        self.drag(at, at, modifiers);
+    }
+
+    /// The wheel turned down `pixels`, or up when negative, over the top left cell.
+    fn wheel(&mut self, pixels: f64) {
+        self.input(InputEvent::Wheel(WheelEvent {
+            delta_y: pixels,
+            delta_mode: DeltaMode::Pixel,
+            x: 5.0,
+            y: 10.0,
+            ..WheelEvent::default()
+        }));
     }
 
     /// Types `text` a key at a time, each as the DOM reports it on a US keyboard.
@@ -702,4 +769,190 @@ fn vim_hears_the_focus_come_and_go() {
     vim.type_text(":q!");
     vim.input(press("Enter", held()));
     vim.until_exit();
+}
+
+// ---------------------------------------------------------------------------------------
+// The mouse and the wheel
+// ---------------------------------------------------------------------------------------
+
+/// vim editing `file` with the mouse on and Esc read at once.
+fn vim_with_the_mouse(vim: &str, file: &str) -> String {
+    format!("'{vim}' -u NONE -N -n -i NONE --cmd 'set mouse=a ttimeout ttimeoutlen=10' {file}")
+}
+
+impl Terminal {
+    /// Whether the program asked for drags reported with SGR's extended coordinates.
+    fn reports_sgr_drags(&self) -> bool {
+        let modes = self.core.modes();
+        modes.mouse == MouseTracking::Drag && modes.mouse_format == MouseFormat::Sgr
+    }
+
+    fn cursor_at(&self, row: u16, col: u16) -> bool {
+        let cursor = self.core.cursor();
+        (cursor.row, cursor.col) == (row, col)
+    }
+}
+
+#[test]
+fn vim_asks_for_sgr_reports_and_keeps_underline_colors() {
+    let Some(vim) = installed("vim") else { return };
+    let home = Folder::new();
+    fs::write(home.0.join("notes.txt"), "alpha\n").unwrap();
+    let script = vim_with_the_mouse(&vim, "notes.txt");
+    let mut vim = Terminal::run(&home.0, &vim, &["/bin/sh", "-c", &script], &[]);
+
+    // vim asks for SGR reports with drags (TERM-10). Since 9.0.1168 its own entry for xterm
+    // says it may; before, DA2's version had to be 277 or more. And it keeps the code for
+    // underline colors, which it empties when the version is from 95 to 2499 (TERM-05).
+    vim.until("SGR reports", |vim| vim.reports_sgr_drags());
+    vim.keys(":echo &ttymouse empty(&t_8u)\r");
+    vim.until("what vim chose", |vim| {
+        vim.rows()[SIZE.rows as usize - 1] == "sgr 0"
+    });
+
+    vim.keys("\x1b:q!\r");
+    vim.until_exit();
+}
+
+#[test]
+fn vim_moves_its_cursor_and_selects_with_the_mouse() {
+    let Some(vim) = installed("vim") else { return };
+    let home = Folder::new();
+    fs::write(home.0.join("notes.txt"), "alpha\nbeta\ngamma\n").unwrap();
+    let script = vim_with_the_mouse(&vim, "notes.txt");
+    let mut vim = Terminal::run(&home.0, &vim, &["/bin/sh", "-c", &script], &[]);
+    vim.until("SGR reports", |vim| {
+        vim.reports_sgr_drags() && vim.rows()[1..3] == ["beta", "gamma"]
+    });
+
+    // A click puts the cursor there.
+    vim.click((2, 3), held());
+    vim.until("the cursor on the m", |vim| vim.cursor_at(2, 3));
+    // A drag selects, and d deletes what it selected: "et".
+    vim.drag((1, 1), (1, 2), held());
+    vim.until("the cursor at the drag's end", |vim| vim.cursor_at(1, 2));
+    vim.keys("d");
+    vim.until("the selection gone", |vim| vim.rows()[1] == "ba");
+    // With Shift the mouse is not vim's, so the cursor stays and x deletes the a.
+    vim.click((2, 0), held().shift(true));
+    vim.keys("x");
+    vim.until("the a gone", |vim| vim.rows()[1] == "b");
+    assert_eq!(vim.rows()[2], "gamma", "{}", vim.dump());
+
+    vim.keys("\x1b:q!\r");
+    vim.until_exit();
+}
+
+#[test]
+fn vim_scrolls_with_the_wheel() {
+    let Some(vim) = installed("vim") else { return };
+    let home = Folder::new();
+    let lines: String = (1..=100).map(|line| format!("line {line}\n")).collect();
+    fs::write(home.0.join("lines.txt"), lines).unwrap();
+    let script = vim_with_the_mouse(&vim, "lines.txt");
+    let mut vim = Terminal::run(&home.0, &vim, &["/bin/sh", "-c", &script], &[]);
+    vim.until("SGR reports", |vim| {
+        vim.reports_sgr_drags() && vim.rows()[1] == "line 2"
+    });
+
+    // A notch of 100 pixels is one step, which vim scrolls 3 lines by ('mousescroll').
+    vim.wheel(100.0);
+    vim.until("3 lines down", |vim| vim.rows()[0] == "line 4");
+    // A trackpad's few pixels at a time make a step once they make a row.
+    for _ in 0..3 {
+        vim.wheel(7.0);
+    }
+    vim.until("3 more", |vim| vim.rows()[0] == "line 7");
+    vim.wheel(-100.0);
+    vim.until("3 lines up", |vim| vim.rows()[0] == "line 4");
+
+    vim.keys("\x1b:q!\r");
+    vim.until_exit();
+}
+
+#[test]
+fn vim_takes_a_click_past_column_223() {
+    let Some(vim) = installed("vim") else { return };
+    let home = Folder::new();
+    // SGR's coordinates go on where the legacy format's stop (TERM-10).
+    let line = format!("{}|{}", "-".repeat(250), "-".repeat(40));
+    fs::write(home.0.join("wide.txt"), format!("{line}\n")).unwrap();
+    let script = vim_with_the_mouse(&vim, "wide.txt");
+    let size = Size {
+        cols: 300,
+        rows: 24,
+    };
+    let mut vim = Terminal::run_sized(&home.0, &vim, &["/bin/sh", "-c", &script], &[], size);
+    vim.until("SGR reports and the wide line", |vim| {
+        vim.reports_sgr_drags() && vim.rows()[0] == line
+    });
+
+    vim.click((0, 250), held());
+    vim.until("the cursor on the bar", |vim| vim.cursor_at(0, 250));
+
+    vim.keys("\x1b:q!\r");
+    vim.until_exit();
+}
+
+#[test]
+fn less_scrolls_with_the_wheel_through_the_cursor_keys() {
+    let Some(less) = installed("less") else {
+        return;
+    };
+    let home = Folder::new();
+    let lines: String = (1..=100).map(|line| format!("line {line}\n")).collect();
+    fs::write(home.0.join("lines.txt"), lines).unwrap();
+    let mut less = Terminal::run(
+        &home.0,
+        &less,
+        &[&less, "lines.txt"],
+        &[("LESSHISTFILE", "-")],
+    );
+    let top = |less: &Terminal| less.rows()[0].clone();
+    less.until("the first page", |less| {
+        less.alternate() && top(less) == "line 1"
+    });
+    assert_eq!(less.core.modes().mouse, MouseTracking::Off);
+
+    // less did not ask for the mouse, so the wheel is the cursor keys on the alternate screen,
+    // a key a row, in the application mode less turned on (1007).
+    less.wheel(60.0);
+    less.until("3 lines down", |less| top(less) == "line 4");
+    less.wheel(-20.0);
+    less.until("a line up", |less| top(less) == "line 3");
+
+    less.keys("q");
+    less.until_exit();
+}
+
+#[test]
+fn less_with_its_mouse_option_scrolls_by_reported_wheel_events() {
+    let Some(less) = installed("less") else {
+        return;
+    };
+    let home = Folder::new();
+    let lines: String = (1..=100).map(|line| format!("line {line}\n")).collect();
+    fs::write(home.0.join("lines.txt"), lines).unwrap();
+    let mut less = Terminal::run(
+        &home.0,
+        &less,
+        &[&less, "--mouse", "lines.txt"],
+        &[("LESSHISTFILE", "-")],
+    );
+    let top = |less: &Terminal| less.rows()[0].clone();
+    less.until("the first page, with the mouse reported", |less| {
+        less.core.modes().mouse != MouseTracking::Off && top(less) == "line 1"
+    });
+
+    // Each report is a step of one line, as --wheel-lines has it: three rows turned at once
+    // are one report.
+    less.wheel(60.0);
+    less.until("a line down", |less| top(less) == "line 2");
+    less.wheel(20.0);
+    less.until("another", |less| top(less) == "line 3");
+    less.wheel(-100.0);
+    less.until("a line up", |less| top(less) == "line 2");
+
+    less.keys("q");
+    less.until_exit();
 }

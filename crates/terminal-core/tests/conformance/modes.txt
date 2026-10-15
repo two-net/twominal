@@ -8,7 +8,7 @@ mode application_keypad on
 mode bracketed_paste on
 mode focus on
 mode mouse drag
-mode mouse_sgr on
+mode mouse_format sgr
 mode cursor_visible off
 mode newline on
 
@@ -22,6 +22,50 @@ send \e[?9h
 mode mouse press
 send \e[?1000h
 mode mouse click
+
+## The mouse's formats exclude each other
+# xterm's extend_coords: setting a format makes it the one in use, and resetting one that is
+# not in use does nothing.
+size 10x2
+mode mouse_format legacy
+send \e[?1006h
+mode mouse_format sgr
+send \e[?1015h
+mode mouse_format urxvt
+send \e[?1006l
+mode mouse_format urxvt
+send \e[?1015l
+mode mouse_format legacy
+send \e[?1005h
+mode mouse_format utf8
+send \e[?1006;1015h
+mode mouse_format urxvt
+send \e[?1015;1006h\e[?1006l
+mode mouse_format legacy
+
+## SGR-pixel reports are not done
+# Twominal reports no pixel sizes, so a program could not tell cells by them (DESIGN.md §3).
+# The format in use stays.
+size 10x2
+send \e[?1006h\e[?1016h
+mode mouse_format sgr
+send \e[?1016l
+mode mouse_format sgr
+
+## Turning tracking off keeps the format
+size 10x2
+send \e[?1002h\e[?1006h\e[?1002l
+mode mouse off
+mode mouse_format sgr
+
+## Alternate scroll is on until a program turns it off
+# xterm's is off until a program turns it on (DESIGN.md §3).
+size 10x2
+mode alternate_scroll on
+send \e[?1007l
+mode alternate_scroll off
+send \e[?1007h
+mode alternate_scroll on
 
 ## The keypad modes are set by ESC = and ESC >, and by mode 66
 size 10x2

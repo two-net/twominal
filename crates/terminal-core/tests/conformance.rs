@@ -19,8 +19,9 @@
 //! cursor 2;2                                              counted from 1, as CUP counts
 //! reply \e[?62;22c                                        the next reply not yet checked
 //! mode bracketed_paste on                                 a field of `Modes`: `on` or
-//! mode keyboard 5                                         `off`, the mouse's tracking, or
-//!                                                         the keyboard flags' number
+//! mode keyboard 5                                         `off`, the mouse's tracking or
+//!                                                         format, or the keyboard flags'
+//!                                                         number
 //! style r bold foreground 1                               `r` stands for this style below
 //! styles                                                  every row again, a letter for the
 //! |rr..|                                                  style of each cell
@@ -49,7 +50,9 @@ use std::collections::{BTreeSet, VecDeque};
 use std::fs;
 use std::path::Path;
 
-use terminal_core::{Color, Event, Modes, MouseTracking, Size, Style, TerminalCore, Underline};
+use terminal_core::{
+    Color, Event, Modes, MouseFormat, MouseTracking, Size, Style, TerminalCore, Underline,
+};
 
 #[test]
 fn every_case_passes() {
@@ -136,7 +139,8 @@ const MODES: &[&str] = &[
     "bracketed_paste",
     "focus",
     "mouse",
-    "mouse_sgr",
+    "mouse_format",
+    "alternate_scroll",
     "keyboard",
 ];
 
@@ -681,7 +685,14 @@ fn mode(modes: &Modes, name: &str) -> String {
         "newline" => on(modes.newline),
         "bracketed_paste" => on(modes.bracketed_paste),
         "focus" => on(modes.focus),
-        "mouse_sgr" => on(modes.mouse_sgr),
+        "mouse_format" => match modes.mouse_format {
+            MouseFormat::Legacy => "legacy",
+            MouseFormat::Utf8 => "utf8",
+            MouseFormat::Sgr => "sgr",
+            MouseFormat::Urxvt => "urxvt",
+        }
+        .to_string(),
+        "alternate_scroll" => on(modes.alternate_scroll),
         "mouse" => match modes.mouse {
             MouseTracking::Off => "off",
             MouseTracking::Press => "press",

@@ -39,10 +39,13 @@ pub struct Modes {
     pub bracketed_paste: bool,
     /// Focus in and out is reported (TERM-11, #20).
     pub focus: bool,
-    /// Which mouse events are reported (TERM-10, #21).
+    /// Which mouse events are reported (TERM-10).
     pub mouse: MouseTracking,
-    /// Mouse events are reported with SGR's extended coordinates (TERM-10, #21).
-    pub mouse_sgr: bool,
+    /// How they are written (TERM-10).
+    pub mouse_format: MouseFormat,
+    /// The wheel sends the cursor keys on the alternate screen when the mouse is not reported
+    /// (1007). On until a program turns it off, where xterm has it off until it is turned on.
+    pub alternate_scroll: bool,
     /// How keys are encoded: the kitty keyboard protocol's flags in use on the screen being
     /// shown, or none for xterm's encoding (TERM-08, TERM-09).
     pub keyboard: Keyboard,
@@ -59,7 +62,8 @@ impl Default for Modes {
             bracketed_paste: false,
             focus: false,
             mouse: MouseTracking::Off,
-            mouse_sgr: false,
+            mouse_format: MouseFormat::Legacy,
+            alternate_scroll: true,
             keyboard: Keyboard::default(),
         }
     }
@@ -78,6 +82,23 @@ pub enum MouseTracking {
     Drag,
     /// Those, and every move (mode 1003).
     Motion,
+}
+
+/// How mouse events are written for the program (TERM-10). The formats exclude each other, as
+/// xterm's `extend_coords`: setting one makes it the one in use, and resetting one that is not
+/// in use does nothing.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum MouseFormat {
+    /// `CSI M` and a byte for the button and each coordinate, which stop at 223.
+    #[default]
+    Legacy,
+    /// Those, with coordinates past 95 as two bytes of UTF-8, up to 2015 (mode 1005).
+    Utf8,
+    /// `CSI < b;x;y M`, and `m` for a release, in decimal: SGR's extended coordinates
+    /// (mode 1006).
+    Sgr,
+    /// `CSI b;x;y M`, in decimal: urxvt's extended coordinates (mode 1015).
+    Urxvt,
 }
 
 /// A mode a program sets and resets by its number: with SM and RM, or with DECSET and DECRST
@@ -103,7 +124,9 @@ pub(crate) enum Mode {
     Focus,
     BracketedPaste,
     Mouse(MouseTracking),
-    MouseSgr,
+    /// 1005, 1006 and 1015. Never `Legacy`, which no mode names.
+    MouseFormat(MouseFormat),
+    AlternateScroll,
 }
 
 impl Mode {
@@ -119,7 +142,9 @@ impl Mode {
 
     /// The DEC private mode DECSET and DECRST name with `number`.
     pub(crate) fn dec(number: u16) -> Option<Self> {
-        // Not 3, which would resize the screen to 132 columns and clear it.
+        // Not 3, which would resize the screen to 132 columns and clear it. Not 1001, xterm's
+        // highlight tracking, nor 1016, whose reports are in pixels: Twominal reports no pixel
+        // sizes, so a program could not tell cells by them.
         Some(match number {
             1 => Self::ApplicationCursor,
             6 => Self::Origin,
@@ -132,7 +157,10 @@ impl Mode {
             1002 => Self::Mouse(MouseTracking::Drag),
             1003 => Self::Mouse(MouseTracking::Motion),
             1004 => Self::Focus,
-            1006 => Self::MouseSgr,
+            1005 => Self::MouseFormat(MouseFormat::Utf8),
+            1006 => Self::MouseFormat(MouseFormat::Sgr),
+            1007 => Self::AlternateScroll,
+            1015 => Self::MouseFormat(MouseFormat::Urxvt),
             1047 => Self::AlternateCleared,
             1048 => Self::SaveCursor,
             1049 => Self::AlternateSaved,
@@ -909,7 +937,13 @@ impl Terminal {
             Mode::Mouse(tracking) => {
                 self.modes.mouse = if on { tracking } else { MouseTracking::Off }
             }
-            Mode::MouseSgr => self.modes.mouse_sgr = on,
+            Mode::MouseFormat(format) if on => self.modes.mouse_format = format,
+            Mode::MouseFormat(format) => {
+                if self.modes.mouse_format == format {
+                    self.modes.mouse_format = MouseFormat::Legacy;
+                }
+            }
+            Mode::AlternateScroll => self.modes.alternate_scroll = on,
         }
         // Each screen has flags of its own, so switching changes the ones in use.
         self.keyboard_changed();
@@ -932,7 +966,8 @@ impl Terminal {
             Mode::Focus => self.modes.focus,
             Mode::BracketedPaste => self.modes.bracketed_paste,
             Mode::Mouse(tracking) => self.modes.mouse == tracking,
-            Mode::MouseSgr => self.modes.mouse_sgr,
+            Mode::MouseFormat(format) => self.modes.mouse_format == format,
+            Mode::AlternateScroll => self.modes.alternate_scroll,
         })
     }
 
@@ -955,7 +990,8 @@ impl Terminal {
     /// The screen being shown forgets its saved cursor; the other keeps its own. The style goes
     /// back to the default whole, as the VT510's does, where xterm's leaves dim, crossed-out and
     /// double-underlined text on. The kitty keyboard protocol's flags are forgotten on both
-    /// screens, as kitty forgets them.
+    /// screens, as kitty forgets them. The mouse modes stay, as in xterm, which resets them only
+    /// for RIS.
     pub(crate) fn soft_reset(&mut self) {
         self.modes.cursor_visible = true;
         self.modes.application_cursor = false;
