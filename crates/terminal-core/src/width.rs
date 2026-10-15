@@ -11,9 +11,11 @@
 use unicode_width::UnicodeWidthChar;
 
 /// How many cells `char` takes: 1, 2 for a wide character, or 0 for one that joins the
-/// character before it. Inlined for plain text, which needs no table (PERF-06).
+/// character before it. Inlined for plain text, which needs no table (PERF-06). The Renderer
+/// lays out the text being composed with it, so that text takes the cells it will take once
+/// it is printed.
 #[inline]
-pub(crate) fn width(char: char) -> usize {
+pub fn width(char: char) -> usize {
     if (' '..'\u{7f}').contains(&char) {
         1
     } else {

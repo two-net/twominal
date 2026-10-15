@@ -1,20 +1,23 @@
-//! Real programs, shown by the Terminal Core and typed into through the Input Handler
-//! (TERM-01 to TERM-04, TERM-06, TERM-08 to TERM-11).
+//! Real programs, shown by the Terminal Core, typed into through the Input Handler and drawn by
+//! the Renderer (TERM-01 to TERM-06, TERM-08 to TERM-11, FONT-10).
 //!
 //! Each test starts a program on a pseudo-terminal through the Session, as a tab does, and
 //! passes what it writes to a Terminal Core, which answers its queries. Keys, pastes, focus
 //! changes, the mouse and the wheel go through the Input Handler, by the modes the program set,
-//! as DOM events, on cells of 10 by 20 pixels. The Tab will do that itself with #31; here the
-//! test does. A test whose program is not installed says so, and passes.
+//! as DOM events, on cells of 10 by 20 pixels. The Renderer turns the screen into frames, which
+//! are read back as the webview reads them. The Tab will do that itself with #31; here the test
+//! does. A test whose program is not installed says so, and passes.
 //!
 //! Every program runs with an environment of its own and a home folder of the test's own, so
 //! nothing of the user's is read or written. These run on macOS and Linux.
 
 #![cfg(unix)]
 
+use std::iter::Peekable;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::str::Chars;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{sync_channel, Receiver};
 use std::time::{Duration, Instant};
@@ -24,6 +27,7 @@ use tab::input::{
     Action, DeltaMode, Grid, InputEvent, InputHandler, KeyEvent, Modifiers, MouseEvent, MouseKind,
     WheelEvent,
 };
+use tab::render::{Measure, Palette, Renderer, Rgb};
 use tab::session::{Output, Session, Shell, Start};
 use terminal_core::{
     Color, Event, Keyboard, MouseFormat, MouseTracking, Size, Style, TerminalCore, Underline,
@@ -955,4 +959,379 @@ fn less_with_its_mouse_option_scrolls_by_reported_wheel_events() {
 
     less.keys("q");
     less.until_exit();
+}
+
+// ---------------------------------------------------------------------------------------
+// The Renderer
+// ---------------------------------------------------------------------------------------
+
+/// A palette whose ANSI colors are told apart at a glance.
+fn palette() -> Palette {
+    Palette {
+        foreground: Rgb::new(200, 200, 200),
+        background: Rgb::new(10, 10, 10),
+        ansi: std::array::from_fn(|index| Rgb::new(index as u8, 0, 100 + index as u8)),
+    }
+}
+
+/// What the webview measures of a terminal area of 80 by 24 cells of 10 by 20 pixels, at scale 1.
+fn measure() -> Measure {
+    Measure {
+        scale: 1.0,
+        font: "monospace".to_string(),
+        font_size: 15.0,
+        advance: 10.0,
+        ascent: 15.0,
+        descent: 5.0,
+        width: 800.0,
+        height: 480.0,
+    }
+}
+
+/// A JSON value, as the webview reads a frame.
+#[derive(Clone, Debug, PartialEq)]
+enum Json {
+    Null,
+    Bool(bool),
+    Number(f64),
+    String(String),
+    Array(Vec<Json>),
+    Object(Vec<(String, Json)>),
+}
+
+impl Json {
+    /// Reads `text`, which must be one JSON value and nothing more.
+    fn read(text: &str) -> Self {
+        let mut reader = Reader(text.chars().peekable());
+        let value = reader.value();
+        reader.space();
+        assert_eq!(reader.0.next(), None, "text after the value in {text}");
+        value
+    }
+
+    fn get(&self, key: &str) -> Option<&Json> {
+        match self {
+            Json::Object(entries) => entries
+                .iter()
+                .find(|(name, _)| name == key)
+                .map(|(_, value)| value),
+            _ => None,
+        }
+    }
+
+    fn items(&self) -> &[Json] {
+        match self {
+            Json::Array(items) => items,
+            other => panic!("{other:?} is not an array"),
+        }
+    }
+
+    fn number(&self) -> f64 {
+        match self {
+            Json::Number(number) => *number,
+            other => panic!("{other:?} is not a number"),
+        }
+    }
+
+    fn text(&self) -> &str {
+        match self {
+            Json::String(text) => text,
+            other => panic!("{other:?} is not a string"),
+        }
+    }
+}
+
+/// Reads JSON as `JSON.parse` does, but for the escapes no frame needs.
+struct Reader<'a>(Peekable<Chars<'a>>);
+
+impl Reader<'_> {
+    fn space(&mut self) {
+        while self
+            .0
+            .next_if(|char| matches!(char, ' ' | '\t' | '\n' | '\r'))
+            .is_some()
+        {}
+    }
+
+    fn expect(&mut self, word: &str) {
+        for char in word.chars() {
+            assert_eq!(self.0.next(), Some(char), "in {word}");
+        }
+    }
+
+    fn value(&mut self) -> Json {
+        self.space();
+        match self.0.peek().copied() {
+            Some('{') => {
+                self.0.next();
+                let mut entries = Vec::new();
+                self.space();
+                if self.0.next_if_eq(&'}').is_some() {
+                    return Json::Object(entries);
+                }
+                loop {
+                    self.space();
+                    let key = self.string();
+                    self.space();
+                    self.expect(":");
+                    entries.push((key, self.value()));
+                    self.space();
+                    match self.0.next() {
+                        Some(',') => {}
+                        Some('}') => return Json::Object(entries),
+                        other => panic!("{other:?} in an object"),
+                    }
+                }
+            }
+            Some('[') => {
+                self.0.next();
+                let mut items = Vec::new();
+                self.space();
+                if self.0.next_if_eq(&']').is_some() {
+                    return Json::Array(items);
+                }
+                loop {
+                    items.push(self.value());
+                    self.space();
+                    match self.0.next() {
+                        Some(',') => {}
+                        Some(']') => return Json::Array(items),
+                        other => panic!("{other:?} in an array"),
+                    }
+                }
+            }
+            Some('"') => Json::String(self.string()),
+            Some('t') => {
+                self.expect("true");
+                Json::Bool(true)
+            }
+            Some('f') => {
+                self.expect("false");
+                Json::Bool(false)
+            }
+            Some('n') => {
+                self.expect("null");
+                Json::Null
+            }
+            _ => {
+                let mut number = String::new();
+                while let Some(char) = self
+                    .0
+                    .next_if(|char| matches!(char, '-' | '+' | '.' | 'e' | 'E' | '0'..='9'))
+                {
+                    number.push(char);
+                }
+                // What Rust reads but JSON does not: `.5`, and `05`.
+                let leading = number.trim_start_matches('-');
+                let zeros = leading.starts_with('0')
+                    && leading[1..].starts_with(|c: char| c.is_ascii_digit());
+                assert!(!(leading.starts_with('.') || zeros), "{number}");
+                Json::Number(
+                    number
+                        .parse()
+                        .unwrap_or_else(|_| panic!("{number:?} is no number")),
+                )
+            }
+        }
+    }
+
+    fn string(&mut self) -> String {
+        self.expect("\"");
+        let mut text = String::new();
+        loop {
+            match self.0.next().expect("the string ends") {
+                '"' => return text,
+                '\\' => match self.0.next() {
+                    Some('u') => {
+                        let hex: String = (0..4).map(|_| self.0.next().unwrap()).collect();
+                        let unit = u32::from_str_radix(&hex, 16).unwrap();
+                        text.push(char::from_u32(unit).expect("a character, not half of one"));
+                    }
+                    Some(char @ ('"' | '\\' | '/')) => text.push(char),
+                    other => panic!("\\{other:?} in a frame"),
+                },
+                char if char < ' ' => panic!("{char:?} is not escaped"),
+                char => text.push(char),
+            }
+        }
+    }
+}
+
+/// The colors a frame names, as the webview writes them.
+fn hex(color: Rgb) -> String {
+    format!("#{:02x}{:02x}{:02x}", color.red, color.green, color.blue)
+}
+
+/// The runs of `row` of `frame`: each one's column, text, cells if drawn whole, color and flags.
+fn runs(frame: &Json, row: usize) -> Vec<(usize, String, Option<usize>, String, usize)> {
+    let colors = frame.get("colors").unwrap().items();
+    let styles = frame.get("styles").unwrap().items();
+    let row = frame
+        .get("rows")
+        .unwrap()
+        .items()
+        .iter()
+        .find(|found| found.items()[0].number() as usize == row);
+    row.unwrap_or_else(|| panic!("no row {row:?} in {frame:?}"))
+        .items()[2]
+        .items()
+        .iter()
+        .map(|run| {
+            let run = run.items();
+            let style = styles[run[1].number() as usize].items();
+            (
+                run[0].number() as usize,
+                run[2].text().to_string(),
+                run.get(3).map(|cells| cells.number() as usize),
+                colors[style[0].number() as usize].text().to_string(),
+                style[1].number() as usize,
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn the_renderer_draws_what_sh_prints() {
+    let home = Folder::new();
+    // SGR's colors of three kinds and attributes; box drawing, blocks and a powerline arrow;
+    // a wide character, and a combining mark.
+    let script = "printf '\x1b[31mred\x1b[0m \x1b[38;5;208morange\x1b[0m \x1b[38;2;1;2;3mrgb\x1b[0m \x1b[1;3;4mfat\x1b[0m\\n'; \
+                  printf '┌─┬─┐ ╔═╦═╗ ▀▄█░ \u{E0B0} 界 e\u{301}!\\n'";
+    let mut sh = Terminal::run(&home.0, "/bin/sh", &["/bin/sh", "-c", script], &[]);
+    sh.until_exit();
+    assert!(sh.shows("fat") && sh.shows("界"), "{}", sh.dump());
+
+    let mut renderer = Renderer::new(palette());
+    let layout = renderer.measure(&measure()).unwrap();
+    assert_eq!(layout.size, SIZE);
+    let frame = Json::read(&renderer.frame(&sh.core, "").unwrap().json());
+    let full = frame.get("full").expect("a first frame with the layout");
+    assert_eq!(
+        full.get("cell"),
+        Some(&Json::Array(vec![Json::Number(10.0), Json::Number(20.0)]))
+    );
+    assert_eq!(
+        frame.get("rows").unwrap().items().len(),
+        usize::from(SIZE.rows)
+    );
+
+    let foreground = hex(palette().foreground);
+    assert_eq!(
+        runs(&frame, 0),
+        [
+            (0, "red".to_string(), None, hex(palette().ansi[1]), 0),
+            (4, "orange".to_string(), None, "#ff8700".to_string(), 0),
+            (11, "rgb".to_string(), None, "#010203".to_string(), 0),
+            // Bold, italic and underlined: 1, 2 and a single underline's 8.
+            (15, "fat".to_string(), None, foreground.clone(), 11),
+        ]
+    );
+    let lines = "┌─┬─┐ ╔═╦═╗ ▀▄█░ \u{E0B0}";
+    assert_eq!(
+        runs(&frame, 1),
+        [
+            (0, lines.to_string(), None, foreground.clone(), 0),
+            (19, "界".to_string(), Some(2), foreground.clone(), 0),
+            (22, "e\u{301}".to_string(), Some(1), foreground.clone(), 0),
+            (23, "!".to_string(), None, foreground, 0),
+        ]
+    );
+    let shapes = frame.get("shapes").unwrap();
+    for char in lines.chars().filter(|char| *char != ' ') {
+        let shape = shapes
+            .get(&char.to_string())
+            .unwrap_or_else(|| panic!("no shape for {char}"));
+        assert!(!shape.items().is_empty(), "{char}");
+    }
+    assert_eq!(shapes.get("界"), None);
+}
+
+#[test]
+fn the_renderer_paints_vims_colors_and_the_background_it_erases_in() {
+    let Some(vim) = installed("vim") else { return };
+    let home = Folder::new();
+    fs::write(home.0.join("notes.txt"), "alpha\nbeta\n").unwrap();
+    let mut vim = Terminal::run(
+        &home.0,
+        &vim,
+        &[
+            &vim,
+            "-u",
+            "NONE",
+            "-N",
+            "-n",
+            "-i",
+            "NONE",
+            "--cmd",
+            "set termguicolors",
+            "-c",
+            "highlight Normal guifg=#c0c0c0 guibg=#203040",
+            "-c",
+            "highlight NonText guifg=#ff8000 cterm=bold,italic,underline gui=bold,italic,underline",
+            "notes.txt",
+        ],
+        &[],
+    );
+    vim.until("the file in its colors", |vim| {
+        let rows = vim.core.screen().rows();
+        vim.alternate()
+            && vim.rows()[..3] == ["alpha", "beta", "~"]
+            && rows.iter().all(|row| {
+                row.cells()
+                    .iter()
+                    .all(|cell| cell.style().background == Color::Rgb(0x20, 0x30, 0x40))
+            })
+    });
+
+    let mut renderer = Renderer::new(palette());
+    renderer.measure(&measure()).unwrap();
+    let frame = Json::read(&renderer.frame(&vim.core, "").unwrap().json());
+    let colors = frame.get("colors").unwrap().items();
+    for row in frame.get("rows").unwrap().items() {
+        // Every row is one span of vim's background, the whole width.
+        let spans = row.items()[1].items();
+        assert_eq!(spans.len(), 3, "{row:?}");
+        assert_eq!(
+            (spans[0].number(), spans[1].number()),
+            (0.0, f64::from(SIZE.cols))
+        );
+        assert_eq!(colors[spans[2].number() as usize].text(), "#203040");
+    }
+    assert_eq!(
+        runs(&frame, 0),
+        [(0, "alpha".to_string(), None, "#c0c0c0".to_string(), 0)]
+    );
+    // vim writes the rest of the row in NonText's attributes, so its underline runs on.
+    let tilde = format!("~{}", " ".repeat(usize::from(SIZE.cols) - 1));
+    assert_eq!(
+        runs(&frame, 2),
+        [(0, tilde, None, "#ff8000".to_string(), 11)]
+    );
+
+    vim.keys(":q!\r");
+    vim.until_exit();
+}
+
+#[test]
+fn typing_at_a_prompt_sends_one_row_in_a_small_frame() {
+    let home = Folder::new();
+    let mut sh = Terminal::run(&home.0, "/bin/sh", &["/bin/sh", "-i"], &[("PS1", "$ ")]);
+    sh.until("the prompt", |sh| sh.rows()[0] == "$");
+    let mut renderer = Renderer::new(palette());
+    renderer.measure(&measure()).unwrap();
+    let first = renderer.frame(&sh.core, "").unwrap().json();
+    assert!(Json::read(&first).get("full").is_some());
+
+    sh.keys("echo hi");
+    sh.until("the line typed", |sh| sh.rows()[0] == "$ echo hi");
+    let json = renderer.frame(&sh.core, "").unwrap().json();
+    let frame = Json::read(&json);
+    assert_eq!(frame.get("full"), None);
+    assert_eq!(frame.get("rows").unwrap().items().len(), 1);
+    assert_eq!(runs(&frame, 0)[0].1, "$ echo hi");
+    // Under 8 KB, a channel message goes to the webview in one step (DESIGN.md §9).
+    assert!(json.len() < 8 * 1024, "{} bytes", json.len());
+
+    sh.keys("\rexit\r");
+    sh.until_exit();
 }

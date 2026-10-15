@@ -34,10 +34,14 @@ body {
   display: none;
 }
 
-/* The Renderer's canvas goes here (#22). */
+/* The terminal area. The Renderer puts its canvas at its top left once a tab is attached
+   (#31), and paints the area's background in the terminal's. The canvas never sizes the
+   area: the window does. */
 #terminal {
   flex: 1;
   min-height: 0;
+  position: relative;
+  overflow: hidden;
 }
 
 /* Notices lie over the page and take no room from the terminal (UI-02). */

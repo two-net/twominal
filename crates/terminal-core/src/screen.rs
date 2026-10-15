@@ -2,10 +2,11 @@
 //!
 //! Knows nothing of escape sequences, the cursor or modes: `terminal.rs` decides what to do,
 //! and this file does it. Every change to the rows goes through the methods here, so the
-//! Renderer can learn what changed (#22) and the scrollback can take the rows that scroll off
-//! (#26), each in one place. None of them leaves half a wide character: a change to one of its
-//! cells blanks both, as xterm does. What a change blanks with is handed to it, because xterm
-//! blanks in the colors in use, and those are `terminal.rs`'s.
+//! scrollback can take the rows that scroll off in one place (#26). None of them leaves half a
+//! wide character: a change to one of its cells blanks both, as xterm does. What a change
+//! blanks with is handed to it, because xterm blanks in the colors in use, and those are
+//! `terminal.rs`'s. The Renderer is not told what changed: it compares the rows with the ones
+//! it drew last.
 
 use alloc::string::String;
 use alloc::vec;

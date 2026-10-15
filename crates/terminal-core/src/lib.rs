@@ -53,6 +53,7 @@ pub use screen::{Cell, Row, Screen};
 pub use style::{Color, Style, Underline};
 use terminal::Terminal;
 pub use terminal::{Cursor, Modes, MouseFormat, MouseTracking};
+pub use width::width;
 
 /// The most an operating system command may hold, a report of the shell integration included
 /// (DESIGN.md §7). vte keeps no more than this, so a report this long or longer was cut short,

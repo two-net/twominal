@@ -299,11 +299,15 @@ fn animation_policy_lives_in_the_animator() {
         if file.ends_with(".css") && css_animates(&strip(&text, Language::Css)) {
             problems.push(format!("{file} declares a transition or an animation"));
         }
+        // Terminal output never animates (ANIM-05): only the Animator may start one.
+        if !animator && file.ends_with(".js") && js_animates(&strip(&text, Language::JavaScript)) {
+            problems.push(format!("{file} starts an animation or a transition"));
+        }
     }
 
     assert_none(
         problems,
-        "every interface animation is run by the Animator (ARC-05, DESIGN.md §5)",
+        "every interface animation is run by the Animator, and output never animates (ARC-05, ANIM-05, DESIGN.md §5)",
     );
 }
 
@@ -695,6 +699,36 @@ fn css_animates(text: &str) -> bool {
     })
 }
 
+/// Whether a script starts an animation: calls the Web Animations API's `animate`, or sets a
+/// transition or an animation on an element's style.
+fn js_animates(text: &str) -> bool {
+    let after = |at: usize| text[at..].trim_start();
+    let calls = text.match_indices(".animate").any(|(start, found)| {
+        let rest = &text[start + found.len()..];
+        !rest.starts_with(is_identifier) && rest.trim_start().starts_with('(')
+    });
+    let quoted = |text: &str| text.trim_start_matches([' ', '"', '\'', '`']).to_string();
+    let styles = text.match_indices("style").any(|(start, found)| {
+        let before = text[..start].chars().next_back();
+        let rest = after(start + found.len());
+        // `style.name`, `style["name"]` or `style.setProperty("name", …)`.
+        let property = match rest.strip_prefix('.').map(str::trim_start) {
+            Some(name) => match name.strip_prefix("setProperty") {
+                Some(call) => call.trim_start().strip_prefix('(').map(quoted),
+                None => Some(name.to_string()),
+            },
+            None => rest.strip_prefix('[').map(quoted),
+        };
+        !before.is_some_and(is_identifier)
+            && property.is_some_and(|property| {
+                ["transition", "animation"]
+                    .iter()
+                    .any(|name| property.to_ascii_lowercase().starts_with(name))
+            })
+    });
+    calls || styles
+}
+
 // ---------------------------------------------------------------------------------------
 // Manifests and configuration
 // ---------------------------------------------------------------------------------------
@@ -854,6 +888,25 @@ fn js_imports_sees_every_way_to_import() {
         Some("src/tab/d.js")
     );
     assert_eq!(resolve("src/tabs.js", "left-pad"), None);
+}
+
+#[test]
+fn js_animates_sees_calls_and_styles_not_words() {
+    let animates = |js: &str| js_animates(&strip(js, Language::JavaScript));
+    assert!(animates("row.animate([{ opacity: 0 }], 150);"));
+    assert!(animates("tab.animate ([], { duration: 200 })"));
+    assert!(animates("canvas.style.transition = 'opacity 1s';"));
+    assert!(animates("canvas.style.animationName = 'spin';"));
+    assert!(animates("canvas.style['transition'] = 'none';"));
+    assert!(animates(
+        "canvas.style.setProperty('animation', 'spin 1s');"
+    ));
+    assert!(!animates("requestAnimationFrame(() => drawn());"));
+    assert!(!animates("const animate = 1; animated(); // row.animate()"));
+    assert!(!animates(
+        "canvas.style.width = `${width}px`; /* style.transition */"
+    ));
+    assert!(!animates("const transition = mystyle.transitionTime;"));
 }
 
 #[test]
