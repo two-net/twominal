@@ -23,6 +23,9 @@ use super::{
 #[derive(Clone, Debug, Default)]
 pub(crate) struct Mouse {
     grid: Option<Grid>,
+    /// How far up the view's rows are drawn, in rows: the part of a row the view is scrolled
+    /// past its top one (ANIM-06). A Pointer's row is the row drawn under it.
+    offset: f64,
     gesture: Option<Gesture>,
     /// The cell of the last report, so a move is reported only in another: xterm's
     /// `mouse_row` and `mouse_col`.
@@ -74,22 +77,23 @@ type Cell = (u16, u16);
 /// Where a mouse event fell.
 #[derive(Clone, Copy, Debug)]
 struct Place {
+    /// The row of the view drawn under it, which is scrolled `offset` rows up.
     row: i32,
     col: i32,
     right_half: bool,
-    /// The cell, clamped to the grid as xterm clamps what it reports.
+    /// The cell of the grid, clamped to it as xterm clamps what it reports.
     cell: Cell,
 }
 
 impl Place {
-    fn new(x: f64, y: f64, grid: Grid) -> Self {
+    fn new(x: f64, y: f64, grid: Grid, offset: f64) -> Self {
         let x = finite(x) / grid.cell_width;
         let y = finite(y) / grid.cell_height;
         let (col, row) = (x.floor(), y.floor());
         let clamp = |at: f64, count: u16| at.clamp(0.0, f64::from(count.max(1) - 1)) as u16;
         Self {
             // `as` saturates, and makes NaN 0.
-            row: row as i32,
+            row: (y + offset).floor() as i32,
             col: col as i32,
             right_half: x - col >= 0.5,
             cell: (clamp(row, grid.size.rows), clamp(col, grid.size.cols)),
@@ -103,6 +107,15 @@ impl Mouse {
         self.grid = (size(grid.cell_width) && size(grid.cell_height)).then_some(grid);
     }
 
+    /// How far up the view's rows are drawn, in rows. Anything but a part of a row is none.
+    pub(crate) fn set_offset(&mut self, offset: f64) {
+        self.offset = if (0.0..1.0).contains(&offset) {
+            offset
+        } else {
+            0.0
+        };
+    }
+
     /// How many rows the grid has, which is a page. None before there is a grid.
     pub(crate) fn page(&self) -> Option<f64> {
         self.grid.map(|grid| f64::from(grid.size.rows))
@@ -111,7 +124,7 @@ impl Mouse {
     /// What a button going down or up, or the mouse moving, means.
     pub(crate) fn event(&mut self, event: &MouseEvent, modes: &Modes) -> Option<Action> {
         let grid = self.grid?;
-        let place = Place::new(event.x, event.y, grid);
+        let place = Place::new(event.x, event.y, grid, self.offset);
         let button = Button::from_dom(event.button);
         let pressed = button.map_or(0, Button::bit);
         let (held, up) = match event.kind {
@@ -447,7 +460,7 @@ impl Mouse {
                     (_, true) => 66,
                     (_, false) => 67,
                 };
-                let place = Place::new(event.x, event.y, grid);
+                let place = Place::new(event.x, event.y, grid, self.offset);
                 let code = button | modifier_code(event.modifiers);
                 Some(Action::Send(self.report(code, false, place, modes)))
             }

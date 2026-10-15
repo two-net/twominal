@@ -1,11 +1,13 @@
-//! Tests of the Renderer (HW-03, FONT-10, TERM-03 to TERM-05, TERM-07, TERM-12, ANIM-07, ANIM-08): what
-//! the webview measured in and the layout out, the Terminal Core's screen in and frames out, the
-//! cursor, and every shape drawn into pixels here, to see that it stays in its cell and meets its
-//! neighbours.
+//! Tests of the Renderer (HW-03, FONT-08, FONT-10, TERM-03 to TERM-05, TERM-07, TERM-12, TERM-17,
+//! ANIM-07, ANIM-08): what the webview measured in and the layout out, the Terminal Core's screen
+//! and selection in and frames out, the cursor, and every shape drawn into pixels here, to see
+//! that it stays in its cell and meets its neighbours.
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use terminal_core::{Color, CursorShape, Size, Style, TerminalCore, ThemeColor, Underline};
+use terminal_core::{
+    Color, CursorShape, Place, Selecting, Size, Style, TerminalCore, ThemeColor, Underline,
+};
 
 use super::color::Ink;
 use super::shapes::{arms, decorations, is_shape, shape, CursorLook, Weight};
@@ -19,6 +21,7 @@ fn palette() -> Palette {
         ansi: std::array::from_fn(|index| Rgb::new(index as u8, 0, 100 + index as u8)),
         cursor: Rgb::new(250, 250, 0),
         cursor_text: Rgb::new(0, 0, 50),
+        selection: Rgb::new(60, 60, 120),
     }
 }
 
@@ -735,6 +738,28 @@ fn frames_add_up_to_what_a_full_frame_draws() {
                     ]);
                     core.interpret(set.as_bytes());
                 }
+                // The user selects, and drags the selection on.
+                14 | 15 => {
+                    let scrollback = core.scrollback();
+                    let size = core.size();
+                    let rows = scrollback.len() + usize::from(size.rows) + 2;
+                    let at = Place {
+                        row: scrollback.start() as i64 - 1 + random.below(rows) as i64,
+                        col: random.below(usize::from(size.cols) + 2) as i32 - 1,
+                        right_half: random.below(2) == 0,
+                    };
+                    if random.below(2) == 0 {
+                        let by = [
+                            Selecting::Characters,
+                            Selecting::Words,
+                            Selecting::Lines,
+                            Selecting::Block,
+                        ][random.below(4)];
+                        core.select(at, by);
+                    } else {
+                        core.extend(at);
+                    }
+                }
                 _ => {}
             }
             let composing = random.pick(&composings);
@@ -804,6 +829,123 @@ fn frames_add_up_to_what_a_full_frame_draws() {
         offsets >= 20 && shifts >= 200,
         "{offsets} offsets, {shifts} shifts"
     );
+}
+
+// ---------------------------------------------------------------------------------------
+// The selection (TERM-17, FONT-08)
+// ---------------------------------------------------------------------------------------
+
+/// Row `row` and column `col` of `core`'s screen, as a selection takes them.
+fn on(core: &TerminalCore, row: i64, col: i32, right_half: bool) -> Place {
+    let scrollback = core.scrollback();
+    Place {
+        row: (scrollback.start() + scrollback.len() as u64) as i64 + row,
+        col,
+        right_half,
+    }
+}
+
+fn indexes(frame: &Frame) -> Vec<u16> {
+    frame.rows.iter().map(|row| row.index).collect()
+}
+
+#[test]
+fn the_selection_is_drawn_on_the_selection_color_and_its_text_keeps_its_own() {
+    let mut core = core(8, 2, "abc\x1b[31mdef");
+    core.select(on(&core, 0, 1, false), Selecting::Characters);
+    core.extend(on(&core, 0, 4, true));
+    let frame = first(&core);
+    assert_eq!(
+        frame.rows[0].spans,
+        [Span {
+            col: 1,
+            count: 4,
+            color: palette().selection,
+        }]
+    );
+    assert_eq!(
+        texts(&frame.rows[0]),
+        [text(0, "a"), joined(1, "bc"), joined(3, "de"), text(5, "f")]
+    );
+    assert_eq!(ink_at(&frame, 1).color, palette().foreground);
+    assert_eq!(ink_at(&frame, 3).color, palette().ansi[1]);
+}
+
+#[test]
+fn only_the_rows_whose_selection_changed_are_sent() {
+    let mut core = core(6, 3, "one\r\ntwo\r\nsix");
+    let mut renderer = renderer(6, 3);
+    renderer.frame(&core, "").unwrap();
+    core.select(on(&core, 1, 0, false), Selecting::Lines);
+    assert_eq!(indexes(&renderer.frame(&core, "").unwrap()), [1]);
+    core.extend(on(&core, 2, 0, false));
+    assert_eq!(indexes(&renderer.frame(&core, "").unwrap()), [2]);
+    assert!(renderer.frame(&core, "").is_none());
+    core.unselect();
+    assert_eq!(indexes(&renderer.frame(&core, "").unwrap()), [1, 2]);
+}
+
+#[test]
+fn a_selection_ends_a_ligature_at_its_edge() {
+    // FONT-08: only the cells selected are highlighted, and `!=` comes apart there.
+    let mut core = core(20, 1, "a != b -> c");
+    core.select(on(&core, 0, 3, false), Selecting::Characters);
+    core.extend(on(&core, 0, 3, true));
+    let frame = first(&core);
+    assert_eq!(
+        texts(&frame.rows[0]),
+        [joined(0, "a !"), text(3, "="), joined(5, "b -> c")]
+    );
+    // Copying gives the characters, never the ligature.
+    assert_eq!(core.copy().as_deref(), Some("="));
+}
+
+#[test]
+fn a_wide_character_at_a_blocks_edge_is_highlighted_whole() {
+    let mut core = core(4, 2, "a中b\r\nwxyz");
+    core.select(on(&core, 0, 0, true), Selecting::Block);
+    core.extend(on(&core, 1, 2, false));
+    let frame = first(&core);
+    let selection = palette().selection;
+    assert_eq!(
+        frame.rows[0].spans,
+        [Span {
+            col: 1,
+            count: 2,
+            color: selection,
+        }]
+    );
+    assert_eq!(
+        frame.rows[1].spans,
+        [Span {
+            col: 1,
+            count: 1,
+            color: selection,
+        }]
+    );
+}
+
+#[test]
+fn the_last_frame_says_which_row_it_drew_where() {
+    // The lines 1 to 10, 7 of them in the scrollback, numbered from 0.
+    let core = numbered(10);
+    let mut renderer = renderer(6, 3);
+    assert_eq!((renderer.row_number(0), renderer.offset()), (None, 0.0));
+    renderer.frame(&core, "").unwrap();
+    assert_eq!((renderer.row_number(0), renderer.offset()), (Some(7), 0.0));
+    assert_eq!(renderer.row_number(-2), Some(5));
+    // Half a row back: the row cut at the top is the view's first, drawn half a row up.
+    renderer.scroll(&core, -2.5);
+    renderer.frame(&core, "").unwrap();
+    assert_eq!((renderer.row_number(0), renderer.offset()), (Some(4), 0.5));
+    assert_eq!(renderer.row_number(3), Some(7));
+    // A scroll not drawn yet, and a new cell, change nothing until the next frame.
+    renderer.scroll(&core, -1.0);
+    renderer.measure(&Measure {
+        ascent: 20.0,
+        ..measured(6, 3)
+    });
+    assert_eq!((renderer.row_number(0), renderer.offset()), (Some(4), 0.5));
 }
 
 // ---------------------------------------------------------------------------------------

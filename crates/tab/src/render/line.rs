@@ -1,10 +1,12 @@
 //! Each row as it is drawn, and how a frame sends it: the text as runs of cells drawn alike, and
 //! the backgrounds as spans.
 //!
-//! A row is built from the core's, with every color filled in, the text being composed laid
-//! over it (HW-01), and the cells that may join a ligature marked (FONT-04 to FONT-07). The
-//! Renderer compares rows built this way with the ones it sent last, so anything laid over the
-//! screen is drawn and sent the same way.
+//! A row is built from the core's, with every color filled in, the selection and the text being
+//! composed laid over it (TERM-17, HW-01), and the cells that may join a ligature marked (FONT-04
+//! to FONT-07). The Renderer compares rows built this way with the ones it sent last, so anything
+//! laid over the screen is drawn and sent the same way.
+
+use std::ops::Range;
 
 use terminal_core::{width, Row, Style};
 
@@ -90,6 +92,16 @@ pub(crate) fn draw(row: &Row, cols: usize, colors: &Colors) -> Line {
         line.resize(cols, Drawn::blank(colors.look(&Style::default())));
     }
     line
+}
+
+/// Gives the cells `cols` of `line`, which are selected, the background `selection` (TERM-17).
+/// Their text keeps its color. A selected cell then looks like no cell beside it that is not, so
+/// a ligature ends at the selection's edge and only the cells selected are highlighted (FONT-08).
+pub(crate) fn select(line: &mut Line, cols: Range<usize>, selection: Rgb) {
+    let end = cols.end.min(line.len());
+    for drawn in &mut line[cols.start.min(end)..end] {
+        drawn.look.background = selection;
+    }
 }
 
 /// Lays `text`, which an input method is composing, over `line` from column `col`, in the

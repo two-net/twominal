@@ -19,11 +19,13 @@
 //! `report.rs` reads what shell integration reports. `osc.rs` reads what the other operating
 //! system commands ask for: titles, the working directory, colors, links and the clipboard
 //! (TERM-12, TERM-13). `colors.rs` keeps the colors programs set, and `links.rs` the links
-//! they make. DESIGN.md §3 lists what is supported and what is ignored on purpose.
+//! they make. `select.rs` keeps what the user selected and gives the text copying takes
+//! (TERM-17). DESIGN.md §3 lists what is supported and what is ignored on purpose.
 //!
 //! Filled in by #16 (interpreter and screen model), #17 (conformance suite and fuzzing),
 //! #18 (Unicode), #19 (colors and attributes), #20 (keyboard flags), #21 (mouse modes), #26
-//! (scrollback and reflow), #27 (operating system commands and the bell) and #28–#30.
+//! (scrollback and reflow), #27 (operating system commands and the bell), #28 (selection) and
+//! #29–#30.
 
 #![no_std]
 #![forbid(unsafe_code)]
@@ -44,6 +46,7 @@ mod osc;
 mod report;
 mod screen;
 mod scrollback;
+mod select;
 mod style;
 mod terminal;
 #[cfg(test)]
@@ -62,6 +65,7 @@ pub use osc::{Clipboard, ClipboardQuery, Directory, Selection};
 pub use report::Report;
 pub use screen::{Cell, Row, Screen};
 pub use scrollback::Scrollback;
+pub use select::{Place, Selected, Selecting};
 pub use style::{Color, Style, Underline};
 use terminal::Terminal;
 pub use terminal::{Cursor, CursorShape, CursorStyle, Modes, MouseFormat, MouseTracking};
@@ -210,6 +214,52 @@ impl TerminalCore {
     /// The link a cell is part of, as [`Cell::link`] names it (TERM-13).
     pub fn link(&self, link: LinkId) -> Option<&Link> {
         self.terminal.link(link)
+    }
+
+    /// Row `number`, as [`Scrollback::start`] numbers the rows: of the scrollback or of the
+    /// screen shown. The alternate screen has no scrollback above it. None for a row there is
+    /// not.
+    pub fn row(&self, number: u64) -> Option<&Row> {
+        self.terminal.rows().get(number)
+    }
+
+    /// Starts a selection `by` at `at`, in place of the one there was (TERM-17): a press of the
+    /// mouse. A word or a line is taken whole. A place outside the rows and columns there are
+    /// is taken to the nearest.
+    pub fn select(&mut self, at: Place, by: Selecting) {
+        self.terminal.select(at, by);
+    }
+
+    /// Moves the selection's moving end to `to`, keeping what its start took: a drag. Without a
+    /// selection it does nothing.
+    pub fn extend(&mut self, to: Place) {
+        self.terminal.extend(to);
+    }
+
+    /// Selects everything from the oldest row there is to the last of the screen that has
+    /// something on it: Select All.
+    pub fn select_all(&mut self) {
+        self.terminal.select_all();
+    }
+
+    pub fn unselect(&mut self) {
+        self.terminal.unselect();
+    }
+
+    /// What is selected, for the Renderer to draw. None when nothing is. A change to a row it
+    /// covers, a resize, Clear, ED 3, RIS and a switch of screen end it. DESIGN.md §3
+    /// *Selection* has the rules.
+    pub fn selected(&self) -> Option<Selected<'_>> {
+        self.terminal.selected()
+    }
+
+    /// The text selected, as copying gives it (TERM-17): the characters the program wrote,
+    /// rows that wrap joined and the spaces at the end of each line removed. None when nothing
+    /// is selected, or nothing but blanks on one row, so that copying them leaves the clipboard
+    /// as it was.
+    pub fn copy(&self) -> Option<String> {
+        let text = self.selected()?.text();
+        (!text.is_empty()).then_some(text)
     }
 }
 

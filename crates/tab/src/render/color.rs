@@ -50,6 +50,8 @@ pub struct Palette {
     pub cursor: Rgb,
     /// The color of the text under a block cursor.
     pub cursor_text: Rgb,
+    /// The background of the cells selected (TERM-17). Their text keeps its color.
+    pub selection: Rgb,
 }
 
 /// The levels of each component in xterm's 6×6×6 cube, colors 16 to 231.
@@ -99,6 +101,8 @@ pub(crate) struct Colors {
     pub(crate) cursor: Rgb,
     /// The theme's: no program sets it.
     pub(crate) cursor_text: Rgb,
+    /// The theme's: no program sets it.
+    pub(crate) selection: Rgb,
     /// The 256 colors SGR names by number.
     indexed: [Rgb; 256],
 }
@@ -117,6 +121,7 @@ impl Colors {
             background: color(ThemeColor::Background),
             cursor: color(ThemeColor::Cursor),
             cursor_text: palette.cursor_text,
+            selection: palette.selection,
             indexed: std::array::from_fn(|index| color(ThemeColor::Palette(index as u8))),
         }
     }

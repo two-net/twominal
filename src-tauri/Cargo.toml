@@ -24,3 +24,4 @@ tab = { path = "../crates/tab" }
 toml_edit = "0.25"
 fontdb = "0.24"
 ttf-parser = { version = "0.25", default-features = false, features = ["std"] }
+arboard = { version = "3.6", default-features = false, features = ["wayland-data-control"] }

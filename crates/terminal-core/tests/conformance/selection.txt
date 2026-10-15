@@ -1,0 +1,564 @@
+# Selection (TERM-17): what a drag, a double-click, a triple-click, a block and Select All
+# select, the text copying gives, and when a selection ends. xterm is no model here: what a
+# selection takes follows DESIGN.md §3 *Selection*, and it ends when a row it covers changes,
+# as in kitty and Alacritty.
+
+## A drag selects from one boundary between cells to another
+size 6x2
+send abcdef\r\nghijkl
+select characters 1;2
+extend 2;3
+selected
+|.*****|
+|**....|
+copy bcdef\ngh
+
+## The right half of a cell is the boundary after it
+size 6x1
+send abcdef
+select characters 1;2+
+extend 1;4+
+selected
+|..**..|
+copy cd
+
+## A drag back selects the same cells
+size 6x1
+send abcdef
+select characters 1;5
+extend 1;2
+copy bcd
+
+## A click selects nothing
+size 6x1
+send abcdef
+select characters 1;2
+copy
+selected
+|......|
+
+## A press ends the selection there was
+size 6x1
+send abcdef
+select characters 1;1
+extend 1;6+
+copy abcdef
+select characters 1;3
+copy
+
+## Unselect ends it
+size 6x1
+send abcdef
+select characters 1;1
+extend 1;6+
+unselect
+copy
+
+## A wide character is selected whole, from either of its cells
+size 6x1
+send a中b
+select characters 1;3
+extend 1;5
+selected
+|.***..|
+copy 中b
+
+## Copying joins the rows of a line that wraps, and drops the spaces at the end of each line
+size 4x3
+send abcdefg\r\nhi\x20\x20
+screen
+|abcd|>
+|efg |
+|hi  |
+select characters 1;1
+extend 3;4+
+copy abcdefg\nhi
+
+## The spaces where a line wraps are part of it
+size 4x2
+send ab\x20\x20cd
+screen
+|ab  |>
+|cd  |
+select characters 1;1
+extend 2;2+
+copy ab\x20\x20cd
+
+## The spaces at the end of a selection that stops inside a line are dropped too
+size 6x1
+send ab\x20\x20cd
+select characters 1;1
+extend 1;4+
+copy ab
+
+## The cell a wide character left when it went on to the next row is not copied
+# reflow.txt has the same cell: it is not part of the line.
+size 4x2
+send abc中
+screen
+|abc |»
+|中  |
+select characters 1;1
+extend 2;2+
+copy abc中
+
+## A blank line between two is copied as an empty line
+size 4x3
+send a\r\n\r\nb
+select characters 1;1
+extend 3;4+
+copy a\n\nb
+
+## The marks joined to a character, ZWJ and the variation selectors are copied as they came
+size 8x1
+send e\xcc\x81 \xe2\x9d\xa4\xef\xb8\x8f \xf0\x9f\x91\xa9\xe2\x80\x8d\xf0\x9f\x92\xbb
+select lines 1;1
+copy e\xcc\x81 \xe2\x9d\xa4\xef\xb8\x8f \xf0\x9f\x91\xa9\xe2\x80\x8d\xf0\x9f\x92\xbb
+
+## A drag past the bottom selects to the end of the last row
+size 4x2
+send abcd\r\nef
+select characters 1;3
+extend 9;9
+selected
+|..**|
+|****|
+copy cd\nef
+
+## A drag past the top selects to the start of the first row
+size 4x2
+send abcd\r\nef
+select characters 2;2
+extend -5;3
+selected
+|****|
+|*...|
+copy abcd\ne
+
+## A drag past the right edge selects to the end of the row
+size 4x2
+send abcd\r\nef
+select characters 1;2
+extend 1;40
+copy bcd
+
+## A double-click selects the word under it
+size 12x1
+send src/a.rs:12
+select words 1;3
+selected
+|********....|
+copy src/a.rs
+
+## A double-click on a separator or a blank selects it alone
+# Blanks alone copy nothing, so the clipboard keeps what it had.
+size 12x1
+send src/a.rs:12
+select words 1;9
+copy :
+select words 1;12
+selected
+|...........*|
+copy
+
+## A word goes on over the rows its line wraps into
+size 4x2
+send abcdefg
+select words 2;2
+selected
+|****|
+|***.|
+copy abcdefg
+
+## A wide blank ends a word as a narrow one does
+# U+3000, the ideographic space, takes two cells. It is a character the program wrote, so copying
+# keeps it: only the blanks at the end of a line go.
+size 8x1
+send a\xe3\x80\x80bc
+select words 1;4
+selected
+|...**...|
+copy bc
+select words 1;3
+selected
+|.**.....|
+copy \xe3\x80\x80
+
+## A wide character is part of a word
+size 8x1
+send ab中cd e
+select words 1;1
+copy ab中cd
+select words 1;4
+copy ab中cd
+
+## A drag after a double-click takes whole words, and keeps the first one
+size 13x1
+send one two three
+select words 1;6
+copy two
+extend 1;10
+copy two three
+extend 1;1
+copy one two
+
+## A drag after a double-click past the top or the bottom takes the words there
+size 16x3
+send alpha beta gamma\r\nxx\r\nyy
+select words 3;1
+extend -5;12
+copy alpha beta gamma\nxx\nyy
+select words 1;8
+extend 9;1
+copy beta gamma\nxx\nyy
+
+## A triple-click selects the line, every row it wraps over
+size 4x3
+send abcdef\r\nxy
+select lines 2;1
+selected
+|****|
+|****|
+|....|
+copy abcdef
+extend 3;1
+copy abcdef\nxy
+
+## A drag after a triple-click up takes whole lines and keeps the first
+size 4x3
+send ab\r\ncd\r\nef
+select lines 2;3
+extend 1;1
+copy ab\ncd
+
+## A block takes the columns between its corners on each row
+size 5x3
+send abcde\r\nfghij\r\nklmno
+select block 1;2
+extend 3;3+
+selected
+|.**..|
+|.**..|
+|.**..|
+copy bc\ngh\nlm
+
+## A block from the bottom right to the top left is the same block
+size 5x3
+send abcde\r\nfghij\r\nklmno
+select block 3;3+
+extend 1;2
+copy bc\ngh\nlm
+
+## A block of no columns selects nothing
+size 5x3
+send abcde\r\nfghij\r\nklmno
+select block 1;2
+extend 3;2
+copy
+
+## A block does not join the rows a line wraps over
+size 3x2
+send abcdef
+select block 1;1
+extend 2;2+
+copy ab\nde
+
+## A block takes whole a wide character it cuts in half
+size 4x2
+send a中b\r\nwxyz
+select block 1;1+
+extend 2;3
+selected
+|.**.|
+|.*..|
+copy 中\nx
+
+## A block past the top keeps its columns
+size 5x2
+send abcde\r\nfghij
+select block 2;2
+extend -3;3+
+copy bc\ngh
+
+## Select All selects the scrollback and the screen, to the last row with something on it
+size 4x2
+send a\r\nb\r\nc\r\nd\r\n
+scrollback 3
+|a   |
+|b   |
+|c   |
+screen
+|d   |
+|    |
+select all
+selected
+|****|
+|....|
+copy a\nb\nc\nd
+
+## Select All stops at the last row with text, whatever color the blanks below it are
+size 4x3
+send hi\r\n\e[44m\e[K\r\n\e[K\e[m
+select all
+copy hi
+selected
+|****|
+|....|
+|....|
+
+## Select All of a screen with nothing on it selects its first row, which copies nothing
+size 4x2
+select all
+copy
+selected
+|****|
+|....|
+
+## Select All on the alternate screen selects only its rows
+size 4x2
+send a\r\nb\r\nc\e[?1049h\e[Hxy\r\nz
+select all
+copy xy\nz
+
+## On the alternate screen a selection stops at its first row
+size 4x2
+send a\r\nb\r\nc\e[?1049h\e[Hxy
+select characters 0;1
+extend 1;2+
+copy xy
+
+## Output on a row the selection covers ends it
+size 6x2
+send abc
+select characters 1;1
+extend 1;3+
+send d
+copy
+selected
+|......|
+|......|
+
+## Output on another row keeps it
+size 6x3
+send abc\r\ndef
+select characters 1;1
+extend 1;3+
+send g
+copy abc
+
+## Erasing a row it covers ends it
+size 6x2
+send abc\r\ndef
+select characters 1;1
+extend 1;3+
+send \e[1;6H\e[K
+copy
+
+## A mark joined to a character it covers ends it
+size 6x1
+send abc
+select characters 1;1
+extend 1;3+
+send \xcc\x81
+copy
+
+## Rows that scroll into the scrollback keep it
+size 4x2
+send abc\r\ndef
+select characters 1;1
+extend 1;3+
+send \r\nghi
+copy abc
+scrollback 1
+|abc |
+selected
+|....|
+|....|
+
+## A scroll larger than the screen keeps it in the scrollback
+size 4x2
+send a\r\nb
+select characters 1;1
+extend 2;1+
+send \e[9999S
+copy a\nb
+
+## A scroll inside a region below the top ends it
+size 4x3
+send a\r\nb\r\nc\e[2;3r
+select characters 2;1
+extend 2;1+
+send \e[3H\n
+copy
+
+## A scroll of a region from the top keeps what moves up in it
+size 4x3
+send a\r\nb\r\nc\e[1;2r
+select characters 2;1
+extend 2;1+
+send \e[2H\n
+copy b
+selected
+|*...|
+|....|
+|....|
+
+## A scroll of a region from the top numbers the rows below it anew, which ends it there
+size 4x3
+send a\r\nb\r\nc\e[1;2r
+select characters 3;1
+extend 3;1+
+send \e[2H\n
+copy
+
+## DL on the top row keeps what moves up
+size 4x2
+send a\r\nb
+select characters 2;1
+extend 2;1+
+send \e[H\e[M
+copy b
+
+## IL moves the rows under the selection, which ends it
+size 4x2
+send a\r\nb
+select characters 2;1
+extend 2;1+
+send \e[H\e[L
+copy
+
+## SD moves the rows under the selection, which ends it
+size 4x2
+send a\r\nb
+select characters 1;1
+extend 1;1+
+send \e[T
+copy
+
+## DECALN ends it
+size 4x2
+send ab
+select characters 1;1
+extend 1;2+
+send \e#8
+copy
+
+## ED 2 ends a selection on the screen, and keeps one in the scrollback
+size 4x2
+send a\r\nb\r\nc
+select characters 0;1
+extend 0;1+
+copy a
+send \e[2J
+copy a
+select characters 1;1
+extend 1;1+
+send x\e[2J
+copy
+
+## ED 3 ends it
+size 4x2
+send a\r\nb
+select characters 1;1
+extend 1;1+
+send \e[3J
+copy
+
+## RIS ends it
+size 4x2
+send a\r\nb
+select characters 1;1
+extend 1;1+
+send \ec
+copy
+
+## Clear ends it
+size 4x2
+send a\r\nb
+select characters 1;1
+extend 1;1+
+clear
+copy
+
+## A resize ends it
+size 4x2
+send ab
+select characters 1;1
+extend 1;2+
+resize 5x2
+copy
+
+## A resize to the same size keeps it
+size 4x2
+send ab
+select characters 1;1
+extend 1;2+
+resize 4x2
+copy ab
+
+## Switching to the alternate screen ends it
+size 4x2
+send ab
+select characters 1;1
+extend 1;2+
+send \e[?1049h
+copy
+
+## Switching back to the primary screen ends it
+size 4x2
+send \e[?1049hab
+select characters 1;1
+extend 1;2+
+send \e[?1049l
+copy
+
+## Leaving the alternate screen while on the primary keeps it
+size 4x2
+send ab
+select characters 1;1
+extend 1;2+
+send \e[?47l\e[?1047l
+copy ab
+
+## Entering the alternate screen again while on it clears the screen, which ends it
+size 4x2
+send \e[?1049hab
+select characters 1;1
+extend 1;2+
+send \e[?1049h
+copy
+
+## Rows dropped past the scrollback's limit are cut from the selection's start
+size 4x2
+send a\r\nb\r\nc\r\nd
+select characters -1;1
+extend 2;1+
+copy a\nb\nc\nd
+limit 1
+copy b\nc\nd
+limit 0
+copy c\nd
+
+## A selection whose rows were all dropped past the limit selects nothing
+size 4x2
+send a\r\nb\r\nc
+select characters 0;1
+extend 0;1+
+copy a
+limit 0
+copy
+
+## A word keeps what it took when the row before it changes
+# The row before now goes on into the word, but the word was taken when it was selected.
+size 4x2
+send abc\x20ef
+screen
+|abc |>
+|ef  |
+select words 2;1
+copy ef
+send \e[1;4Hd
+copy ef
+selected
+|....|
+|**..|

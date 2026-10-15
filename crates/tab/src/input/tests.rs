@@ -10,6 +10,15 @@ use terminal_core::{Keyboard, Modes, MouseFormat, MouseTracking};
 
 use super::*;
 
+/// macOS, or Linux, whose keys are Windows' too but for the block selection's modifier.
+fn os(macos: bool) -> Os {
+    if macos {
+        Os::MacOs
+    } else {
+        Os::Linux
+    }
+}
+
 /// A key event on a US keyboard, Linux's unless the test says otherwise.
 #[derive(Clone)]
 struct Event(KeyEvent);
@@ -121,10 +130,19 @@ fn sent_with(modes: &Modes, event: &Event) -> String {
 }
 
 fn sent_on(macos: bool, modes: &Modes, event: &Event) -> String {
-    match InputHandler::on(macos).handle(InputEvent::Key(event.0.clone()), modes) {
+    match InputHandler::on(os(macos)).handle(InputEvent::Key(event.0.clone()), modes) {
         Some(Action::Type(bytes) | Action::Send(bytes)) => String::from_utf8(bytes).unwrap(),
         Some(
-            action @ (Action::Composing | Action::Pointer(_) | Action::Scroll(_) | Action::Clear),
+            action @ (Action::Composing
+            | Action::Pointer(_)
+            | Action::Select(..)
+            | Action::Scroll(_)
+            | Action::Clear
+            | Action::Copy
+            | Action::Paste
+            | Action::PastePrimary
+            | Action::SelectAll
+            | Action::ConfirmPaste { .. }),
         ) => {
             panic!("a key meant {action:?}")
         }
@@ -212,11 +230,12 @@ fn ctrl_makes_what_xlib_makes() {
 
 #[test]
 fn ctrl_and_shift_with_a_letter_is_ctrl_and_the_letter() {
-    // As in xterm. kitty sends CSI 97;6u even with no flag set.
+    // As in xterm. kitty sends CSI 98;6u even with no flag set. Ctrl+Shift with A, C, K and V
+    // are shortcuts off macOS.
     check(
         &Modes::default(),
         &[
-            (key("A").ctrl().shift(), "\x01"),
+            (key("B").ctrl().shift(), "\x02"),
             (key("@").ctrl().shift(), "\0"),
             (key("_").ctrl().shift(), "\x1f"),
         ],
@@ -367,7 +386,7 @@ fn enter_tab_backspace_and_esc_are_control_characters() {
 #[test]
 fn esc_is_sent_alone_and_at_once() {
     // TERM-08 and VIM-05: one event, one byte, nothing held back for what may follow.
-    let mut input = InputHandler::on(false);
+    let mut input = InputHandler::on(Os::Linux);
     assert_eq!(
         input.handle(InputEvent::Key(key("Escape").0), &Modes::default()),
         Some(Action::Type(vec![0x1b]))
@@ -604,7 +623,8 @@ fn kitty_disambiguates_esc_and_keys_with_modifiers() {
             (key("Tab").shift(), "\x1b[9;2u"),
             (key("a").ctrl(), "\x1b[97;5u"),
             (key("a").alt(), "\x1b[97;3u"),
-            (key("A").ctrl().shift(), "\x1b[97;6u"),
+            // kitty's case is A, which is Select All here (Appendix A).
+            (key("B").ctrl().shift(), "\x1b[98;6u"),
             (key("A").alt().shift(), "\x1b[97;4u"),
             (key(" ").ctrl(), "\x1b[32;5u"),
             (key("PageUp").code("Numpad9"), "\x1b[57421u"),
@@ -704,11 +724,12 @@ fn kitty_reports_the_shifted_and_base_layout_keys() {
     check(
         &flags(0b101),
         &[
-            (key("A").ctrl().shift(), "\x1b[97:65;6u"),
+            // kitty's case is A, which is Select All here (Appendix A).
+            (key("B").ctrl().shift(), "\x1b[98:66;6u"),
             (key("!").ctrl().shift(), "\x1b[49:33;6u"),
-            // AZERTY's a is a US q, and Cyrillic с a US c.
+            // AZERTY's a is a US q, its z a US w, and Cyrillic с a US c.
             (key("a").code("KeyQ").ctrl(), "\x1b[97::113;5u"),
-            (key("A").code("KeyQ").ctrl().shift(), "\x1b[97:65:113;6u"),
+            (key("Z").code("KeyW").ctrl().shift(), "\x1b[122:90:119;6u"),
             (key("с").code("KeyC").ctrl(), "\x1b[1089::99;5u"),
             // Functional keys have none.
             (key("ArrowUp").shift(), "\x1b[1;2A"),
@@ -1031,8 +1052,8 @@ fn any_strings_from_the_webview_are_safe() {
         seed ^= seed << 17;
         (seed % bound as u64) as usize
     };
-    let mut input = InputHandler::on(false);
-    let mut mac = InputHandler::on(true);
+    let mut input = InputHandler::on(Os::Linux);
+    let mut mac = InputHandler::on(Os::MacOs);
     for _ in 0..20_000 {
         let mut string = || {
             (0..next(3))
@@ -1071,7 +1092,7 @@ fn any_strings_from_the_webview_are_safe() {
 
 #[test]
 fn an_input_method_composes_then_commits() {
-    let mut input = InputHandler::on(true);
+    let mut input = InputHandler::on(Os::MacOs);
     let modes = Modes::default();
     assert_eq!(
         input.handle(InputEvent::Compose("に".to_string()), &modes),
@@ -1101,7 +1122,7 @@ fn an_input_method_composes_then_commits() {
 fn committed_text_is_sent_as_it_is_in_every_mode() {
     // A dead key's é, and an input method's text, as kitty sends them.
     for modes in [Modes::default(), flags(0b1), flags(0b11111)] {
-        let mut input = InputHandler::on(false);
+        let mut input = InputHandler::on(Os::Linux);
         input.handle(InputEvent::Compose("´".to_string()), &modes);
         assert_eq!(
             input.handle(InputEvent::Text("é".to_string()), &modes),
@@ -1112,12 +1133,95 @@ fn committed_text_is_sent_as_it_is_in_every_mode() {
     }
 }
 
+/// What pasting `text` sends, with the multi-line warning off.
 fn pasted(text: &str, bracketed: bool) -> Option<Action> {
     let modes = Modes {
         bracketed_paste: bracketed,
         ..Modes::default()
     };
-    InputHandler::on(false).handle(InputEvent::Paste(text.to_string()), &modes)
+    let mut input = InputHandler::on(Os::Linux);
+    input.set_paste_warning(false);
+    input.handle(InputEvent::Paste(text.to_string()), &modes)
+}
+
+/// An Input Handler with the multi-line warning on, as by default.
+fn warning() -> InputHandler {
+    InputHandler::on(Os::Linux)
+}
+
+#[test]
+fn a_paste_of_lines_waits_for_the_user_when_the_program_did_not_ask_for_brackets() {
+    // SEC-06: the line breaks would run what is before them.
+    let off = Modes::default();
+    let mut input = warning();
+    assert_eq!(
+        input.handle(InputEvent::Paste("ls\nrm x\n".to_string()), &off),
+        Some(Action::ConfirmPaste { lines: 2 })
+    );
+    assert_eq!(
+        input.confirm_paste(true, &off),
+        Some(Action::Type(b"ls\rrm x\r".to_vec()))
+    );
+    // Once only.
+    assert_eq!(input.confirm_paste(true, &off), None);
+    // A no drops it.
+    input.paste("a\r\nb".to_string(), &off);
+    assert_eq!(input.confirm_paste(false, &off), None);
+    assert_eq!(input.confirm_paste(true, &off), None);
+    // A carriage return alone is a line break too, and one at the end starts no line.
+    for (text, lines) in [("a\rb", 2), ("a\n", 1), ("\n", 1), ("a\r\n\r\nb", 3)] {
+        assert_eq!(
+            warning().paste(text.to_string(), &off),
+            Some(Action::ConfirmPaste { lines }),
+            "{text:?}"
+        );
+    }
+}
+
+#[test]
+fn a_paste_that_cannot_run_anything_goes_at_once() {
+    let off = Modes::default();
+    let bracketed = Modes {
+        bracketed_paste: true,
+        ..Modes::default()
+    };
+    // One line, a program that asked for brackets, or the warning turned off.
+    assert_eq!(
+        warning().paste("echo hi".to_string(), &off),
+        Some(Action::Type(b"echo hi".to_vec()))
+    );
+    assert_eq!(
+        warning().paste("a\nb".to_string(), &bracketed),
+        Some(Action::Type(b"\x1b[200~a\rb\x1b[201~".to_vec()))
+    );
+    let mut input = warning();
+    input.set_paste_warning(false);
+    assert_eq!(
+        input.paste("a\nb".to_string(), &off),
+        Some(Action::Type(b"a\rb".to_vec()))
+    );
+    assert_eq!(warning().paste(String::new(), &off), None);
+}
+
+#[test]
+fn a_paste_waiting_gives_way_and_goes_as_the_modes_are_then() {
+    let off = Modes::default();
+    let bracketed = Modes {
+        bracketed_paste: true,
+        ..Modes::default()
+    };
+    let mut input = warning();
+    input.paste("a\nb".to_string(), &off);
+    input.paste("c\nd".to_string(), &off);
+    // The program asked for brackets while the user was asked.
+    assert_eq!(
+        input.confirm_paste(true, &bracketed),
+        Some(Action::Type(b"\x1b[200~c\rd\x1b[201~".to_vec()))
+    );
+    // A paste that goes at once leaves none waiting.
+    input.paste("a\nb".to_string(), &off);
+    input.paste("e".to_string(), &off);
+    assert_eq!(input.confirm_paste(true, &off), None);
 }
 
 #[test]
@@ -1173,7 +1277,7 @@ fn focus_is_reported_when_the_program_asked() {
         focus: true,
         ..Modes::default()
     };
-    let mut input = InputHandler::on(false);
+    let mut input = InputHandler::on(Os::Linux);
     assert_eq!(
         input.handle(InputEvent::Focus(true), &focus),
         Some(Action::Send(b"\x1b[I".to_vec()))
@@ -1200,7 +1304,7 @@ fn is_shortcut(event: &Event, modes: &Modes) -> bool {
 
 /// What `event` means to an Input Handler as on macOS or not, with a grid of 24 rows.
 fn shortcut_on(macos: bool, modes: &Modes, event: &Event) -> Option<Action> {
-    let mut input = InputHandler::on(macos);
+    let mut input = InputHandler::on(os(macos));
     input.resize(GRID);
     input.handle(InputEvent::Key(event.0.clone()), modes)
 }
@@ -1282,10 +1386,72 @@ fn clear_is_cmd_k_on_macos_and_ctrl_shift_k_elsewhere() {
 }
 
 #[test]
+fn copy_paste_and_select_all_are_mod_with_c_v_and_a() {
+    // Cmd on macOS, and Ctrl+Shift elsewhere (Appendix A), under the kitty protocol too.
+    for (letter, action) in [
+        ("c", Action::Copy),
+        ("v", Action::Paste),
+        ("a", Action::SelectAll),
+    ] {
+        let upper = letter.to_uppercase();
+        let code = format!("Key{upper}");
+        for modes in [Modes::default(), flags(0b11111)] {
+            assert_eq!(
+                shortcut_on(true, &modes, &key(letter).meta()),
+                Some(action.clone())
+            );
+            assert_eq!(
+                shortcut_on(false, &modes, &key(&upper).ctrl().shift()),
+                Some(action.clone())
+            );
+            // On a layout that types no ASCII there, the key in its place on a US keyboard.
+            assert_eq!(
+                shortcut_on(false, &modes, &key("Ж").code(&code).ctrl().shift()),
+                Some(action.clone())
+            );
+            // On one that types another letter there, the key that types it.
+            assert_eq!(
+                shortcut_on(true, &modes, &key(letter).code("KeyJ").meta()),
+                Some(action.clone())
+            );
+            assert_ne!(
+                shortcut_on(false, &modes, &key("J").code(&code).ctrl().shift()),
+                Some(action.clone())
+            );
+        }
+        // Each OS's keys only.
+        assert_ne!(
+            shortcut_on(true, &Modes::default(), &key(&upper).ctrl().shift()),
+            Some(action.clone())
+        );
+        assert_ne!(
+            shortcut_on(false, &Modes::default(), &key(letter).meta()),
+            Some(action)
+        );
+    }
+    // Ctrl with the letter alone is still the program's.
+    assert_eq!(sent(&key("c").ctrl()), "\x03");
+    assert_eq!(sent(&key("v").ctrl()), "\x16");
+    assert_eq!(sent(&key("a").ctrl()), "\x01");
+}
+
+#[test]
+fn the_webviews_copy_and_select_all_are_copy_and_select_all() {
+    // What Edit ▸ Copy and Select All fire in the webview (#31).
+    let mut input = InputHandler::on(Os::MacOs);
+    let modes = Modes::default();
+    assert_eq!(input.handle(InputEvent::Copy, &modes), Some(Action::Copy));
+    assert_eq!(
+        input.handle(InputEvent::SelectAll, &modes),
+        Some(Action::SelectAll)
+    );
+}
+
+#[test]
 fn a_key_taken_repeats_as_taken_and_its_release_is_dropped() {
     // Every key and its release are reported.
     let modes = flags(0b11111);
-    let mut input = InputHandler::on(false);
+    let mut input = InputHandler::on(Os::Linux);
     input.resize(GRID);
     let mut handle = |event: Event| input.handle(InputEvent::Key(event.0), &modes);
     assert_eq!(handle(key("PageUp").shift()), Some(Action::Scroll(-24.0)));
@@ -1321,7 +1487,7 @@ fn a_key_taken_repeats_as_taken_and_its_release_is_dropped() {
 #[test]
 fn what_is_typed_is_told_from_what_is_reported() {
     let every = flags(0b11111);
-    let mut input = InputHandler::on(false);
+    let mut input = InputHandler::on(Os::Linux);
     let mut handle = |event: InputEvent, modes: &Modes| input.handle(event, modes);
     // Keys going down or repeating take the view to the bottom.
     assert_eq!(
@@ -1383,7 +1549,7 @@ const HUGE: Grid = Grid {
 };
 
 fn mouse_input(grid: Grid) -> InputHandler {
-    let mut input = InputHandler::on(false);
+    let mut input = InputHandler::on(Os::Linux);
     input.resize(grid);
     input
 }
@@ -1515,8 +1681,21 @@ fn bytes(input: &mut InputHandler, modes: &Modes, event: impl Into<InputEvent>) 
 #[track_caller]
 fn pointer(input: &mut InputHandler, modes: &Modes, event: impl Into<InputEvent>) -> Pointer {
     match input.handle(event.into(), modes) {
-        Some(Action::Pointer(pointer)) => pointer,
+        Some(Action::Pointer(pointer) | Action::Select(pointer, _)) => pointer,
         other => panic!("{other:?} is no Pointer action"),
+    }
+}
+
+/// How `event`, a gesture of the left button that is Twominal's, selects, and where.
+#[track_caller]
+fn selects(
+    input: &mut InputHandler,
+    modes: &Modes,
+    event: impl Into<InputEvent>,
+) -> (Pointer, Selecting) {
+    match input.handle(event.into(), modes) {
+        Some(Action::Select(pointer, by)) => (pointer, by),
+        other => panic!("{other:?} selects nothing"),
     }
 }
 
@@ -1563,7 +1742,7 @@ impl From<WheelEvent> for InputEvent {
 #[test]
 fn before_the_grid_is_known_the_mouse_means_nothing() {
     let modes = tracking(MouseTracking::Motion, MouseFormat::Sgr);
-    let mut input = InputHandler::on(false);
+    let mut input = InputHandler::on(Os::Linux);
     assert_eq!(input.handle(down(0, 0).into(), &modes), None);
     assert_eq!(input.handle(pixels(100.0).into(), &modes), None);
     // A cell of no size, or of no number, is no grid.
@@ -1816,7 +1995,7 @@ fn alt_and_ctrl_are_reported_and_option_is_alt_on_macos() {
         ],
     );
     // Option is Alt on a key that types nothing, and a click types nothing.
-    let mut mac = InputHandler::on(true);
+    let mut mac = InputHandler::on(Os::MacOs);
     mac.resize(GRID);
     assert_eq!(
         bytes(&mut mac, &modes, down(0, 0).alt()),
@@ -2105,9 +2284,15 @@ fn local_gestures_say_which_cell_and_half() {
             .modifiers
             .meta
     );
-    // A right click, for the context menu (UI-04), and a middle one, for the primary
-    // selection (SW-05).
-    for button in [Button::Right, Button::Middle] {
+    // A right click, for the context menu (UI-04), and off Linux a middle one, which pastes
+    // the primary selection there (SW-05).
+    for (os, button) in [
+        (Os::Linux, Button::Right),
+        (Os::MacOs, Button::Middle),
+        (Os::Windows, Button::Middle),
+    ] {
+        let mut input = InputHandler::on(os);
+        input.resize(GRID);
         let dom = if button == Button::Right { 2 } else { 1 };
         let press = pointer(&mut input, &off, down(3, 3).button(dom));
         assert_eq!(
@@ -2115,6 +2300,185 @@ fn local_gestures_say_which_cell_and_half() {
             (PointerKind::Press, Some(button))
         );
         pointer(&mut input, &off, up(3, 3).button(dom));
+    }
+}
+
+#[test]
+fn the_left_button_selects_by_its_clicks() {
+    // TERM-17: a drag by characters, a double-click by words, a triple-click by lines, and
+    // round again, as the DOM counts on.
+    let off = Modes::default();
+    for (clicks, by) in [
+        (0, Selecting::Characters),
+        (1, Selecting::Characters),
+        (2, Selecting::Words),
+        (3, Selecting::Lines),
+        (4, Selecting::Characters),
+        (5, Selecting::Words),
+        (6, Selecting::Lines),
+    ] {
+        let mut input = mouse_input(GRID);
+        let (press, selecting) = selects(&mut input, &off, down(1, 2).detail(clicks));
+        assert_eq!(
+            (press.kind, press.row, press.col, selecting),
+            (PointerKind::Press, 1, 2, by)
+        );
+        // The drags and the release select as the press did.
+        let (drag, selecting) = selects(&mut input, &off, moved(3, 4, 1));
+        assert_eq!(
+            (drag.kind, drag.row, drag.col, selecting),
+            (PointerKind::Drag, 3, 4, by)
+        );
+        let (release, selecting) = selects(&mut input, &off, up(3, 5));
+        assert_eq!(
+            (release.kind, release.col, selecting),
+            (PointerKind::Release, 5, by)
+        );
+    }
+}
+
+#[test]
+fn each_os_selects_a_block_with_its_own_modifier() {
+    // Option+drag on macOS, Ctrl+drag on Linux and Alt+drag on Windows (Appendix A). Option is
+    // Alt to the DOM.
+    let off = Modes::default();
+    for (os, block, other) in [
+        (Os::MacOs, down(0, 0).alt(), down(0, 0).ctrl()),
+        (Os::Linux, down(0, 0).ctrl(), down(0, 0).alt()),
+        (Os::Windows, down(0, 0).alt(), down(0, 0).ctrl()),
+    ] {
+        let mut input = InputHandler::on(os);
+        input.resize(GRID);
+        assert_eq!(
+            selects(&mut input, &off, block.detail(2)).1,
+            Selecting::Block
+        );
+        // The modifier counts at the press only.
+        assert_eq!(
+            selects(&mut input, &off, moved(1, 1, 1)).1,
+            Selecting::Block
+        );
+        assert_eq!(selects(&mut input, &off, up(1, 1)).1, Selecting::Block);
+        assert_eq!(
+            selects(&mut input, &off, other).1,
+            Selecting::Characters,
+            "{os:?}"
+        );
+    }
+}
+
+#[test]
+fn shift_selects_while_a_program_has_the_mouse() {
+    // Appendix A, and a block with the OS's modifier as well.
+    let modes = tracking(MouseTracking::Drag, MouseFormat::Sgr);
+    let mut input = mouse_input(GRID);
+    assert_eq!(
+        selects(&mut input, &modes, down(0, 0).shift().detail(2)).1,
+        Selecting::Words
+    );
+    input.handle(up(0, 0).into(), &modes);
+    assert_eq!(
+        selects(&mut input, &modes, down(0, 0).shift().ctrl()).1,
+        Selecting::Block
+    );
+    input.handle(up(0, 0).into(), &modes);
+    // Without Shift the program hears it, Ctrl included.
+    assert_eq!(
+        bytes(&mut input, &modes, down(0, 0).ctrl()),
+        b"\x1b[<16;1;1M".to_vec()
+    );
+}
+
+#[test]
+fn a_lost_release_of_the_left_button_ends_the_selection() {
+    let off = Modes::default();
+    let mut input = mouse_input(GRID);
+    selects(&mut input, &off, down(0, 0).detail(3));
+    let (release, by) = selects(&mut input, &off, moved(2, 3, 0));
+    assert_eq!((release.kind, by), (PointerKind::Release, Selecting::Lines));
+    // The right button's is no selection's.
+    pointer(&mut input, &off, down(0, 0).button(2));
+    let release = input.handle(moved(1, 1, 0).into(), &off);
+    assert!(
+        matches!(
+            release,
+            Some(Action::Pointer(Pointer {
+                kind: PointerKind::Release,
+                button: Some(Button::Right),
+                ..
+            }))
+        ),
+        "{release:?}"
+    );
+    // A left press while the right button is held selects, and its drags too.
+    pointer(&mut input, &off, down(0, 0).button(2));
+    assert_eq!(
+        selects(&mut input, &off, down(0, 1).buttons(1 | 2)).1,
+        Selecting::Characters
+    );
+    assert_eq!(
+        selects(&mut input, &off, moved(0, 2, 1 | 2)).0.kind,
+        PointerKind::Drag
+    );
+}
+
+#[test]
+fn the_middle_button_pastes_the_primary_selection_on_linux() {
+    // SW-05, Appendix A.
+    let off = Modes::default();
+    let mut input = mouse_input(GRID);
+    assert_eq!(
+        input.handle(down(2, 2).button(1).into(), &off),
+        Some(Action::PastePrimary)
+    );
+    pointer(&mut input, &off, up(2, 2).button(1));
+    // A program that asked for the mouse hears it, as in xterm, unless Shift is held.
+    let modes = tracking(MouseTracking::Click, MouseFormat::Sgr);
+    assert_eq!(
+        bytes(&mut input, &modes, down(2, 2).button(1)),
+        b"\x1b[<1;3;3M".to_vec()
+    );
+    input.handle(up(2, 2).button(1).into(), &modes);
+    assert_eq!(
+        input.handle(down(2, 2).button(1).shift().into(), &modes),
+        Some(Action::PastePrimary)
+    );
+}
+
+#[test]
+fn a_pointer_is_on_the_row_drawn_under_it() {
+    // The view is scrolled half a row past its top row, so its rows are drawn half a row up
+    // (ANIM-06). Cells are 20 pixels high.
+    let off = Modes::default();
+    let mut input = mouse_input(GRID);
+    input.set_offset(0.5);
+    for (y, row) in [
+        (5.0, 0),
+        (9.9, 0),
+        (10.0, 1),
+        (35.0, 2),
+        (-5.0, 0),
+        (-15.0, -1),
+    ] {
+        let (press, _) = selects(&mut input, &off, down(0, 0).y(y));
+        assert_eq!(press.row, row, "{y}");
+        input.handle(up(0, 0).y(y).into(), &off);
+    }
+    // Reports are of the grid's cells, which the view does not move.
+    let modes = tracking(MouseTracking::Click, MouseFormat::Sgr);
+    assert_eq!(
+        bytes(&mut input, &modes, down(0, 0).y(15.0)),
+        b"\x1b[<0;1;1M".to_vec()
+    );
+    // Anything but a part of a row is no offset.
+    for offset in [1.0, -0.25, f64::NAN, f64::INFINITY] {
+        let mut input = mouse_input(GRID);
+        input.set_offset(offset);
+        assert_eq!(
+            selects(&mut input, &off, down(0, 0).y(15.0)).0.row,
+            0,
+            "{offset}"
+        );
     }
 }
 

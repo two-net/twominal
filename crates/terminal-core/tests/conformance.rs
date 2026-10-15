@@ -47,6 +47,17 @@
 //! |aa.b|                                                  every row again, a letter for the
 //! |....|                                                  link of each cell
 //! |....|
+//! select words 2;3                                        starts a selection, by characters,
+//! select block 1;2+                                       words, lines or as a block, in a
+//! extend 3;4                                              cell, `+` for its right half; moves
+//! select all                                              its end; Select All; unselect
+//! unselect
+//! selected                                                every row again, `*` for a cell
+//! |.**.|                                                  selected and `.` for one not
+//! |....|
+//! |....|
+//! copy ab\ncd                                             the text copying gives, or with no
+//! copy                                                    text that it gives none
 //! ```
 //!
 //! A row is the text of its cells. A wide character takes two columns of it, as it does in a
@@ -64,7 +75,11 @@
 //! named before with `link`. Cells with the same letter are one link, and cells with letters of
 //! their own are links of their own, even when the URIs are the same.
 //!
-//! `send`, `reply`, `title`, `directory`, `clipboard`'s text, and `link`'s URI and id take
+//! A place to select is a row and a column counted from 1, as `cursor` counts them, from the
+//! top left of the screen as it is at that step. Row 0 is the scrollback's newest row, -1 the
+//! one before, and so on. A row or a column past the edge is a drag past it.
+//!
+//! `send`, `reply`, `title`, `directory`, `clipboard`'s text, `copy`'s, and `link`'s URI and id take
 //! `\e`, `\a`, `\b`, `\t`, `\n`, `\r`, `\\` and `\xHH`; the rest is UTF-8 as written. No line
 //! may end in a space, so a trailing space is written `\x20`. Every event must be checked: one
 //! left over at the end of a case fails it (SEC-05).
@@ -80,8 +95,8 @@ use std::fs;
 use std::path::Path;
 
 use terminal_core::{
-    Clipboard, Color, CursorShape, Event, LinkId, Modes, MouseFormat, MouseTracking, Selection,
-    Size, Style, TerminalCore, ThemeColor, Underline,
+    Clipboard, Color, CursorShape, Event, LinkId, Modes, MouseFormat, MouseTracking, Place,
+    Selecting, Selection, Size, Style, TerminalCore, ThemeColor, Underline,
 };
 
 #[test]
@@ -165,6 +180,22 @@ enum Kind {
     Cursor(u16, u16),
     Said(Said),
     Mode(String, String),
+    Select(Selecting, Spot),
+    Extend(Spot),
+    SelectAll,
+    Unselect,
+    /// The rows of selected cells, as the case drew them.
+    Selected(Vec<String>),
+    Copy(Option<String>),
+}
+
+/// A place to select as a case writes it: the row and the column counted from 1 from the
+/// screen's top left, and whether it is the cell's right half.
+#[derive(Clone, Copy)]
+struct Spot {
+    row: i64,
+    col: i32,
+    right_half: bool,
 }
 
 /// What the core said besides the screen, as a case writes it: an event, or for a question
@@ -358,6 +389,35 @@ fn parse(file: &str, text: &str, problems: &mut Vec<String>) -> Vec<Case> {
                 .map(Kind::Limit)
                 .map_err(|_| format!("{rest:?} is not a number of rows")),
             "clear" if rest.is_empty() => Ok(Kind::Clear),
+            "select" if rest == "all" => Ok(Kind::SelectAll),
+            "select" => parse_select(rest),
+            "extend" => parse_spot(rest)
+                .map(Kind::Extend)
+                .ok_or(format!("{rest:?} is not a place such as 3;5 or 3;5+")),
+            "unselect" if rest.is_empty() => Ok(Kind::Unselect),
+            "copy" if rest.is_empty() => Ok(Kind::Copy(None)),
+            "copy" => unescape(rest).and_then(|text| match String::from_utf8(text) {
+                Ok(text) => Ok(Kind::Copy(Some(text))),
+                Err(_) => Err("a text to copy that is not UTF-8".to_string()),
+            }),
+            "selected" if rest.is_empty() => {
+                let mut rows = Vec::new();
+                let mut why = None;
+                for _ in 0..now.rows {
+                    match lines.next() {
+                        Some((at, row)) => match parse_selected(row, now.cols) {
+                            Ok(()) => rows.push(row.to_string()),
+                            Err(error) => {
+                                why.get_or_insert(format!("row on line {at}: {error}"));
+                            }
+                        },
+                        None => {
+                            why.get_or_insert("the file ends inside the selection".to_string());
+                        }
+                    }
+                }
+                why.map_or(Ok(Kind::Selected(rows)), Err)
+            }
             "scrollback" => match rest.parse::<usize>() {
                 Ok(count) => read_rows(&mut lines, count, "scrollback").map(Kind::Scrollback),
                 Err(_) => Err(format!("{rest:?} is not a number of rows")),
@@ -495,6 +555,56 @@ fn parse_size(text: &str) -> Option<Size> {
 fn parse_cursor(text: &str) -> Option<(u16, u16)> {
     let (row, col) = text.split_once(';')?;
     Some((row.parse().ok()?, col.parse().ok()?))
+}
+
+/// `characters`, `words`, `lines` or `block`, and a place.
+fn parse_select(text: &str) -> Result<Kind, String> {
+    let (how, place) = text.split_once(' ').unwrap_or((text, ""));
+    let by = match how {
+        "characters" => Selecting::Characters,
+        "words" => Selecting::Words,
+        "lines" => Selecting::Lines,
+        "block" => Selecting::Block,
+        _ => {
+            return Err(format!(
+                "{how:?} is not `all`, or characters, words, lines or block"
+            ))
+        }
+    };
+    let spot = parse_spot(place).ok_or(format!("{place:?} is not a place such as 3;5 or 3;5+"))?;
+    Ok(Kind::Select(by, spot))
+}
+
+/// A place such as `3;5`, or `3;5+` for the right half of the cell.
+fn parse_spot(text: &str) -> Option<Spot> {
+    let (text, right_half) = match text.strip_suffix('+') {
+        Some(text) => (text, true),
+        None => (text, false),
+    };
+    let (row, col) = text.split_once(';')?;
+    Some(Spot {
+        row: row.parse().ok()?,
+        col: col.parse().ok()?,
+        right_half,
+    })
+}
+
+/// Checks a row of the selection drawn as `|`, `*` or `.` for each of the `cols` cells, and `|`.
+fn parse_selected(text: &str, cols: u16) -> Result<(), String> {
+    let inside = text
+        .strip_prefix('|')
+        .and_then(|inside| inside.strip_suffix('|'))
+        .ok_or(format!(
+            "{text:?} is not a row of the selection between two |"
+        ))?;
+    if let Some(other) = inside.chars().find(|char| !matches!(char, '*' | '.')) {
+        return Err(format!("{other:?} is neither * nor ."));
+    }
+    let cells = inside.chars().count();
+    if cells != usize::from(cols) {
+        return Err(format!("{cells} cells on a screen {cols} wide"));
+    }
+    Ok(())
 }
 
 /// A row drawn as `|`, its text and `|`, then `>` if it wraps, or `»` if it wraps and its last
@@ -908,6 +1018,39 @@ fn run(case: &Case, bytewise: bool) -> Vec<(usize, String)> {
                     ));
                 }
             }
+            Kind::Select(by, spot) => {
+                let at = place(&core, *spot);
+                core.select(at, *by);
+            }
+            Kind::Extend(spot) => {
+                let to = place(&core, *spot);
+                core.extend(to);
+            }
+            Kind::SelectAll => core.select_all(),
+            Kind::Unselect => core.unselect(),
+            Kind::Selected(expected) => {
+                let actual = draw_selected(&core);
+                if actual != expected.join("\n") {
+                    problem(format!(
+                        "the selection differs\nexpected\n{}\ngot\n{actual}",
+                        expected.join("\n")
+                    ));
+                }
+            }
+            Kind::Copy(expected) => {
+                let actual = core.copy();
+                if actual != *expected {
+                    let text = |text: &Option<String>| match text {
+                        Some(text) => format!("copy {}", escape(text.as_bytes())),
+                        None => "copy, with nothing to copy".to_string(),
+                    };
+                    problem(format!(
+                        "expected {}, got {}",
+                        text(expected),
+                        text(&actual)
+                    ));
+                }
+            }
         }
     }
     if !events.is_empty() {
@@ -922,6 +1065,38 @@ fn run(case: &Case, bytewise: bool) -> Vec<(usize, String)> {
 
 fn screen(core: &TerminalCore) -> Vec<Row> {
     core.screen().rows().iter().map(drawn).collect()
+}
+
+/// The number of the screen's first row.
+fn live(core: &TerminalCore) -> i64 {
+    let scrollback = core.scrollback();
+    (scrollback.start() + scrollback.len() as u64) as i64
+}
+
+/// The place `spot` names, on the screen as it is now.
+fn place(core: &TerminalCore, spot: Spot) -> Place {
+    Place {
+        row: live(core) + spot.row - 1,
+        col: spot.col - 1,
+        right_half: spot.right_half,
+    }
+}
+
+/// The screen's rows as a case draws the selection: `*` for a cell selected.
+fn draw_selected(core: &TerminalCore) -> String {
+    let selected = core.selected();
+    let cols = usize::from(core.size().cols);
+    (0..core.size().rows)
+        .map(|index| {
+            let number = live(core) as u64 + u64::from(index);
+            let taken = selected.map_or(0..0, |selected| selected.cols(number));
+            let cells: String = (0..cols)
+                .map(|col| if taken.contains(&col) { '*' } else { '.' })
+                .collect();
+            format!("|{cells}|")
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// The scrollback's rows, oldest first, padded to the screen's width.
@@ -1259,6 +1434,24 @@ fn what_cannot_be_read_is_a_problem() {
             "3 cells on a screen 2 wide",
         ),
         ("## a\nsize 2x2\nlinks\n|..|\n", "ends inside the links"),
+        ("## a\nsize 2x1\nselect some 1;1\n", "is not `all`"),
+        ("## a\nsize 2x1\nselect words 1,1\n", "is not a place"),
+        ("## a\nsize 2x1\nselect words\n", "is not a place"),
+        ("## a\nsize 2x1\nextend 1;1-\n", "is not a place"),
+        (
+            "## a\nsize 2x1\nunselect now\n",
+            "is not something a case can say",
+        ),
+        ("## a\nsize 2x1\ncopy \\xff\n", "not UTF-8"),
+        ("## a\nsize 2x1\nselected\n|*x|\n", "is neither * nor ."),
+        (
+            "## a\nsize 2x1\nselected\n|***|\n",
+            "3 cells on a screen 2 wide",
+        ),
+        (
+            "## a\nsize 2x2\nselected\n|..|\n",
+            "ends inside the selection",
+        ),
     ] {
         let mut problems = Vec::new();
         let cases = parse("f.txt", text, &mut problems);
@@ -1325,5 +1518,17 @@ fn a_case_fails_where_it_is_not_met() {
     assert_eq!(
         check("f.txt", &cases[0]),
         ["f.txt:5: f: the links differ\nexpected\n|aaa|\ngot\n|aAB|\nA is u\nB is v"]
+    );
+
+    // The selection and what copying gives.
+    let text = "## g\nsize 3x1\nsend abc\nselect characters 1;1\nextend 1;2+\nselected\n|***|\ncopy abc\nunselect\ncopy ab\n";
+    let cases = parse("f.txt", text, &mut Vec::new());
+    assert_eq!(
+        check("f.txt", &cases[0]),
+        [
+            "f.txt:6: g: the selection differs\nexpected\n|***|\ngot\n|**.|",
+            "f.txt:8: g: expected copy abc, got copy ab",
+            "f.txt:10: g: expected copy ab, got copy, with nothing to copy",
+        ]
     );
 }

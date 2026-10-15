@@ -1,5 +1,6 @@
 //! Real programs, shown by the Terminal Core, typed into through the Input Handler and drawn by
-//! the Renderer (TERM-01 to TERM-06, TERM-08 to TERM-14, TERM-16, FONT-10, REL-03).
+//! the Renderer (TERM-01 to TERM-06, TERM-08 to TERM-14, TERM-16, TERM-17, FONT-08, FONT-10,
+//! REL-03).
 //!
 //! Each test starts a program on a pseudo-terminal through the Session, as a tab does, and
 //! passes what it writes to a Terminal Core, which answers its queries. Its questions about
@@ -7,8 +8,9 @@
 //! else it tells the core, as titles, the bell and the clipboard, is kept. Keys, pastes, focus
 //! changes, the mouse and the wheel go through the Input Handler, by the modes the program set,
 //! as DOM events, on cells of 10 by 20 pixels. The Renderer turns the screen into frames, which
-//! are read back as the webview reads them. The Tab will do that itself with #31; here the test
-//! does. A test whose program is not installed says so, and passes.
+//! are read back as the webview reads them, and says which row it drew under the mouse, where
+//! the core selects. The Tab will do that itself with #31; here the test does. A test whose
+//! program is not installed says so, and passes.
 //!
 //! Every program runs with an environment of its own and a home folder of the test's own, so
 //! nothing of the user's is read or written. These run on macOS and Linux.
@@ -27,12 +29,12 @@ use std::{env, fs};
 
 use tab::input::{
     Action, DeltaMode, Grid, InputEvent, InputHandler, KeyEvent, Modifiers, MouseEvent, MouseKind,
-    WheelEvent,
+    PointerKind, WheelEvent,
 };
 use tab::render::{Measure, Palette, Renderer, Rgb};
 use tab::session::{Output, Session, Shell, Start};
 use terminal_core::{
-    Clipboard, Color, CursorShape, Event, Keyboard, MouseFormat, MouseTracking, Size, Style,
+    Clipboard, Color, CursorShape, Event, Keyboard, MouseFormat, MouseTracking, Place, Size, Style,
     TerminalCore, ThemeColor, Underline,
 };
 
@@ -137,6 +139,10 @@ impl Held {
     }
     fn alt(mut self) -> Self {
         self.0.alt = true;
+        self
+    }
+    fn meta(mut self) -> Self {
+        self.0.meta = true;
         self
     }
 }
@@ -1206,6 +1212,176 @@ fn sh_rings_the_bell_writes_the_clipboard_links_and_sets_colors() {
 }
 
 // ---------------------------------------------------------------------------------------
+// Selection and copying (TERM-17, FONT-08)
+// ---------------------------------------------------------------------------------------
+
+/// The DOM's event of the main button at `x` pixels across the grid, on the middle of row `row`,
+/// counted from 0, with `buttons` held after it and the click count `detail`.
+fn pointing(
+    kind: MouseKind,
+    row: u16,
+    x: f64,
+    buttons: u16,
+    detail: u32,
+    modifiers: Held,
+) -> InputEvent {
+    InputEvent::Mouse(MouseEvent {
+        kind,
+        button: 0,
+        buttons,
+        detail,
+        x,
+        y: (f64::from(row) + 0.5) * CELL.1,
+        modifiers: modifiers.0,
+    })
+}
+
+/// Mod with `letter`: Cmd on macOS, Ctrl+Shift elsewhere (Appendix A).
+fn shortcut(letter: &str) -> InputEvent {
+    if cfg!(target_os = "macos") {
+        press(letter, held().meta())
+    } else {
+        press(&letter.to_uppercase(), held().ctrl().shift(true))
+    }
+}
+
+impl Terminal {
+    /// What the Tab does with the mouse and with Copy and Select All (#31): the core selects
+    /// where the Renderer drew the row under the mouse, and copying gives what it selected.
+    fn select(&mut self, event: InputEvent) -> Option<String> {
+        match self.input.handle(event, self.core.modes()) {
+            Some(Action::Select(pointer, by)) => {
+                let at = Place {
+                    row: self
+                        .renderer
+                        .row_number(pointer.row)
+                        .expect("a frame drawn"),
+                    col: pointer.col,
+                    right_half: pointer.right_half,
+                };
+                match pointer.kind {
+                    PointerKind::Press => self.core.select(at, by),
+                    _ => self.core.extend(at),
+                }
+                None
+            }
+            Some(Action::SelectAll) => {
+                self.core.select_all();
+                None
+            }
+            Some(Action::Copy) => self.core.copy(),
+            // A move that stays in the half of its cell.
+            None => None,
+            other => panic!("{other:?} is no selection"),
+        }
+    }
+
+    /// The main button pressed `clicks` times at `from` pixels across row `row`, and dragged
+    /// to `to` pixels across row `to_row`, with `modifiers`. Then what copying gives.
+    fn drag_to_copy(
+        &mut self,
+        (row, from): (u16, f64),
+        (to_row, to): (u16, f64),
+        clicks: u32,
+        modifiers: Held,
+    ) -> Option<String> {
+        for event in [
+            pointing(MouseKind::Down, row, from, 1, clicks, modifiers),
+            pointing(MouseKind::Move, to_row, to, 1, 0, modifiers),
+            pointing(MouseKind::Up, to_row, to, 0, clicks, modifiers),
+        ] {
+            self.select(event);
+        }
+        self.select(shortcut("c"))
+    }
+}
+
+/// The backgrounds of `row` of `frame`: each one's column, count and color.
+fn spans(frame: &Json, row: usize) -> Vec<(usize, usize, String)> {
+    let colors = frame.get("colors").unwrap().items();
+    let row = frame
+        .get("rows")
+        .unwrap()
+        .items()
+        .iter()
+        .find(|found| found.items()[0].number() as usize == row)
+        .unwrap_or_else(|| panic!("no row {row} in {frame:?}"));
+    row.items()[1]
+        .items()
+        .chunks(3)
+        .map(|span| {
+            (
+                span[0].number() as usize,
+                span[1].number() as usize,
+                colors[span[2].number() as usize].text().to_string(),
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn the_mouse_selects_what_sh_prints_and_copying_gives_it_back() {
+    let home = Folder::new();
+    // A line of ligatures, a line that wraps, and a wide character and a combining mark.
+    let script = format!(
+        "printf 'a != b -> c\\n{}\\n界 e\u{301} word\\n'",
+        "y".repeat(100)
+    );
+    let mut sh = Terminal::run(&home.0, "/bin/sh", &["/bin/sh", "-c", &script], &[]);
+    sh.until_exit();
+    assert!(sh.shows("word"), "{}", sh.dump());
+    sh.renderer.measure(&measure()).unwrap();
+    sh.renderer.frame(&sh.core, "").unwrap();
+
+    // AT-04: a triple-click copies the line as it was written, ligatures and all.
+    let line = sh.drag_to_copy((0, 55.0), (0, 55.0), 3, held());
+    assert_eq!(line.as_deref(), Some("a != b -> c"));
+    // A drag from the left half of `!` to the right half of `=` copies `!=`, which the frame
+    // highlights, and draws apart from the rest of its ligatures (FONT-08).
+    let copied = sh.drag_to_copy((0, 21.0), (0, 38.0), 1, held());
+    assert_eq!(copied.as_deref(), Some("!="));
+    let frame = Json::read(&sh.renderer.frame(&sh.core, "").unwrap().json());
+    assert_eq!(spans(&frame, 0), [(2, 2, hex(palette().selection))]);
+    let texts: Vec<(usize, String, Option<usize>)> = runs(&frame, 0)
+        .into_iter()
+        .map(|(col, text, cells, _, _)| (col, text, cells))
+        .collect();
+    assert_eq!(
+        texts,
+        [
+            (0, "a".to_string(), None),
+            (2, "!=".to_string(), Some(0)),
+            (5, "b -> c".to_string(), Some(0)),
+        ]
+    );
+
+    // A double-click copies the word the line wraps over: 100 y's on two rows.
+    let word = sh.drag_to_copy((2, 5.0), (2, 5.0), 2, held());
+    assert_eq!(word, Some("y".repeat(100)));
+    // The wide character and the combining mark come back as they were written.
+    let line = sh.drag_to_copy((3, 0.0), (3, 0.0), 3, held());
+    assert_eq!(line.as_deref(), Some("界 e\u{301} word"));
+    // A block, with the OS's modifier: four columns of each row of the line that wraps.
+    let block = if cfg!(target_os = "macos") || cfg!(windows) {
+        held().alt()
+    } else {
+        held().ctrl()
+    };
+    let columns = sh.drag_to_copy((1, 0.0), (2, 39.0), 1, block);
+    assert_eq!(columns.as_deref(), Some("yyyy\nyyyy"));
+
+    // Select All copies everything sh printed.
+    sh.select(shortcut("a"));
+    assert_eq!(
+        sh.select(shortcut("c")),
+        Some(format!(
+            "a != b -> c\n{}\n界 e\u{301} word",
+            "y".repeat(100)
+        ))
+    );
+}
+
+// ---------------------------------------------------------------------------------------
 // The Renderer
 // ---------------------------------------------------------------------------------------
 
@@ -1217,6 +1393,7 @@ fn palette() -> Palette {
         ansi: std::array::from_fn(|index| Rgb::new(index as u8, 0, 100 + index as u8)),
         cursor: Rgb::new(250, 250, 0),
         cursor_text: Rgb::new(0, 0, 50),
+        selection: Rgb::new(60, 60, 120),
     }
 }
 

@@ -1,10 +1,13 @@
 //! Tests of the App Shell: what needs no window (GEN-04, GEN-05, TAB-15, UI-05). The windows
 //! and menus themselves, and a window the launcher asks for, are checked by hand (DESIGN.md
-//! §8).
+//! §8). So is the OS clipboard, with an ignored test, since it is the user's (SW-05).
 
 use std::ffi::OsString;
 use std::path::Path;
 
+use tab::{OsClipboard, Selection};
+
+use super::clipboard::Clipboard;
 use super::fonts::{self, Zoom};
 use super::launcher::Problem;
 use super::menu::{self, Action};
@@ -345,6 +348,27 @@ fn a_directory_is_made_absolute_and_must_be_one() {
 }
 
 /// The hand-over between two commands (GEN-05). Each test has a folder of its own.
+/// SW-05, by hand on each OS: `cargo test -p twominal -- --ignored clipboard`. It writes the
+/// user's clipboard, and the primary selection on Linux, and gives each back what it held.
+#[test]
+#[ignore = "it writes the user's clipboard"]
+fn the_clipboard_gives_back_what_was_written() {
+    let clipboard = Clipboard::new();
+    let text = "Twominal's clipboard test: é, 界 and 👍🏽\nand a second line";
+    for which in [Selection::Clipboard, Selection::Primary] {
+        let held = clipboard.read(which);
+        clipboard.write(which, text);
+        let read = clipboard.read(which);
+        if let Some(held) = &held {
+            clipboard.write(which, held);
+        }
+        match which {
+            Selection::Primary if !cfg!(target_os = "linux") => assert_eq!(read, None),
+            _ => assert_eq!(read.as_deref(), Some(text), "{which:?}"),
+        }
+    }
+}
+
 #[cfg(unix)]
 mod hand_over {
     use std::ffi::OsStr;

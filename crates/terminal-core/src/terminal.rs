@@ -8,6 +8,9 @@
 //! It also keeps what programs set through operating system commands (TERM-12, TERM-13): the
 //! title and the titles saved, the colors set over the theme's, and the link what is printed is
 //! part of, with every link the cells hold.
+//!
+//! And it keeps the selection (TERM-17), which `select.rs` makes and reads. Every change to the
+//! rows here tells it which rows changed, and a change to a row it covers ends it.
 
 use alloc::boxed::Box;
 use alloc::string::String;
@@ -22,6 +25,7 @@ use crate::osc::{ColorChange, NewLink, Osc};
 use crate::report::Report;
 use crate::screen::{Cell, Screen};
 use crate::scrollback::{self, Point, Scrollback};
+use crate::select::{Place, Rows, Selected, Selecting, Selection};
 use crate::style::Style;
 use crate::width::{discarded, width};
 use crate::{Event, Size};
@@ -353,6 +357,8 @@ pub(crate) struct Terminal {
     waiting: Option<Osc>,
     /// Replies, reports and the rest since the bytes were handed in.
     events: Vec<Event>,
+    /// What the user selected, on the screen shown and the scrollback above it (TERM-17).
+    selection: Option<Selection>,
 }
 
 impl Terminal {
@@ -388,6 +394,7 @@ impl Terminal {
             links: Links::default(),
             waiting: None,
             events: Vec::new(),
+            selection: None,
         }
     }
 
@@ -464,6 +471,59 @@ impl Terminal {
 
     pub(crate) fn link(&self, link: LinkId) -> Option<&Link> {
         self.links.get(link)
+    }
+
+    // Selecting
+
+    /// The rows of the screen shown, and of the scrollback above the primary screen, by number.
+    pub(crate) fn rows(&self) -> Rows<'_> {
+        Rows {
+            screen: self.screen(),
+            scrollback: &self.scrollback,
+            alternate: self.modes.alternate_screen,
+            cols: self.cols,
+        }
+    }
+
+    /// Starts a selection `by` at `at`, in place of the one there was.
+    pub(crate) fn select(&mut self, at: Place, by: Selecting) {
+        self.selection = Some(Selection::new(&self.rows(), at, by));
+    }
+
+    /// Moves the selection's moving end to `to`. Without a selection it does nothing.
+    pub(crate) fn extend(&mut self, to: Place) {
+        if let Some(mut selection) = self.selection.take() {
+            selection.extend(&self.rows(), to);
+            self.selection = Some(selection);
+        }
+    }
+
+    /// Selects everything from the oldest row to the last of the screen that has something on
+    /// it.
+    pub(crate) fn select_all(&mut self) {
+        self.selection = Some(Selection::all(&self.rows()));
+    }
+
+    pub(crate) fn unselect(&mut self) {
+        self.selection = None;
+    }
+
+    pub(crate) fn selected(&self) -> Option<Selected<'_>> {
+        self.selection.as_ref()?.selected(self.rows())
+    }
+
+    /// Ends the selection if it covers any of `rows`, counted from the top of the screen shown,
+    /// whose text changed or which a scroll numbered anew.
+    fn changed(&mut self, rows: Range<usize>) {
+        let Some(selection) = &self.selection else {
+            return;
+        };
+        let live = self.scrollback.start() + self.scrollback.len() as u64;
+        let changed = live + rows.start as u64..live + rows.end as u64;
+        let covered = selection.rows();
+        if changed.start <= *covered.end() && *covered.start() < changed.end {
+            self.selection = None;
+        }
     }
 
     // Operating system commands
@@ -644,6 +704,7 @@ impl Terminal {
     fn join(&mut self, mark: char) {
         let (row, col) = self.written.unwrap_or((self.row, self.col));
         self.screen_mut().join(row, col, mark);
+        self.changed(row..row + 1);
     }
 
     /// Starts the next row if a wrap is pending and autowrap is on. Without autowrap the
@@ -662,6 +723,7 @@ impl Terminal {
         if mem::take(&mut self.pending) && self.autowrap {
             let row = self.row;
             self.screen_mut().wrap(row, early);
+            self.changed(row..row + 1);
             self.col = 0;
             self.index();
         }
@@ -672,6 +734,7 @@ impl Terminal {
         if self.insert {
             let (row, col, blank) = (self.row, self.col, self.blank());
             self.screen_mut().insert_cells(row, col, count, blank);
+            self.changed(row..row + 1);
         }
     }
 
@@ -682,6 +745,7 @@ impl Terminal {
         let (row, col, blank) = (self.row, self.col, self.blank());
         let cell = Cell::new(char, width, self.style).linked(self.link);
         self.screen_mut().write(row, col, cell, blank);
+        self.changed(row..row + 1);
         self.written = Some((row, col));
         if col + width < self.cols {
             self.col += width;
@@ -873,23 +937,30 @@ impl Terminal {
     pub(crate) fn erase_display(&mut self, which: usize) {
         if which == 3 {
             self.scrollback.clear();
+            self.unselect();
             return;
         }
         let (row, col, rows, cols) = (self.row, self.col, self.rows, self.cols);
         let blank = self.blank();
         let screen = self.screen_mut();
-        match which {
+        let changed = match which {
             0 => {
                 screen.erase(row, col..cols, blank);
                 screen.erase_rows(row + 1..rows, blank);
+                row..rows
             }
             1 => {
                 screen.erase_rows(0..row, blank);
                 screen.erase(row, 0..col + 1, blank);
+                0..row + 1
             }
-            2 => screen.erase_rows(0..rows, blank),
+            2 => {
+                screen.erase_rows(0..rows, blank);
+                0..rows
+            }
             _ => return,
-        }
+        };
+        self.changed(changed);
         self.reset_wrap();
     }
 
@@ -905,6 +976,7 @@ impl Terminal {
         };
         let blank = self.blank();
         self.screen_mut().erase(row, cols, blank);
+        self.changed(row..row + 1);
         self.reset_wrap();
     }
 
@@ -913,6 +985,7 @@ impl Terminal {
         let (row, col, blank) = (self.row, self.col, self.blank());
         self.screen_mut()
             .erase(row, col..col.saturating_add(count), blank);
+        self.changed(row..row + 1);
         self.reset_wrap();
     }
 
@@ -920,6 +993,7 @@ impl Terminal {
     pub(crate) fn insert_chars(&mut self, count: usize) {
         let (row, col, blank) = (self.row, self.col, self.blank());
         self.screen_mut().insert_cells(row, col, count, blank);
+        self.changed(row..row + 1);
         self.reset_wrap();
     }
 
@@ -927,6 +1001,7 @@ impl Terminal {
     pub(crate) fn delete_chars(&mut self, count: usize) {
         let (row, col, blank) = (self.row, self.col, self.blank());
         self.screen_mut().delete_cells(row, col, count, blank);
+        self.changed(row..row + 1);
         self.reset_wrap();
     }
 
@@ -934,7 +1009,8 @@ impl Terminal {
     pub(crate) fn insert_lines(&mut self, count: usize) {
         if self.inside_region() {
             let (region, blank) = (self.row..self.bottom + 1, self.blank());
-            self.screen_mut().scroll_down(region, count, blank);
+            self.screen_mut().scroll_down(region.clone(), count, blank);
+            self.changed(region);
             self.carriage_return();
         }
     }
@@ -957,20 +1033,32 @@ impl Terminal {
     /// Moves the rows of `region` up by `count`, blank rows coming in at its bottom. On the
     /// primary screen the rows that leave the top of the screen go to the scrollback, as xterm's
     /// `xtermScroll` saves them, whatever the region's bottom.
+    ///
+    /// The rows that go to the scrollback keep their numbers, and so do the rest of the region,
+    /// which move up with them. What comes in below them, and the rows below the region, are
+    /// numbered anew for the selection. Elsewhere the rows move under their numbers.
     fn scroll_rows_up(&mut self, region: Range<usize>, count: usize) {
         let blank = self.blank();
-        if self.modes.alternate_screen {
-            self.alternate.scroll_up(region, count, blank, None);
+        if self.modes.alternate_screen || region.start > 0 {
+            let screen = self.screen_mut();
+            screen.scroll_up(region.clone(), count, blank, None);
+            self.changed(region);
         } else {
-            let scrollback = (region.start == 0).then_some(&mut self.scrollback);
-            self.primary.scroll_up(region, count, blank, scrollback);
+            let count = count.min(region.len());
+            let moved = region.end - count..self.rows;
+            self.primary
+                .scroll_up(region, count, blank, Some(&mut self.scrollback));
+            if count > 0 {
+                self.changed(moved);
+            }
         }
     }
 
     /// SD, and RI on the top row of the scrolling region.
     pub(crate) fn scroll_down(&mut self, count: usize) {
         let (region, blank) = (self.top..self.bottom + 1, self.blank());
-        self.screen_mut().scroll_down(region, count, blank);
+        self.screen_mut().scroll_down(region.clone(), count, blank);
+        self.changed(region);
     }
 
     fn inside_region(&self) -> bool {
@@ -998,6 +1086,7 @@ impl Terminal {
     /// scrolling region becomes the whole screen and origin mode goes off.
     pub(crate) fn align(&mut self) {
         self.screen_mut().fill(Cell::new('E', 1, Style::PLAIN));
+        self.changed(0..self.rows);
         self.style = self.style.colors();
         self.top = 0;
         self.bottom = self.rows - 1;
@@ -1114,6 +1203,7 @@ impl Terminal {
     }
 
     pub(crate) fn set_mode(&mut self, mode: Mode, on: bool) {
+        let shown = self.modes.alternate_screen;
         match mode {
             Mode::Insert => self.insert = on,
             Mode::Newline => self.modes.newline = on,
@@ -1141,6 +1231,7 @@ impl Terminal {
                 self.modes.alternate_screen = true;
                 let blank = self.blank();
                 self.alternate.erase_rows(0..self.rows, blank);
+                self.changed(0..self.rows);
                 self.reset_wrap();
             }
             Mode::AlternateSaved => {
@@ -1161,6 +1252,10 @@ impl Terminal {
                 }
             }
             Mode::AlternateScroll => self.modes.alternate_scroll = on,
+        }
+        // A selection is of the screen it was made on.
+        if self.modes.alternate_screen != shown {
+            self.unselect();
         }
         // Each screen has flags of its own, so switching changes the ones in use.
         self.keyboard_changed();
@@ -1222,6 +1317,7 @@ impl Terminal {
     /// to draw it again, so only the scrollback is emptied.
     pub(crate) fn clear(&mut self) {
         self.scrollback.clear();
+        self.unselect();
         if self.modes.alternate_screen {
             return;
         }
@@ -1288,6 +1384,8 @@ impl Terminal {
         if (cols, rows) == (self.cols, self.rows) {
             return;
         }
+        // The rows are numbered anew.
+        self.unselect();
         let alternate = self.modes.alternate_screen;
         let point = |row, col, pending| Some(Point { row, col, pending });
         let mut cursor = point(self.row, self.col, self.pending);
@@ -1394,6 +1492,9 @@ impl Terminal {
             assert!(self.links.get(link).is_some(), "{link:?} in {self:?}");
         }
         assert!(self.titles.len() <= TITLES, "{self:?}");
+        if let Some(selection) = &self.selection {
+            selection.check(&self.rows());
+        }
     }
 }
 

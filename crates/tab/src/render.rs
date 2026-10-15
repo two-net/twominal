@@ -4,8 +4,9 @@
 //! palette, the colors programs set over it, and the cursor.
 //!
 //! Must not change terminal state. This half only reads: it lays out the grid in whole device
-//! pixels from what the webview measured, and turns what the Terminal Core holds, with the text
-//! being composed laid over it, into a [`Frame`] of the rows that changed and of the cursor, in
+//! pixels from what the webview measured, and turns what the Terminal Core holds, with the
+//! selection and the text being composed laid over it, into a [`Frame`] of the rows that changed
+//! and of the cursor, in
 //! the shape a program asked for or the settings give (TERM-07). Its other half,
 //! `src/tab/renderer.js`, measures the font and the terminal area and paints frames on the
 //! window's canvas, a pixel for each of the display's, so text is sharp at any scale (HW-03).
@@ -19,12 +20,14 @@
 //!
 //! It keeps the view: how far it is scrolled back, which a trackpad moves pixel by pixel
 //! (ANIM-06). Rows are known by the numbers the Terminal Core gives them, so a frame sends only
-//! the rows that changed, not those that moved, and says how far they moved.
+//! the rows that changed, not those that moved, and says how far they moved. It tells the Tab
+//! which row the last frame drew where, so the mouse selects the text under it (TERM-17).
 //!
 //! A tab sends a new frame only after the last one was drawn, so frames never queue behind
 //! heavy output (PERF-07).
 //!
-//! Filled in by #22 (grid), #23 (fonts), #24 (ligatures), #25 (cursor) and #26 (scrolling).
+//! Filled in by #22 (grid), #23 (fonts), #24 (ligatures), #25 (cursor), #26 (scrolling) and #28
+//! (selection).
 
 mod color;
 mod json;
@@ -38,7 +41,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::mem;
 use std::sync::Arc;
 
-use terminal_core::{Cursor, CursorShape, Row, Size, TerminalCore, ThemeColor};
+use terminal_core::{Cursor, CursorShape, Size, TerminalCore, ThemeColor};
 
 pub use color::{Palette, Rgb};
 pub use layout::{Layout, Measure};
@@ -70,6 +73,9 @@ pub struct Renderer {
     /// Where the rows of the last frame were: the number of the first, how many device pixels
     /// up they were drawn, and the number of the screen's first row.
     sent_at: Option<(u64, u32, u64)>,
+    /// The last frame's offset as a part of a row: how many device pixels up its rows were
+    /// drawn, over a cell's height then. A later measure may change the cell.
+    sent_offset: f64,
     /// The core's size in the last frame. Another size numbers the rows anew.
     size: Option<Size>,
     /// Where the window was last told the caret is.
@@ -207,6 +213,7 @@ impl Renderer {
             view: None,
             sent: Vec::new(),
             sent_at: None,
+            sent_offset: 0.0,
             size: None,
             caret: None,
             cursor: None,
@@ -302,6 +309,21 @@ impl Renderer {
         self.view = None;
     }
 
+    /// The number of the row the last frame drew `row` rows down from the top of the grid,
+    /// counting the row cut at the top as 0, as the Terminal Core numbers rows: what the Input
+    /// Handler's Pointer is on, for the Tab to select (TERM-17). It may be a row there is not, past
+    /// an edge. None before the first frame.
+    pub fn row_number(&self, row: i32) -> Option<i64> {
+        self.sent_at.map(|(top, _, _)| top as i64 + i64::from(row))
+    }
+
+    /// How far up the last frame drew its rows, as a part of a row: what the Tab gives the Input
+    /// Handler, so that its Pointer is on the row drawn under it (ANIM-06). 0 before the first
+    /// frame.
+    pub fn offset(&self) -> f64 {
+        self.sent_offset
+    }
+
     /// The number of the view's top row in `core`, and how many device pixels up its rows are
     /// drawn, for cells `height` pixels high. A part of a row that rounds to a whole one is the
     /// next row. The view follows the output on the alternate screen, after a resize and at the
@@ -332,10 +354,10 @@ impl Renderer {
         (top, offset)
     }
 
-    /// What changed since the last frame: what `core` holds, with `composing`, the text an input
-    /// method is composing, over the cursor, in the view, in the palette's colors and those the
-    /// program set over them. None when nothing did, and before the webview has measured. When
-    /// the colors changed, every row is sent.
+    /// What changed since the last frame: what `core` holds, with its selection, and `composing`,
+    /// the text an input method is composing, over the cursor, in the view, in the palette's
+    /// colors and those the program set over them. None when nothing did, and before the webview
+    /// has measured. When the colors changed, every row is sent.
     pub fn frame(&mut self, core: &TerminalCore, composing: &str) -> Option<Frame> {
         let geometry = self.geometry.clone()?;
         let colors = Colors::new(&self.palette, core.colors());
@@ -351,17 +373,17 @@ impl Renderer {
 
         // The view's rows: one more than the grid has while it is between two rows.
         let count = usize::from(size.rows) + usize::from(offset > 0);
-        let row = |number: u64| -> &Row {
-            match number.checked_sub(live) {
-                Some(on_screen) => &core.screen().rows()[on_screen as usize],
-                None => scrollback
-                    .get((number - scrollback.start()) as usize)
-                    .expect("a row the view has"),
-            }
-        };
         let mut lines: Vec<Line> = (top..top + count as u64)
-            .map(|number| line::draw(row(number), usize::from(size.cols), &colors))
+            .map(|number| {
+                let row = core.row(number).expect("a row the view has");
+                line::draw(row, usize::from(size.cols), &colors)
+            })
             .collect();
+        if let Some(selected) = core.selected() {
+            for (number, line) in (top..).zip(&mut lines) {
+                line::select(line, selected.cols(number), colors.selection);
+            }
+        }
 
         // The line the cursor is on, if it is in the view.
         let cursor = core.cursor();
@@ -443,6 +465,7 @@ impl Renderer {
             .collect();
         self.sent = lines;
         self.sent_at = Some((top, offset, live));
+        self.sent_offset = f64::from(offset) / f64::from(layout.cell_height);
         self.size = Some(size);
         self.colors = Some(colors);
         if !full

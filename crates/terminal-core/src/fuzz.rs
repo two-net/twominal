@@ -6,12 +6,13 @@
 //! output is cut, when the grid is resized and how many rows the scrollback keeps, and the
 //! rest is the output. The size and the scrollback stand for the window and the settings,
 //! which Twominal trusts, so they are kept small enough to fuzz quickly: a resize reflows
-//! every row the scrollback keeps. Only the output is hostile.
+//! every row the scrollback keeps. Only the output is hostile. The seed also says where the
+//! user selects (TERM-17), and copies.
 
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use crate::{Clipboard, Event, Size, TerminalCore};
+use crate::{Clipboard, Event, Place, Selecting, Size, TerminalCore};
 
 /// The nonce of the reports in fuzzed output, so that reports are read and not only skipped.
 pub const NONCE: &str = "n1";
@@ -56,6 +57,28 @@ impl Random {
     /// One of the scrollback's limits fuzzed.
     fn limit(&mut self) -> usize {
         LIMITS[self.below(LIMITS.len())]
+    }
+
+    /// A place on the rows `core` has, or a little past them, as a drag past the edge gives.
+    fn place(&mut self, core: &TerminalCore) -> Place {
+        let scrollback = core.scrollback();
+        let size = core.size();
+        let rows = scrollback.len() + usize::from(size.rows) + 4;
+        Place {
+            row: scrollback.start() as i64 - 2 + self.below(rows) as i64,
+            col: self.below(usize::from(size.cols) + 4) as i32 - 2,
+            right_half: self.below(2) == 1,
+        }
+    }
+
+    /// How to select: by characters, words or lines, or as a block.
+    fn selecting(&mut self) -> Selecting {
+        [
+            Selecting::Characters,
+            Selecting::Words,
+            Selecting::Lines,
+            Selecting::Block,
+        ][self.below(4)]
     }
 
     /// How much of the `left` bytes to interpret next: one byte, a few, many, or all.
@@ -116,8 +139,11 @@ pub fn input(size: Size, seed: u64, output: &[u8]) -> Vec<u8> {
 /// Hostile output never breaks the rules the Terminal Core keeps (REL-02), and never gets a
 /// reply that holds anything the program wrote (SEC-05): neither the core's own, nor the answers
 /// to questions about colors and the clipboard, whatever the theme and the clipboard hold. The
-/// output comes in pieces, with the grid resized, the scrollback's limit changed or Clear
-/// between some of them.
+/// output comes in pieces, with the grid resized, the scrollback's limit changed, Clear or a
+/// selection made or moved between some of them. What is selected copies as text with no control
+/// character but the line feed, and no space at the end of a line, and a selection that output
+/// left copies what it did before, but for the rows dropped past the scrollback's limit, which
+/// leave its start (TERM-17).
 pub fn interpret(data: &[u8]) {
     let input = Input::read(data);
     let mut random = Random::new(input.seed);
@@ -126,7 +152,12 @@ pub fn interpret(data: &[u8]) {
     let mut rest = input.output;
     while !rest.is_empty() {
         let (piece, after) = rest.split_at(random.cut(rest.len()));
-        for event in core.interpret(piece) {
+        let copied = core.copy();
+        let events = core.interpret(piece);
+        if let (Some(before), Some(now)) = (&copied, core.copy()) {
+            assert!(before.ends_with(&now), "{before:?} became {now:?}");
+        }
+        for event in events {
             match event {
                 Event::Reply(reply) => assert!(is_reply(&reply), "a reply of {reply:?}"),
                 Event::Color(query) => {
@@ -149,9 +180,18 @@ pub fn interpret(data: &[u8]) {
             0..4 => core.resize(random.size()),
             4 => core.set_scrollback(random.limit()),
             5 => core.clear(),
+            6 => {
+                let (at, by) = (random.place(&core), random.selecting());
+                core.select(at, by);
+            }
+            7 => core.extend(random.place(&core)),
+            8 => core.select_all(),
             _ => {}
         }
         check(&core);
+        if let Some(text) = core.copy() {
+            assert!(is_copy(&text), "copied {text:?}");
+        }
         rest = after;
     }
 }
@@ -173,17 +213,34 @@ pub fn split(data: &[u8]) {
 }
 
 /// A terminal that has interpreted `input`'s output, in pieces as long as `cut` says, and the
-/// events it gave.
+/// events it gave. At a byte the seed chooses, the same in every run, the user selects, so the
+/// output after it ends the selection, or keeps it, the same way however it is cut.
 fn run(input: Input, mut cut: impl FnMut(usize) -> usize) -> (TerminalCore, Vec<Event>) {
     let mut core = input.core();
     let mut events = Vec::new();
-    let mut rest = input.output;
-    while !rest.is_empty() {
-        let (piece, after) = rest.split_at(cut(rest.len()));
-        events.extend(core.interpret(piece));
-        rest = after;
+    let mut chosen = Random::new(!input.seed);
+    let (before, after) = input.output.split_at(chosen.below(input.output.len() + 1));
+    for (part, selects) in [(before, true), (after, false)] {
+        let mut rest = part;
+        while !rest.is_empty() {
+            let (piece, after) = rest.split_at(cut(rest.len()));
+            events.extend(core.interpret(piece));
+            rest = after;
+        }
+        if selects {
+            let (at, by) = (chosen.place(&core), chosen.selecting());
+            core.select(at, by);
+            core.extend(chosen.place(&core));
+        }
     }
     (core, events)
+}
+
+/// Whether `text` is what copying may give: no control character but the line feed, which
+/// no cell holds, and no space at the end of a line.
+fn is_copy(text: &str) -> bool {
+    !text.chars().any(|char| char.is_control() && char != '\n')
+        && !text.split('\n').any(|line| line.ends_with(' '))
 }
 
 /// Panics if `core` breaks a rule the Terminal Core relies on.

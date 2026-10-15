@@ -151,7 +151,8 @@ impl Menus {
                 .separator()
                 .close_window()
                 .build()?;
-            // These act on text fields in the page. Copying from the terminal comes with #28.
+            // These act on text fields in the page. Copy, Paste and Select All that act on the
+            // terminal come with #31, which first shows a tab (DESIGN.md §3, *Clipboard*).
             let edit = SubmenuBuilder::new(app, "Edit")
                 .undo()
                 .redo()
@@ -181,7 +182,8 @@ impl Menus {
                 .build()?
         } else {
             // Close Window and Quit are Twominal's own here: Linux has no ready-made ones.
-            // There is no Edit menu yet: the ready-made Copy would take Ctrl+C from the shell.
+            // There is no Edit menu yet: the ready-made Copy would take Ctrl+C from the shell,
+            // and Twominal's own acts on a tab, which #31 first shows.
             let file = SubmenuBuilder::new(app, "File")
                 .item(&new_window)
                 .separator()

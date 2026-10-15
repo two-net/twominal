@@ -11,7 +11,8 @@ use alloc::{format, vec};
 use crate::fuzz::{self, Random};
 use crate::width::width;
 use crate::{
-    osc, Cell, Clipboard, Color, Event, LinkId, Report, Selection, Size, TerminalCore, ThemeColor,
+    osc, Cell, Clipboard, Color, Event, LinkId, Place, Report, Selecting, Selection, Size,
+    TerminalCore, ThemeColor,
 };
 
 /// A terminal of `cols` × `rows` that has interpreted `bytes`.
@@ -965,6 +966,100 @@ fn a_character_cut_in_two_loses_nothing_around_it() {
         assert_eq!(rows(&core)[0], row, "{first:?} {second:?}");
         assert!(core.terminal == self::core(10, 2, &[first, second].concat()).terminal);
     }
+}
+
+#[test]
+fn a_selection_ends_or_stays_the_same_however_the_output_is_cut() {
+    // The selection is in the scrollback and on the screen's first row, which the output scrolls
+    // up a row at a time without writing on them.
+    let output =
+        b"\r\none\r\ntwo\r\nthree\r\n\xe4\xb8\xad\xe6\x96\x87 \x1b[31mred\x1b[m\r\nmore\r\n";
+    for by in [
+        Selecting::Characters,
+        Selecting::Words,
+        Selecting::Lines,
+        Selecting::Block,
+    ] {
+        let mut whole = core(6, 3, b"a b c\r\nd e f\r\ng h i\r\nj k l");
+        let at = |row, col| Place {
+            row,
+            col,
+            right_half: false,
+        };
+        whole.select(at(0, 2), by);
+        whole.extend(at(1, 4));
+        let mut bytewise = core(6, 3, b"a b c\r\nd e f\r\ng h i\r\nj k l");
+        bytewise.select(at(0, 2), by);
+        bytewise.extend(at(1, 4));
+        whole.interpret(output);
+        for byte in output {
+            bytewise.interpret(&[*byte]);
+        }
+        assert!(whole.terminal == bytewise.terminal, "{by:?}");
+        assert!(whole.copy().is_some(), "{by:?}");
+    }
+}
+
+#[test]
+fn a_place_anywhere_is_taken_to_the_nearest() {
+    let mut core = core(4, 2, b"ab\r\ncd\r\nef");
+    let far = |row, col| Place {
+        row,
+        col,
+        right_half: true,
+    };
+    for by in [
+        Selecting::Characters,
+        Selecting::Words,
+        Selecting::Lines,
+        Selecting::Block,
+    ] {
+        core.select(far(i64::MIN, i32::MIN), by);
+        core.extend(far(i64::MAX, i32::MAX));
+        core.terminal.check();
+        assert_eq!(core.copy().as_deref(), Some("ab\ncd\nef"), "{by:?}");
+    }
+}
+
+#[test]
+fn reading_the_selection_changes_nothing() {
+    let make = || {
+        let mut core = core(4, 2, b"a\r\nb\r\nc\r\nd");
+        core.select(
+            Place {
+                row: 0,
+                col: 0,
+                right_half: false,
+            },
+            Selecting::Lines,
+        );
+        core.extend(Place {
+            row: 4,
+            col: 0,
+            right_half: false,
+        });
+        // Its first rows are dropped, and cut from it as it is read.
+        core.set_scrollback(1);
+        core
+    };
+    let (read, unread) = (make(), make());
+    assert_eq!(read.copy().as_deref(), Some("b\nc\nd"));
+    assert_eq!(read.selected().map(|selected| selected.rows()), Some(1..=3));
+    assert!(read.terminal == unread.terminal);
+}
+
+#[test]
+fn rows_are_found_by_their_numbers_on_the_screen_shown() {
+    let mut core = core(4, 2, b"a\r\nb\r\nc");
+    assert_eq!(core.row(0).map(|row| row.text()).as_deref(), Some("a"));
+    assert_eq!(core.row(2).map(|row| row.text()).as_deref(), Some("c   "));
+    assert!(core.row(3).is_none());
+    // The alternate screen has no scrollback above it.
+    core.interpret(b"\x1b[?1049h\x1b[Hx");
+    assert!(core.row(0).is_none());
+    assert_eq!(core.row(1).map(|row| row.text()).as_deref(), Some("x   "));
+    core.set_scrollback(0);
+    assert!(core.row(0).is_none());
 }
 
 #[test]

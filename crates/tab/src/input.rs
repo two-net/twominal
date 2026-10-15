@@ -13,13 +13,17 @@
 //! So far keys, pastes and focus are passthrough: `key.rs` reads what a key event means, on
 //! any layout, and `encode.rs` turns it, a paste or a change of focus into the bytes a program
 //! expects, by the modes the Terminal Core keeps (TERM-08, TERM-09, TERM-11, HW-01). Before that,
-//! `shortcut.rs` takes Twominal's own keys: a page of scrolling and Clear (TERM-22). `mouse.rs`
-//! decides whether the mouse and the wheel are the program's, reported as it asked or as cursor
-//! keys, or Twominal's own, for selection, links and scrolling to act on (TERM-10, HW-02).
-//! DESIGN.md §3 has the rules, and the contract the webview half keeps.
+//! `shortcut.rs` takes Twominal's own keys: a page of scrolling, Clear (TERM-22), Copy, Paste and
+//! Select All. `mouse.rs` decides whether the mouse and the wheel are the program's, reported as
+//! it asked or as cursor keys, or Twominal's own, for selection, links and scrolling to act on
+//! (TERM-10, HW-02). The left button of a gesture that is Twominal's selects, by characters,
+//! words, lines or as a block (TERM-17), and on Linux the middle one pastes the primary
+//! selection (SW-05). A paste of more than a line into a program that did not ask for bracketed
+//! paste waits for the user to confirm it (SEC-06). DESIGN.md §3 has the rules, and the contract
+//! the webview half keeps.
 //!
-//! Filled in by #20 (keys and input methods), #21 (mouse), #26 (scrolling and Clear), #43
-//! (shortcuts) and #36–#37 (Scrollback Vim mode).
+//! Filled in by #20 (keys and input methods), #21 (mouse), #26 (scrolling and Clear), #28
+//! (selection, copy and paste), #43 (shortcuts) and #36–#37 (Scrollback Vim mode).
 
 mod encode;
 mod key;
@@ -28,7 +32,7 @@ mod shortcut;
 #[cfg(test)]
 mod tests;
 
-use terminal_core::{Modes, Size};
+use terminal_core::{Modes, Selecting, Size};
 
 use mouse::Mouse;
 use shortcut::Shortcut;
@@ -39,8 +43,9 @@ const TAKEN: usize = 8;
 
 /// One tab's input state: which mode it is in and what the keys mean there.
 pub struct InputHandler {
-    /// Whether Option types characters, as on macOS (DESIGN.md §3).
-    macos: bool,
+    /// Whose keys and mouse it reads: on macOS Option types characters (DESIGN.md §3), and each
+    /// OS has its own modifier for a block selection and its own Mod (Appendix A).
+    os: Os,
     /// The text an input method is composing, shown at the cursor until it is committed.
     composing: String,
     mouse: Mouse,
@@ -48,6 +53,43 @@ pub struct InputHandler {
     /// taken too, and their releases dropped, so a program never hears a release without its
     /// press.
     taken: Vec<String>,
+    /// How the left button's press selects, for the drags and the release of its gesture.
+    selecting: Option<Selecting>,
+    /// Whether a paste of more than a line waits for the user to confirm it: the Multi-line
+    /// paste warning setting (SEC-06).
+    paste_warning: bool,
+    /// The paste waiting for the user to confirm it.
+    waiting: Option<String>,
+}
+
+/// The OS whose keys and mouse an Input Handler reads.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Os {
+    MacOs,
+    Linux,
+    Windows,
+}
+
+impl Os {
+    /// The OS Twominal was built for. A Unix that is not macOS counts as Linux.
+    pub fn current() -> Self {
+        if cfg!(target_os = "macos") {
+            Self::MacOs
+        } else if cfg!(windows) {
+            Self::Windows
+        } else {
+            Self::Linux
+        }
+    }
+
+    /// Whether Option+drag, Ctrl+drag or Alt+drag, as this OS selects a block (Appendix A),
+    /// is what `modifiers` hold.
+    fn blocks(self, modifiers: Modifiers) -> bool {
+        match self {
+            Self::MacOs | Self::Windows => modifiers.alt,
+            Self::Linux => modifiers.ctrl,
+        }
+    }
 }
 
 /// A key, input-method or mouse event as the webview captured it, before it means anything.
@@ -60,8 +102,12 @@ pub enum InputEvent {
     Text(String),
     /// The text an input method is composing. Empty when the composition ends.
     Compose(String),
-    /// Text the user pasted.
+    /// Text the user pasted: the webview's `paste`, which on macOS Edit ▸ Paste fires.
     Paste(String),
+    /// The webview's `copy`, which on macOS Edit ▸ Copy fires (#31).
+    Copy,
+    /// The webview's Select All (#31).
+    SelectAll,
     /// The window gained focus, or lost it.
     Focus(bool),
     /// A mouse button went down or came up, or the mouse moved: `mousedown`, `mouseup` and
@@ -182,10 +228,26 @@ pub enum Action {
     Send(Vec<u8>),
     /// The text being composed changed, so the Renderer must show it at the cursor (#22).
     Composing,
-    /// The mouse did something the program is not told of, for Twominal to act on: select
-    /// (TERM-17), open a link or show its target (TERM-20), open the context menu (UI-04) or
-    /// paste the primary selection (SW-05).
+    /// The mouse did something the program is not told of and nothing here takes, for Twominal
+    /// to act on: open a link or show its target (TERM-20), or open the context menu (UI-04).
     Pointer(Pointer),
+    /// The left button selects (TERM-17). Its press starts a selection, by characters, words or
+    /// lines as its clicks say or as a block with the OS's modifier, and its drags and its
+    /// release move the selection's end. The Pointer says where, and its `kind` which it is.
+    Select(Pointer, Selecting),
+    /// Copy the selection to the clipboard (SW-05).
+    Copy,
+    /// Paste the clipboard (SW-05). The Tab reads it and gives it to [`InputHandler::paste`].
+    Paste,
+    /// Paste the primary selection: a middle-click on Linux (SW-05). The Tab reads it and gives
+    /// it to [`InputHandler::paste`].
+    PastePrimary,
+    /// Select everything.
+    SelectAll,
+    /// A paste of `lines` lines waits for the user to confirm it, since the program did not ask
+    /// for bracketed paste and its line breaks would run what is before them (SEC-06). The Tab
+    /// asks, and gives the answer to [`InputHandler::confirm_paste`].
+    ConfirmPaste { lines: usize },
     /// The wheel, the trackpad, or Shift+Page Up or Down scrolled the view by this many rows,
     /// toward newer output when positive. Fractional, so a trackpad moves it pixel by pixel
     /// (HW-02, ANIM-06).
@@ -235,16 +297,19 @@ pub enum Button {
 
 impl InputHandler {
     pub fn new() -> Self {
-        Self::on(cfg!(target_os = "macos"))
+        Self::on(Os::current())
     }
 
-    /// An Input Handler as on macOS, or as on Linux and Windows.
-    fn on(macos: bool) -> Self {
+    /// An Input Handler as on `os`.
+    pub fn on(os: Os) -> Self {
         Self {
-            macos,
+            os,
             composing: String::new(),
             mouse: Mouse::default(),
             taken: Vec::new(),
+            selecting: None,
+            paste_warning: true,
+            waiting: None,
         }
     }
 
@@ -255,13 +320,27 @@ impl InputHandler {
         self.mouse.resize(grid);
     }
 
+    /// How far up the view's rows are drawn: the part of a row the view is scrolled past its top
+    /// one, as the Renderer's last frame drew it (ANIM-06). A Pointer's row is then the row drawn
+    /// under it. Reports to programs are of the grid's cells, which the view does not move.
+    pub fn set_offset(&mut self, rows: f64) {
+        self.mouse.set_offset(rows);
+    }
+
+    /// Whether a paste of more than a line into a program that did not ask for bracketed paste
+    /// waits for the user to confirm it: the Multi-line paste warning setting (SEC-06). Until it
+    /// is called it does, Appendix B's default.
+    pub fn set_paste_warning(&mut self, on: bool) {
+        self.paste_warning = on;
+    }
+
     /// What `event` means, with the modes the program set. `None` when it means nothing: a
     /// key the program cannot be told of, one it did not ask to hear about, or a move that
     /// stays in its cell. Nothing is waited for, so Esc is sent the moment it comes (TERM-08).
     pub fn handle(&mut self, event: InputEvent, modes: &Modes) -> Option<Action> {
         let bytes = match event {
             InputEvent::Key(event) => {
-                let press = key::read(&event, self.macos)?;
+                let press = key::read(&event, self.os == Os::MacOs)?;
                 if let Some(action) = self.shortcut(&event, &press, modes) {
                     return action;
                 }
@@ -287,13 +366,17 @@ impl InputHandler {
                 self.composing = text;
                 return Some(Action::Composing);
             }
-            InputEvent::Paste(text) if text.is_empty() => return None,
-            InputEvent::Paste(text) => {
-                return Some(Action::Type(encode::paste(&text, modes.bracketed_paste)));
-            }
+            InputEvent::Paste(text) => return self.paste(text, modes),
+            InputEvent::Copy => return Some(Action::Copy),
+            InputEvent::SelectAll => return Some(Action::SelectAll),
             InputEvent::Focus(focused) if modes.focus => encode::focus(focused).to_vec(),
             InputEvent::Focus(_) => return None,
-            InputEvent::Mouse(event) => return self.mouse.event(&event, modes),
+            InputEvent::Mouse(event) => {
+                return match self.mouse.event(&event, modes)? {
+                    Action::Pointer(pointer) => Some(self.point(pointer)),
+                    action => Some(action),
+                };
+            }
             InputEvent::Wheel(event) => return self.mouse.wheel(&event, modes),
         };
         (!bytes.is_empty()).then_some(Action::Send(bytes))
@@ -318,12 +401,12 @@ impl InputHandler {
             }
             Kind::Repeat => {
                 taken?;
-                let shortcut = shortcut::find(press, modes, self.macos);
+                let shortcut = shortcut::find(press, modes, self.os == Os::MacOs);
                 return Some(shortcut.and_then(|shortcut| self.act(shortcut)));
             }
             Kind::Press => {}
         }
-        let Some(shortcut) = shortcut::find(press, modes, self.macos) else {
+        let Some(shortcut) = shortcut::find(press, modes, self.os == Os::MacOs) else {
             // Down again, as itself: its release, if it was lost, is the program's.
             if let Some(taken) = taken {
                 self.taken.remove(taken);
@@ -339,7 +422,8 @@ impl InputHandler {
         Some(self.act(shortcut))
     }
 
-    /// What `shortcut` does: scroll a page, of as many rows as the grid has, or Clear.
+    /// What `shortcut` does: scroll a page, of as many rows as the grid has, Clear, Copy, Paste
+    /// or Select All.
     fn act(&self, shortcut: Shortcut) -> Option<Action> {
         match shortcut {
             Shortcut::Page { up } => self
@@ -347,7 +431,70 @@ impl InputHandler {
                 .page()
                 .map(|rows| Action::Scroll(if up { -rows } else { rows })),
             Shortcut::Clear => Some(Action::Clear),
+            Shortcut::Copy => Some(Action::Copy),
+            Shortcut::Paste => Some(Action::Paste),
+            Shortcut::SelectAll => Some(Action::SelectAll),
         }
+    }
+
+    /// What `pointer`, of a gesture that is Twominal's, means. The left button selects: its
+    /// press as its clicks say, 1, 2 and 3 and round again, or as a block with the OS's modifier,
+    /// and its drags and release as the press did. On Linux a press of the middle button pastes
+    /// the primary selection. The rest is for links and the context menu.
+    fn point(&mut self, pointer: Pointer) -> Action {
+        match (pointer.kind, pointer.button) {
+            (PointerKind::Press, Some(Button::Left)) => {
+                let by = if self.os.blocks(pointer.modifiers) {
+                    Selecting::Block
+                } else {
+                    match pointer.clicks.saturating_sub(1) % 3 {
+                        0 => Selecting::Characters,
+                        1 => Selecting::Words,
+                        _ => Selecting::Lines,
+                    }
+                };
+                self.selecting = Some(by);
+                Action::Select(pointer, by)
+            }
+            (PointerKind::Drag | PointerKind::Release, Some(Button::Left)) => {
+                let by = match pointer.kind {
+                    PointerKind::Release => self.selecting.take(),
+                    _ => self.selecting,
+                };
+                match by {
+                    Some(by) => Action::Select(pointer, by),
+                    None => Action::Pointer(pointer),
+                }
+            }
+            (PointerKind::Press, Some(Button::Middle)) if self.os == Os::Linux => {
+                Action::PastePrimary
+            }
+            _ => Action::Pointer(pointer),
+        }
+    }
+
+    /// What pasting `text` means: the text, bracketed if the program asked (TERM-11), or the
+    /// question whether to paste it when it has a line break, the program did not ask, and the
+    /// warning is on (SEC-06). A paste waiting for the answer gives way to this one. Text read
+    /// from the clipboard for [`Action::Paste`] and [`Action::PastePrimary`] comes here too.
+    pub fn paste(&mut self, text: String, modes: &Modes) -> Option<Action> {
+        if text.is_empty() {
+            return None;
+        }
+        if self.paste_warning && !modes.bracketed_paste && text.contains(['\n', '\r']) {
+            let lines = lines(&text);
+            self.waiting = Some(text);
+            return Some(Action::ConfirmPaste { lines });
+        }
+        self.waiting = None;
+        Some(Action::Type(encode::paste(&text, modes.bracketed_paste)))
+    }
+
+    /// The user's answer to [`Action::ConfirmPaste`]: the paste waiting, encoded by the modes as
+    /// they are now, or nothing when the user said no or nothing waits.
+    pub fn confirm_paste(&mut self, paste: bool, modes: &Modes) -> Option<Action> {
+        let text = self.waiting.take().filter(|_| paste)?;
+        Some(Action::Type(encode::paste(&text, modes.bracketed_paste)))
     }
 
     /// The text an input method is composing, for the Renderer to show at the cursor. Empty
@@ -355,6 +502,13 @@ impl InputHandler {
     pub fn composing(&self) -> &str {
         &self.composing
     }
+}
+
+/// How many lines `text` has, as an editor counts them: a line break at its end starts none.
+fn lines(text: &str) -> usize {
+    let breaks = text.replace("\r\n", "\n").matches(['\n', '\r']).count();
+    let ends = text.ends_with(['\n', '\r']);
+    breaks + 1 - usize::from(ends)
 }
 
 impl Default for InputHandler {

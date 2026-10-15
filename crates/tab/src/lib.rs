@@ -15,7 +15,13 @@
 //! directory, the bell and the clipboard go up, as DESIGN.md §3 *What a program tells the tab*
 //! says (TERM-12, TERM-13).
 //!
-//! Filled in by #16 (Terminal Core), #20 (Input Handler), #22 (Renderer) and #31 (tabs).
+//! So is what the Input Handler makes of the mouse and of Copy, Paste and Select All: the Tab
+//! selects in the Terminal Core where the Renderer drew the row under the mouse, copies what is
+//! selected to the [`OsClipboard`], and gives what it pastes back to the Input Handler (TERM-17,
+//! SW-05, SEC-06), as DESIGN.md §3 *What the Tab does with the mouse and the clipboard* says.
+//!
+//! Filled in by #16 (Terminal Core), #20 (Input Handler), #22 (Renderer), #28 (the clipboard) and
+//! #31 (tabs).
 
 pub mod command_line;
 pub mod input;
@@ -29,6 +35,8 @@ use input::InputHandler;
 use render::Renderer;
 use session::Session;
 use terminal_core::TerminalCore;
+
+pub use terminal_core::Selection;
 
 /// Names a tab for as long as the app runs. Never reused.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -58,3 +66,15 @@ pub struct Handle {
 /// What a tab can be told: input, output from its session, new settings or theme, that a
 /// frame was drawn, to close. Each variant arrives with the feature that sends it.
 pub enum Message {}
+
+/// The OS's clipboard and, on Linux, its primary selection (SW-05): the first part of the Host
+/// the App Shell gives each tab (#31). The user's copies and pastes (TERM-17) and what programs
+/// ask of the clipboard (OSC 52, SEC-04) both go through it. Any tab's thread may call it.
+pub trait OsClipboard: Send + Sync {
+    /// Puts `text` on `which`. Off Linux there is no primary selection, and it takes nothing.
+    fn write(&self, which: Selection, text: &str);
+
+    /// The text `which` holds. None when it holds none, or no text, and off Linux for the
+    /// primary selection.
+    fn read(&self, which: Selection) -> Option<String>;
+}

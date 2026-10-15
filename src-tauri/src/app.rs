@@ -22,8 +22,12 @@
 //! before Tauri starts, and `app/socket.rs` hands a command to the Twominal that is already
 //! running (GEN-05).
 //!
+//! `app/clipboard.rs` is the OS clipboard, and on Linux the primary selection, which each tab is
+//! given (SW-05).
+//!
 //! Filled in by #41 (splash).
 
+mod clipboard;
 mod fonts;
 mod launcher;
 mod menu;

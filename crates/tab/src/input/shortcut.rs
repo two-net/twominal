@@ -1,7 +1,7 @@
 //! Twominal's own keys (Appendix A), taken before a key is encoded for the program, whatever the
-//! kitty keyboard protocol asks, as kitty takes its own. So far a page of scrolling and Clear;
-//! #43 makes this the table of every shortcut, which the user can remap (SET-06). DESIGN.md §3
-//! has the rules.
+//! kitty keyboard protocol asks, as kitty takes its own. So far a page of scrolling, Clear, Copy,
+//! Paste and Select All; #43 makes this the table of every shortcut, which the user can remap
+//! (SET-06). DESIGN.md §3 has the rules.
 
 use terminal_core::Modes;
 
@@ -14,6 +14,12 @@ pub(crate) enum Shortcut {
     Page { up: bool },
     /// Clears the screen and the scrollback, keeping the cursor's line (TERM-22).
     Clear,
+    /// Copies the selection (TERM-17, SW-05).
+    Copy,
+    /// Pastes the clipboard (SW-05).
+    Paste,
+    /// Selects everything.
+    SelectAll,
 }
 
 /// The shortcut `press` is, if it is one. On `macos` Mod is Cmd, and elsewhere Ctrl+Shift.
@@ -29,12 +35,22 @@ pub(crate) fn find(press: &Press, modes: &Modes, macos: bool) -> Option<Shortcut
     if let Some(up) = page {
         return (held == Mods::SHIFT && !modes.alternate_screen).then_some(Shortcut::Page { up });
     }
-    let clear = if macos {
+    let modifier = if macos {
         Mods::SUPER
     } else {
         Mods::CTRL | Mods::SHIFT
     };
-    (held == clear && is(press, 'k')).then_some(Shortcut::Clear)
+    if held != modifier {
+        return None;
+    }
+    [
+        ('k', Shortcut::Clear),
+        ('c', Shortcut::Copy),
+        ('v', Shortcut::Paste),
+        ('a', Shortcut::SelectAll),
+    ]
+    .into_iter()
+    .find_map(|(letter, shortcut)| is(press, letter).then_some(shortcut))
 }
 
 /// Whether `press` is the key for `letter`: the key that types it on the layout, or on a layout
