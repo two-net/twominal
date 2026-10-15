@@ -10,9 +10,10 @@
 //! window's canvas, a pixel for each of the display's, so text is sharp at any scale (HW-03).
 //!
 //! `layout.rs` makes the measurements whole pixels, `color.rs` fills in the colors, `line.rs`
-//! builds each row as it is drawn and cuts it into runs, `shapes.rs` makes box drawing, blocks,
-//! powerline symbols and underlines into shapes that join from cell to cell (FONT-10), and
-//! `json.rs` writes the frame. DESIGN.md §3 has the rules.
+//! builds each row as it is drawn and cuts it into runs, among them the runs that may hold the
+//! font's ligatures, which the cursor splits (FONT-04 to FONT-07), `shapes.rs` makes box
+//! drawing, blocks, powerline symbols and underlines into shapes that join from cell to cell
+//! (FONT-10), and `json.rs` writes the frame. DESIGN.md §3 has the rules.
 //!
 //! A tab sends a new frame only after the last one was drawn, so frames never queue behind
 //! heavy output (PERF-07).
@@ -37,12 +38,14 @@ pub use color::{Palette, Rgb};
 pub use layout::{Layout, Measure};
 
 use layout::Geometry;
-use line::{Line, Run, Span};
+use line::{Cells, Line, Run, Span};
 use shapes::Primitive;
 
 /// One tab's render state: what the window was last sent and what has changed since.
 pub struct Renderer {
     palette: Palette,
+    /// Whether the font's ligatures are drawn: the Font ligatures setting (FONT-03).
+    ligatures: bool,
     /// The layout of what the webview measured last. Nothing is drawn before it has measured.
     geometry: Option<Arc<Geometry>>,
     /// The rows as the window was last sent them.
@@ -94,6 +97,8 @@ impl Renderer {
     pub fn new(palette: Palette) -> Self {
         Self {
             palette,
+            // Appendix B's default.
+            ligatures: true,
             geometry: None,
             sent: Vec::new(),
             caret: None,
@@ -106,6 +111,15 @@ impl Renderer {
     pub fn set_palette(&mut self, palette: Palette) {
         if palette != self.palette {
             self.palette = palette;
+            self.full = true;
+        }
+    }
+
+    /// Whether the font's ligatures are drawn: the Font ligatures setting changed (FONT-03). The
+    /// next frame has every row.
+    pub fn set_ligatures(&mut self, on: bool) {
+        if on != self.ligatures {
+            self.ligatures = on;
             self.full = true;
         }
     }
@@ -150,6 +164,16 @@ impl Renderer {
                 caret.col = col as u16;
             }
         }
+        if self.ligatures {
+            // A cursor that is shown splits the ligature it is on (FONT-07).
+            let cursor = core.modes().cursor_visible.then_some(cursor);
+            for (index, line) in lines.iter_mut().enumerate() {
+                let col = cursor
+                    .filter(|cursor| usize::from(cursor.row) == index)
+                    .map(|cursor| usize::from(cursor.col));
+                line::ligatures(line, col);
+            }
+        }
 
         let full = mem::take(&mut self.full)
             || lines.len() != self.sent.len()
@@ -175,7 +199,7 @@ impl Renderer {
         let chars = rows
             .iter()
             .flat_map(|row| &row.runs)
-            .filter(|run| run.cells.is_none())
+            .filter(|run| run.cells == Cells::Each)
             .flat_map(|run| run.text.chars())
             .filter(|char| shapes::is_shape(*char));
         for char in chars {

@@ -21,8 +21,10 @@
 //! in their lists, which hold those the frame uses, each once. A style's flags are 1 for bold, 2
 //! for italic, 4 for crossed out, and the underline's style times 8: none, single, double,
 //! curly, dotted and dashed. A row's spans are its backgrounds, three numbers each, and its runs
-//! its text. A run without a count has a cell for each character; one with a count is drawn
-//! whole over that many cells. A shape is a list of pieces: `[x, y, width, height]` filled,
+//! its text. A run without a count has a cell for each character, each drawn on its own. One
+//! with a count of 0 has a cell for each character too, and is drawn as one so that the font's
+//! ligatures form, stretched across to exactly its cells. One with another count is drawn whole
+//! over that many cells. A shape is a list of pieces: `[x, y, width, height]` filled,
 //! `[x, y, width, height, alpha]` filled at `alpha`, and `["p", x, y, x, y, …]` a polygon, in
 //! device pixels from the cell's top left.
 
@@ -31,6 +33,7 @@ use std::fmt::Write;
 use std::hash::Hash;
 
 use super::color::{Ink, Rgb};
+use super::line::Cells;
 use super::shapes::Primitive;
 use super::{Frame, Full};
 
@@ -61,8 +64,12 @@ impl Frame {
                 let style = styles.number(run.ink);
                 let _ = write!(rows, "[{},{style},", run.col);
                 string(&mut rows, &run.text);
-                if let Some(cells) = run.cells {
-                    let _ = write!(rows, ",{cells}");
+                match run.cells {
+                    Cells::Each => {}
+                    Cells::Joined => rows.push_str(",0"),
+                    Cells::Whole(cells) => {
+                        let _ = write!(rows, ",{cells}");
+                    }
                 }
                 rows.push(']');
             }

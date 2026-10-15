@@ -1,9 +1,10 @@
 //! Each row as it is drawn, and how a frame sends it: the text as runs of cells drawn alike, and
 //! the backgrounds as spans.
 //!
-//! A row is built from the core's, with every color filled in and the text being composed laid
-//! over it (HW-01). The Renderer compares rows built this way with the ones it sent last, so
-//! anything laid over the screen is drawn and sent the same way.
+//! A row is built from the core's, with every color filled in, the text being composed laid
+//! over it (HW-01), and the cells that may join a ligature marked (FONT-04 to FONT-07). The
+//! Renderer compares rows built this way with the ones it sent last, so anything laid over the
+//! screen is drawn and sent the same way.
 
 use terminal_core::{width, Row};
 
@@ -24,6 +25,9 @@ pub(crate) struct Drawn {
     /// 1, 2 for a wide character, or 0 for its right half.
     width: u8,
     look: Look,
+    /// The cell may be drawn as one with the cells beside it, so that the font's ligatures form
+    /// (FONT-04). Set by [`ligatures`].
+    joins: bool,
 }
 
 impl Drawn {
@@ -33,6 +37,7 @@ impl Drawn {
             chars: [Some(' '), None, None],
             width: 1,
             look,
+            joins: false,
         }
     }
 
@@ -74,6 +79,7 @@ pub(crate) fn draw(row: &Row, palette: &Palette) -> Line {
                 chars,
                 width: cell.width() as u8,
                 look,
+                joins: false,
             }
         })
         .collect()
@@ -102,12 +108,14 @@ pub(crate) fn compose(line: &mut Line, col: usize, text: &str, palette: &Palette
                     chars: [Some(char), None, None],
                     width: width as u8,
                     look,
+                    joins: false,
                 });
                 if width == 2 {
                     cells.push(Drawn {
                         chars: [None; CHARS],
                         width: 0,
                         look,
+                        joins: false,
                     });
                 }
             }
@@ -137,6 +145,49 @@ pub(crate) fn compose(line: &mut Line, col: usize, text: &str, palette: &Palette
     start
 }
 
+/// Marks the cells of `line` that may join a ligature: those holding one printable ASCII
+/// character, a space included, with nothing joined to it (FONT-04). Programming ligatures are
+/// made of ASCII, and any other character stays alone in its cell, where no shaper can move it
+/// (FONT-05). The cell at `cursor`, and the cells beside it that a ligature could join to it,
+/// are left unmarked, so that a ligature under the cursor is drawn as separate characters
+/// (FONT-07): the cells around it that look alike and hold the same kind of character, letters
+/// and digits or anything else, with no blank between.
+pub(crate) fn ligatures(line: &mut Line, cursor: Option<usize>) {
+    for col in 0..line.len() {
+        // A skin tone after the character joins it, and they are drawn as one (`unit`).
+        let toned = line
+            .get(col + 1)
+            .is_some_and(|next| next.chars[0].is_some_and(skin_tone));
+        let cell = &mut line[col];
+        cell.joins =
+            cell.width == 1 && !toned && cell.alone().is_some_and(|char| matches!(char, ' '..='~'));
+    }
+    let Some(col) = cursor.filter(|col| line.get(*col).is_some_and(|cell| cell.joins)) else {
+        return;
+    };
+    let at = line[col];
+    if at.alone() == Some(' ') {
+        // No ligature holds a blank.
+        return;
+    }
+    let kind = |cell: &Drawn| cell.alone().map(|char| char.is_ascii_alphanumeric());
+    let beside = |cell: &Drawn| {
+        cell.joins && cell.look == at.look && cell.alone() != Some(' ') && kind(cell) == kind(&at)
+    };
+    let start = (0..col)
+        .rev()
+        .take_while(|before| beside(&line[*before]))
+        .last()
+        .unwrap_or(col);
+    let end = (col + 1..line.len())
+        .take_while(|after| beside(&line[*after]))
+        .last()
+        .map_or(col + 1, |last| last + 1);
+    for cell in &mut line[start..end] {
+        cell.joins = false;
+    }
+}
+
 /// Cells next to each other whose text is drawn alike.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Run {
@@ -144,10 +195,20 @@ pub(crate) struct Run {
     pub(crate) col: u16,
     pub(crate) ink: Ink,
     pub(crate) text: String,
-    /// `None` when each character of `text` is a cell of its own, one column wide. Otherwise
-    /// `text` is drawn as one from `col`, over this many cells: a wide character, a character
-    /// with others joined to it, or a sequence drawn as one.
-    pub(crate) cells: Option<u16>,
+    pub(crate) cells: Cells,
+}
+
+/// How a run's text takes its cells.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Cells {
+    /// Each character is a cell of its own, one column wide, and is drawn on its own.
+    Each,
+    /// Each character is a cell of its own, one column wide, and the text is drawn as one, so
+    /// that the font's ligatures form, stretched across to exactly its cells (FONT-04, FONT-05).
+    Joined,
+    /// The text is drawn as one from the run's column, over this many cells: a wide character,
+    /// a character with others joined to it, or a sequence drawn as one.
+    Whole(u16),
 }
 
 /// Cells next to each other with one background.
@@ -178,9 +239,13 @@ pub(crate) fn spans(line: &Line, background: Rgb) -> Vec<Span> {
     spans
 }
 
-/// The text of `line`, as runs.
+/// The text of `line`, as runs. Cells next to each other that may join a ligature and look
+/// alike, background and all, are a run drawn as one (FONT-06), unless it holds a single
+/// character. The other cells, each drawn on its own, make runs of one text color and
+/// attributes.
 pub(crate) fn runs(line: &Line) -> Vec<Run> {
     let mut runs = Vec::new();
+    // The run of cells each drawn on its own that the next such cell may join.
     let mut open: Option<Run> = None;
     let mut col = 0;
     while col < line.len() {
@@ -191,27 +256,41 @@ pub(crate) fn runs(line: &Line) -> Vec<Run> {
             col += 1;
             continue;
         }
+        if cell.joins {
+            let end = (col..line.len())
+                .find(|end| !(line[*end].joins && line[*end].look == cell.look))
+                .unwrap_or(line.len());
+            let mut joined = Run {
+                col: col as u16,
+                ink: cell.look.ink,
+                text: line[col..end].iter().filter_map(Drawn::alone).collect(),
+                cells: Cells::Joined,
+            };
+            trim(&mut joined);
+            // Each character is ASCII, a byte.
+            if joined.text.len() > 1 {
+                close(&mut runs, open.take());
+                runs.push(joined);
+            } else {
+                for (col, cell) in line.iter().enumerate().take(end).skip(col) {
+                    if let Some(char) = cell.alone() {
+                        add(&mut runs, &mut open, col, cell.look.ink, char);
+                    }
+                }
+            }
+            col = end;
+            continue;
+        }
         let (end, text) = unit(line, col);
         match (cell.alone(), end == col + 1 && cell.width == 1) {
-            (Some(char), true) => match &mut open {
-                Some(run) if run.ink == cell.look.ink => run.text.push(char),
-                _ => {
-                    close(&mut runs, open.take());
-                    open = Some(Run {
-                        col: col as u16,
-                        ink: cell.look.ink,
-                        text: char.to_string(),
-                        cells: None,
-                    });
-                }
-            },
+            (Some(char), true) => add(&mut runs, &mut open, col, cell.look.ink, char),
             _ => {
                 close(&mut runs, open.take());
                 runs.push(Run {
                     col: col as u16,
                     ink: cell.look.ink,
                     text,
-                    cells: Some((end - col) as u16),
+                    cells: Cells::Whole((end - col) as u16),
                 });
             }
         }
@@ -221,18 +300,40 @@ pub(crate) fn runs(line: &Line) -> Vec<Run> {
     runs
 }
 
+/// Adds `char`, in the cell at `col`, to `open`, the run of cells each drawn on its own, or
+/// starts another when its ink is not `ink`.
+fn add(runs: &mut Vec<Run>, open: &mut Option<Run>, col: usize, ink: Ink, char: char) {
+    match open {
+        Some(run) if run.ink == ink => run.text.push(char),
+        _ => {
+            close(runs, open.take());
+            *open = Some(Run {
+                col: col as u16,
+                ink,
+                text: char.to_string(),
+                cells: Cells::Each,
+            });
+        }
+    }
+}
+
 /// Adds `run`, if there is one, to `runs`, without the blanks at its ends that draw nothing.
 fn close(runs: &mut Vec<Run>, run: Option<Run>) {
     let Some(mut run) = run else {
         return;
     };
+    trim(&mut run);
+    if !run.text.is_empty() {
+        runs.push(run);
+    }
+}
+
+/// Leaves off the blanks at the ends of `run` that draw nothing.
+fn trim(run: &mut Run) {
     if !run.ink.decorates() {
         let kept = run.text.trim_start_matches(' ');
         run.col += (run.text.len() - kept.len()) as u16;
         run.text = kept.trim_end_matches(' ').to_string();
-    }
-    if !run.text.is_empty() {
-        runs.push(run);
     }
 }
 

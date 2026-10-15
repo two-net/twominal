@@ -53,9 +53,8 @@ fn first(core: &TerminalCore) -> Frame {
     renderer(size.cols, size.rows).frame(core, "").unwrap()
 }
 
-/// A run as the tests write it: its column, its text and the cells it is drawn over, if not
-/// one for each character.
-type Text = (u16, String, Option<u16>);
+/// A run as the tests write it: its column, its text and how it takes its cells.
+type Text = (u16, String, Cells);
 
 fn texts(row: &RowFrame) -> Vec<Text> {
     row.runs
@@ -64,12 +63,18 @@ fn texts(row: &RowFrame) -> Vec<Text> {
         .collect()
 }
 
+/// A run with a cell for each character, each drawn on its own.
 fn text(col: u16, text: &str) -> Text {
-    (col, text.to_string(), None)
+    (col, text.to_string(), Cells::Each)
+}
+
+/// A run with a cell for each character, drawn as one so that ligatures form.
+fn joined(col: u16, text: &str) -> Text {
+    (col, text.to_string(), Cells::Joined)
 }
 
 fn whole(col: u16, text: &str, cells: u16) -> Text {
-    (col, text.to_string(), Some(cells))
+    (col, text.to_string(), Cells::Whole(cells))
 }
 
 /// The ink of the run at `col` of the first row.
@@ -378,7 +383,7 @@ fn the_first_frame_has_the_layout_and_every_row() {
     assert_eq!(full.geometry.canvas, (32, 54));
     let indexes: Vec<u16> = frame.rows.iter().map(|row| row.index).collect();
     assert_eq!(indexes, [0, 1, 2]);
-    assert_eq!(texts(&frame.rows[0]), [text(0, "hi")]);
+    assert_eq!(texts(&frame.rows[0]), [joined(0, "hi")]);
     assert!(frame.rows[1].runs.is_empty() && frame.rows[1].spans.is_empty());
     assert_eq!(frame.caret, terminal_core::Cursor { row: 0, col: 2 });
 }
@@ -395,7 +400,7 @@ fn a_frame_holds_only_the_rows_that_changed() {
     assert!(frame.full.is_none());
     assert_eq!(frame.rows.len(), 1);
     assert_eq!(frame.rows[0].index, 1);
-    assert_eq!(texts(&frame.rows[0]), [text(0, "due")]);
+    assert_eq!(texts(&frame.rows[0]), [joined(0, "due")]);
 
     // A scroll moves every row.
     core.interpret(b"\x1b[3;1H\n");
@@ -516,6 +521,11 @@ fn output(random: &mut Random) -> String {
         "\x1b[?1049l",
         "\x1b[?7l",
         "\x1b[?7h",
+        "->",
+        "!==",
+        "www",
+        "\x1b[?25l",
+        "\x1b[?25h",
     ];
     (0..1 + random.below(12))
         .map(|_| random.pick(PIECES))
@@ -541,6 +551,7 @@ fn frames_add_up_to_what_a_full_frame_draws() {
         };
         let mut core = TerminalCore::new(size, None);
         let mut colors = palette();
+        let mut ligatures = true;
         let mut measure = measured(size.cols, size.rows);
         let mut renderer = Renderer::new(colors.clone());
         renderer.measure(&measure).unwrap();
@@ -564,6 +575,10 @@ fn frames_add_up_to_what_a_full_frame_draws() {
                     colors.background = Rgb::new(random.below(256) as u8, 0, 0);
                     renderer.set_palette(colors.clone());
                 }
+                2 => {
+                    ligatures = !ligatures;
+                    renderer.set_ligatures(ligatures);
+                }
                 _ => {}
             }
             let composing = random.pick(&composings);
@@ -582,6 +597,7 @@ fn frames_add_up_to_what_a_full_frame_draws() {
             }
 
             let mut fresh = Renderer::new(colors.clone());
+            fresh.set_ligatures(ligatures);
             fresh.measure(&measure).unwrap();
             let full = fresh.frame(&core, composing).unwrap();
             assert_eq!(canvas, full.rows, "step {step}");
@@ -599,7 +615,7 @@ fn a_run_is_cells_drawn_alike() {
     let frame = first(&core(12, 1, "ab\x1b[31mcd\x1b[0m ef"));
     assert_eq!(
         texts(&frame.rows[0]),
-        [text(0, "ab"), text(2, "cd"), text(5, "ef")]
+        [joined(0, "ab"), joined(2, "cd"), joined(5, "ef")]
     );
     assert_eq!(ink_at(&frame, 2).color, palette().ansi[1]);
     assert_eq!(ink_at(&frame, 5).color, palette().foreground);
@@ -608,9 +624,9 @@ fn a_run_is_cells_drawn_alike() {
 #[test]
 fn blanks_draw_nothing_unless_underlined_or_crossed_out() {
     let frame = first(&core(12, 1, "  a b  \x1b[4m  \x1b[0m"));
-    assert_eq!(texts(&frame.rows[0]), [text(2, "a b"), text(7, "  ")]);
+    assert_eq!(texts(&frame.rows[0]), [joined(2, "a b"), joined(7, "  ")]);
     let frame = first(&core(12, 1, "\x1b[9m  x\x1b[0m"));
-    assert_eq!(texts(&frame.rows[0]), [text(0, "  x")]);
+    assert_eq!(texts(&frame.rows[0]), [joined(0, "  x")]);
 }
 
 #[test]
@@ -690,6 +706,134 @@ fn cells_drawn_unlike_are_never_joined() {
 }
 
 // ---------------------------------------------------------------------------------------
+// Ligatures
+// ---------------------------------------------------------------------------------------
+
+/// The runs of a row `cols` wide after `output`, with the cursor where `output` leaves it.
+fn row(cols: u16, output: &str) -> Vec<Text> {
+    texts(&first(&core(cols, 1, output)).rows[0])
+}
+
+#[test]
+fn ascii_drawn_alike_is_drawn_as_one_so_ligatures_form() {
+    // FONT-04: blanks and all, so a run is one string.
+    assert_eq!(row(20, "a != b -> c"), [joined(0, "a != b -> c")]);
+    // FONT-06: another color or attribute ends it. A single character is drawn on its own.
+    assert_eq!(
+        row(20, "\x1b[31m!=\x1b[32m=\x1b[0m"),
+        [joined(0, "!="), text(2, "=")]
+    );
+    assert_eq!(row(20, "=\x1b[1m=\x1b[0m"), [text(0, "="), text(1, "=")]);
+    // So does another background, though the text is drawn alike: each on its own.
+    assert_eq!(row(20, "<\x1b[44m=\x1b[0m"), [text(0, "<=")]);
+    // Blanks that draw nothing are left off its ends, as off any run's.
+    assert_eq!(row(20, "  ::  "), [joined(2, "::")]);
+}
+
+#[test]
+fn anything_but_ascii_is_drawn_on_its_own() {
+    // FONT-05: no shaper may move these out of their cells.
+    assert_eq!(row(20, "x→y é=="), [text(0, "x→y é"), joined(5, "==")]);
+    assert_eq!(
+        row(20, "->界=>"),
+        [joined(0, "->"), whole(2, "界", 2), joined(4, "=>")]
+    );
+    // A skin tone still joins the character before it.
+    assert_eq!(row(20, "ab🏽"), [text(0, "a"), whole(1, "b🏽", 3)]);
+}
+
+#[test]
+fn the_cursor_splits_the_ligature_it_is_on() {
+    // AT-04: on either character of `!=`, it comes apart, and `->` stays.
+    for col in [3, 4] {
+        assert_eq!(
+            row(20, &format!("a != b -> c\x1b[{col}G")),
+            [text(0, "a !="), joined(5, "b -> c")]
+        );
+    }
+    // Every character of a ligature comes apart, whichever one the cursor is on.
+    for col in [2, 3, 4] {
+        assert_eq!(row(20, &format!("x===y\x1b[{col}G")), [text(0, "x===y")]);
+    }
+    // Letters and digits come apart together, and the other characters together.
+    assert_eq!(row(20, "x===y\x1b[1G"), [text(0, "x"), joined(1, "===y")]);
+    assert_eq!(
+        row(20, "0xFF+www\x1b[2G"),
+        [text(0, "0xFF"), joined(4, "+www")]
+    );
+    assert_eq!(
+        row(20, "0xFF+www\x1b[7G"),
+        [joined(0, "0xFF+"), text(5, "www")]
+    );
+    // A cell that looks otherwise is not part of it.
+    assert_eq!(
+        row(20, "\x1b[31m-\x1b[0m->\x1b[2G"),
+        [text(0, "-"), text(1, "->")]
+    );
+    // A cursor on a blank, or hidden, splits nothing.
+    assert_eq!(row(20, "-> ->\x1b[3G"), [joined(0, "-> ->")]);
+    assert_eq!(row(20, "a != b\x1b[3G\x1b[?25l"), [joined(0, "a != b")]);
+}
+
+#[test]
+fn a_cursor_that_splits_a_ligature_sends_its_row() {
+    let mut core = core(10, 2, "->\r\n=>");
+    let mut renderer = renderer(10, 2);
+    renderer.frame(&core, "").unwrap();
+
+    core.interpret(b"\x1b[1;1H");
+    let frame = renderer.frame(&core, "").unwrap();
+    let indexes: Vec<u16> = frame.rows.iter().map(|row| row.index).collect();
+    assert_eq!(indexes, [0]);
+    assert_eq!(texts(&frame.rows[0]), [text(0, "->")]);
+
+    // From one ligature to another: both rows.
+    core.interpret(b"\x1b[2;2H");
+    let frame = renderer.frame(&core, "").unwrap();
+    assert_eq!(texts(&frame.rows[0]), [joined(0, "->")]);
+    assert_eq!(texts(&frame.rows[1]), [text(0, "=>")]);
+
+    // Off the ligature, and then along blanks, where only the caret moves.
+    core.interpret(b"\x1b[2;5H");
+    let frame = renderer.frame(&core, "").unwrap();
+    assert_eq!(frame.rows.len(), 1);
+    assert_eq!(texts(&frame.rows[0]), [joined(0, "=>")]);
+    core.interpret(b"\x1b[2;7H");
+    let frame = renderer.frame(&core, "").unwrap();
+    assert!(frame.rows.is_empty());
+}
+
+#[test]
+fn with_ligatures_off_each_character_is_drawn_on_its_own() {
+    let core = core(20, 1, "a != b -> c");
+    let mut renderer = renderer(20, 1);
+    renderer.set_ligatures(false);
+    let frame = renderer.frame(&core, "").unwrap();
+    assert_eq!(texts(&frame.rows[0]), [text(0, "a != b -> c")]);
+}
+
+#[test]
+fn turning_ligatures_on_or_off_draws_every_row() {
+    // FONT-03, and REL-03: the screen is drawn again, whole.
+    let core = core(10, 3, "->");
+    let mut renderer = renderer(10, 3);
+    renderer.frame(&core, "").unwrap();
+    renderer.set_ligatures(true);
+    assert_eq!(renderer.frame(&core, ""), None);
+
+    renderer.set_ligatures(false);
+    let frame = renderer.frame(&core, "").unwrap();
+    assert!(frame.full.is_some());
+    assert_eq!(frame.rows.len(), 3);
+    assert_eq!(texts(&frame.rows[0]), [text(0, "->")]);
+
+    renderer.set_ligatures(true);
+    let frame = renderer.frame(&core, "").unwrap();
+    assert!(frame.full.is_some());
+    assert_eq!(texts(&frame.rows[0]), [joined(0, "->")]);
+}
+
+// ---------------------------------------------------------------------------------------
 // The text being composed
 // ---------------------------------------------------------------------------------------
 
@@ -700,7 +844,7 @@ fn the_text_being_composed_is_drawn_at_the_cursor_underlined() {
     let frame = renderer.frame(&core, "にほ").unwrap();
     assert_eq!(
         texts(&frame.rows[0]),
-        [text(0, "ab"), whole(2, "に", 2), whole(4, "ほ", 2)]
+        [joined(0, "ab"), whole(2, "に", 2), whole(4, "ほ", 2)]
     );
     assert_eq!(frame.caret, terminal_core::Cursor { row: 0, col: 2 });
     let ink = ink_at(&frame, 2);
@@ -711,7 +855,7 @@ fn the_text_being_composed_is_drawn_at_the_cursor_underlined() {
     let frame = renderer.frame(&core, "にほん").unwrap();
     assert_eq!(frame.rows.len(), 1);
     let frame = renderer.frame(&core, "").unwrap();
-    assert_eq!(texts(&frame.rows[0]), [text(0, "ab")]);
+    assert_eq!(texts(&frame.rows[0]), [joined(0, "ab")]);
     assert_eq!(frame.caret, terminal_core::Cursor { row: 0, col: 2 });
 }
 
@@ -719,7 +863,11 @@ fn the_text_being_composed_is_drawn_at_the_cursor_underlined() {
 fn composed_text_that_would_pass_the_last_column_starts_further_left() {
     let core = core(10, 1, "12345678");
     let frame = renderer(10, 1).frame(&core, "abcd").unwrap();
-    assert_eq!(texts(&frame.rows[0]), [text(0, "123456"), text(6, "abcd")]);
+    // The cursor is on the text being composed, so it is drawn apart (FONT-07).
+    assert_eq!(
+        texts(&frame.rows[0]),
+        [joined(0, "123456"), text(6, "abcd")]
+    );
     assert_eq!(frame.caret.col, 6);
 }
 
@@ -730,7 +878,7 @@ fn composed_text_longer_than_the_row_shows_its_end() {
     assert_eq!(frame.caret.col, 0);
     // Cut in the middle of a wide character, its end is a blank, underlined like the rest.
     let frame = renderer(3, 1).frame(&core(3, 1, ""), "a界bc").unwrap();
-    assert_eq!(texts(&frame.rows[0]), [text(0, " bc")]);
+    assert_eq!(texts(&frame.rows[0]), [joined(0, " bc")]);
 }
 
 #[test]
@@ -1436,7 +1584,7 @@ fn a_frame_is_written_so() {
         "{\"colors\":[\"#040068\",\"#c8c8c8\",\"#010065\",\"#ff0000\"],\
          \"styles\":[[1,0],[2,1],[1,24,3]],\
          \"shapes\":{\"─\":[[3,8,5,1],[0,8,4,1]]},\
-         \"rows\":[[0,[4,1,0],[[0,0,\"a\"],[1,1,\"b\"],[2,2,\"\\\"c\"],[4,0,\"─\"]]]],\
+         \"rows\":[[0,[4,1,0],[[0,0,\"a\"],[1,1,\"b\"],[2,2,\"\\\"c\",0],[4,0,\"─\"]]]],\
          \"caret\":[0,5]}"
     );
 }

@@ -3,10 +3,12 @@
 // Paints what a frame says on a canvas in device pixels. Each row is painted in a band of its
 // own, clipped to it, so a row painted alone comes out as it does among all the others. Each
 // cell's text is drawn at the cell's left edge and on the baseline, whole pixels both, so no
-// webview's text engine can move a column. A glyph from a fallback font that is wider than its
-// cells is scaled down to fit them, the only drawing with a transform (FONT-11). What the frame
-// has shapes for is filled as those shapes: box drawing, blocks, powerline symbols, underlines
-// and crossing out.
+// webview's text engine can move a column. A run that may hold ligatures is drawn as one, so the
+// font's ligatures form, and stretched across so that each character's glyph still starts at its
+// cell's left edge (FONT-04, FONT-05). A glyph from a fallback font that is wider than its cells
+// is scaled down to fit them (FONT-11). Those two are the only drawing with a transform. What the
+// frame has shapes for is filled as those shapes: box drawing, blocks, powerline symbols,
+// underlines and crossing out.
 //
 // The frame's format is written down in crates/tab/src/render/json.rs, which writes it.
 
@@ -61,6 +63,39 @@ function fillText(context, font, text, x, y, cells, cellWidth) {
   context.setTransform(1, 0, 0, 1, 0, 0);
 }
 
+// Draws `text`, a character for each cell from `x`, as one so that the font's ligatures form
+// (FONT-04), in `font`, which the context is set to, on the baseline `y`. It is stretched across
+// to span exactly its cells, so the glyph of each character starts at its cell's left edge
+// (FONT-05). That holds when its glyphs advance alike, as a monospaced font's do, ligatures
+// included. When they do not, it draws nothing and returns false: when a character's glyph
+// advances other than the face's own "0", as one from a fallback font does, or when the text
+// shaped advances other than that many "0"s, as kerning would make it.
+function fillJoined(context, font, text, x, y, cellWidth) {
+  const advance = advanceOf(context, font, "0");
+  for (const char of text) {
+    if (Math.abs(advanceOf(context, font, char) - advance) > 1 / 64) {
+      return false;
+    }
+  }
+  // Each character is ASCII, so a code unit. The text is measured each time it is drawn: runs
+  // are too many to keep.
+  const cells = text.length;
+  const width = context.measureText(text).width;
+  if (!(Math.abs(width - cells * advance) <= cells / 64)) {
+    return false;
+  }
+  const stretch = (cells * cellWidth) / width;
+  if (stretch === 1) {
+    context.fillText(text, x, y);
+    return true;
+  }
+  // The clip stays where it was set: a transform moves only what is drawn after it.
+  context.setTransform(stretch, 0, 0, 1, x, y);
+  context.fillText(text, 0, 0);
+  context.setTransform(1, 0, 0, 1, 0, 0);
+  return true;
+}
+
 // Fills `shape`'s pieces with the context's fill, from the cell whose top left is `x`, `y`.
 function fillShape(context, shape, x, y) {
   for (const piece of shape) {
@@ -104,6 +139,26 @@ export function paint(context, full, frame) {
     }
   };
 
+  // Draws each character of `text` on its own, in the cells from `col` of the row whose top is
+  // `top`: a shape, or a glyph at the cell's left edge. Returns how many cells it took.
+  const fillEach = (text, col, top, ink, flags) => {
+    let count = 0;
+    for (const char of text) {
+      const x = (col + count) * cellWidth;
+      const shape = shapes[char];
+      if (shape) {
+        setFill(ink);
+        fillShape(context, shape, x, top);
+      } else if (char !== " ") {
+        setFont(fontOf(full, flags));
+        setFill(ink);
+        fillText(context, font, char, x, top + full.baseline, 1, cellWidth);
+      }
+      count += 1;
+    }
+    return count;
+  };
+
   context.textAlign = "left";
   context.textBaseline = "alphabetic";
   context.globalAlpha = 1;
@@ -133,19 +188,15 @@ export function paint(context, full, frame) {
       let count = cells;
       if (cells === undefined) {
         // A cell for each character.
-        count = 0;
-        for (const char of text) {
-          const x = (col + count) * cellWidth;
-          const shape = shapes[char];
-          if (shape) {
-            setFill(ink);
-            fillShape(context, shape, x, top);
-          } else if (char !== " ") {
-            setFont(fontOf(full, flags));
-            setFill(ink);
-            fillText(context, font, char, x, top + full.baseline, 1, cellWidth);
-          }
-          count += 1;
+        count = fillEach(text, col, top, ink, flags);
+      } else if (cells === 0) {
+        // A cell for each character, drawn as one so that ligatures form, or each on its own
+        // when its glyphs do not advance alike.
+        setFont(fontOf(full, flags));
+        setFill(ink);
+        count = text.length;
+        if (!fillJoined(context, font, text, col * cellWidth, top + full.baseline, cellWidth)) {
+          fillEach(text, col, top, ink, flags);
         }
       } else {
         // Drawn whole over its cells.

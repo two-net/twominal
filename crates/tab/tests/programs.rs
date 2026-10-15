@@ -1162,7 +1162,8 @@ fn hex(color: Rgb) -> String {
     format!("#{:02x}{:02x}{:02x}", color.red, color.green, color.blue)
 }
 
-/// The runs of `row` of `frame`: each one's column, text, cells if drawn whole, color and flags.
+/// The runs of `row` of `frame`: each one's column, text, count if it has one, color and flags.
+/// A count of 0 is a run drawn as one so that ligatures form.
 fn runs(frame: &Json, row: usize) -> Vec<(usize, String, Option<usize>, String, usize)> {
     let colors = frame.get("colors").unwrap().items();
     let styles = frame.get("styles").unwrap().items();
@@ -1219,11 +1220,11 @@ fn the_renderer_draws_what_sh_prints() {
     assert_eq!(
         runs(&frame, 0),
         [
-            (0, "red".to_string(), None, hex(palette().ansi[1]), 0),
-            (4, "orange".to_string(), None, "#ff8700".to_string(), 0),
-            (11, "rgb".to_string(), None, "#010203".to_string(), 0),
+            (0, "red".to_string(), Some(0), hex(palette().ansi[1]), 0),
+            (4, "orange".to_string(), Some(0), "#ff8700".to_string(), 0),
+            (11, "rgb".to_string(), Some(0), "#010203".to_string(), 0),
             // Bold, italic and underlined: 1, 2 and a single underline's 8.
-            (15, "fat".to_string(), None, foreground.clone(), 11),
+            (15, "fat".to_string(), Some(0), foreground.clone(), 11),
         ]
     );
     let lines = "┌─┬─┐ ╔═╦═╗ ▀▄█░ \u{E0B0}";
@@ -1299,13 +1300,13 @@ fn the_renderer_paints_vims_colors_and_the_background_it_erases_in() {
     }
     assert_eq!(
         runs(&frame, 0),
-        [(0, "alpha".to_string(), None, "#c0c0c0".to_string(), 0)]
+        [(0, "alpha".to_string(), Some(0), "#c0c0c0".to_string(), 0)]
     );
     // vim writes the rest of the row in NonText's attributes, so its underline runs on.
     let tilde = format!("~{}", " ".repeat(usize::from(SIZE.cols) - 1));
     assert_eq!(
         runs(&frame, 2),
-        [(0, tilde, None, "#ff8000".to_string(), 11)]
+        [(0, tilde, Some(0), "#ff8000".to_string(), 11)]
     );
 
     vim.keys(":q!\r");
