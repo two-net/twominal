@@ -1,6 +1,6 @@
 # Twominal — Software Requirements Specification
 
-**Version:** 0.6 (draft) · **Date:** 2026-10-13 · **Status:** For review
+**Version:** 0.7 (draft) · **Date:** 2026-10-15 · **Status:** For review
 
 > This SRS is technology-agnostic. It defines what Twominal must do and how well, not how it is built. Programming languages, frameworks, libraries, rendering methods and file formats are deliberately left to the design document.
 
@@ -664,6 +664,8 @@ These keys apply in Normal mode when the Vim mode setting is On (VIM-16, VIM-17)
 | Splash screen | On, Off | On | Next launch |
 | Cursor style | Block, Bar, Underline | Block | Immediately; programs may override |
 | Cursor blink | On, Off | On | Immediately |
+| Cursor fade | On, Off | Off | Immediately |
+| Cursor glide | On, Off | Off | Immediately |
 | Scrollback | 0–100,000 lines | 10,000 | Immediately; shrinking drops the oldest lines |
 | Shell | Executable and arguments | The user's default shell (SW-01) | New tabs |
 | Shell integration | On, Off | On | New tabs |

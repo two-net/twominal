@@ -9,9 +9,11 @@
 // scale. When the window moves to a display of another scale it measures again, and the frame
 // laid out for that scale is painted crisp (HW-03). DESIGN.md §3 has the rules.
 //
-// A frame is painted the moment it arrives, and nothing here fades or moves (ANIM-05). That it
-// was drawn is reported at the display's next frame, so frames never come faster than the
-// display shows them, and a hidden window, whose frames are paused, asks for none (PERF-07).
+// A frame is painted the moment it arrives, and no output fades or moves (ANIM-05). Only the
+// cursor does: it blinks, and fades and glides when its settings say, on a canvas of its own
+// that renderer/cursor.js lays over the grid (ANIM-07, ANIM-08). That a frame was drawn is
+// reported at the display's next frame, so frames never come faster than the display shows
+// them, and a hidden window, whose frames are paused, asks for none (PERF-07).
 //
 // The App Shell's page creates it in the terminal area, gives it the font the App Shell sends,
 // and passes what it measures and that a frame was drawn to the Rust half (#31). The font is a
@@ -19,6 +21,7 @@
 // the chosen font lacks comes from a fallback font, and paint.js fits it to its cells (FONT-11).
 // Filled in by #22 (grid), #23 (fonts), #24 (ligatures) and #25 (cursor).
 
+import { Cursor } from "./renderer/cursor.js";
 import { forget, paint } from "./renderer/paint.js";
 
 // The faces of a font: regular, bold, italic and both, as CSS names them.
@@ -31,6 +34,7 @@ export class Renderer {
   #container;
   #canvas;
   #context;
+  #cursor;
   #onMeasure;
   #onDrawn;
   // The font, as CSS names it, and its size in CSS pixels: the bundled font until the App
@@ -67,6 +71,7 @@ export class Renderer {
     });
     container.append(this.#canvas);
     this.#context = this.#canvas.getContext("2d", { alpha: false });
+    this.#cursor = new Cursor(container);
 
     this.#observer = new ResizeObserver(([entry]) => this.#resized(entry));
     try {
@@ -95,6 +100,7 @@ export class Renderer {
       }
       if (this.#full) {
         paint(this.#context, this.#full, frame);
+        this.#cursor.show(frame, this.#full);
       }
       this.#caret = frame.caret;
     } finally {
@@ -130,6 +136,7 @@ export class Renderer {
     this.#observer.disconnect();
     this.#unwatch();
     document.fonts.removeEventListener("loadingdone", this.#fontsLoaded);
+    this.#cursor.destroy();
     this.#canvas.remove();
   }
 

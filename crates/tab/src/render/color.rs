@@ -44,6 +44,10 @@ pub struct Palette {
     pub background: Rgb,
     /// The 16 ANSI colors: what SGR's 30 to 37 and 90 to 97 name.
     pub ansi: [Rgb; 16],
+    /// The cursor's color (TERM-07).
+    pub cursor: Rgb,
+    /// The color of the text under a block cursor.
+    pub cursor_text: Rgb,
 }
 
 /// The levels of each component in xterm's 6×6×6 cube, colors 16 to 231.
@@ -99,6 +103,20 @@ impl Palette {
             },
             background,
             hidden: style.hidden,
+        }
+    }
+
+    /// How `ink`, a cell's text, is drawn under a block cursor: in the cursor's text color, its
+    /// underline too unless the underline has a color of its own.
+    pub(crate) fn under_cursor(&self, ink: Ink) -> Ink {
+        Ink {
+            color: self.cursor_text,
+            underline_color: if ink.underline_color == ink.color {
+                self.cursor_text
+            } else {
+                ink.underline_color
+            },
+            ..ink
         }
     }
 

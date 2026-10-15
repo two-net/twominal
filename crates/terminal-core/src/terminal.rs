@@ -22,11 +22,29 @@ pub struct Cursor {
     pub col: u16,
 }
 
+/// The cursor's shape (TERM-07).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CursorShape {
+    Block,
+    Underline,
+    Bar,
+}
+
+/// What a program asked the cursor to look like with DECSCUSR (TERM-07).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CursorStyle {
+    pub shape: CursorShape,
+    pub blinking: bool,
+}
+
 /// The modes a program sets that the rest of a tab acts on. The Terminal Core only keeps them.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Modes {
     /// The cursor is shown (DECTCEM, TERM-06).
     pub cursor_visible: bool,
+    /// The cursor's look a program asked for (DECSCUSR), or none for the one the settings give
+    /// (TERM-07).
+    pub cursor_style: Option<CursorStyle>,
     /// The alternate screen is shown: a full-screen program is running (TERM-06).
     pub alternate_screen: bool,
     /// The cursor keys send their application sequences (DECCKM, #20).
@@ -55,6 +73,7 @@ impl Default for Modes {
     fn default() -> Self {
         Self {
             cursor_visible: true,
+            cursor_style: None,
             alternate_screen: false,
             application_cursor: false,
             application_keypad: false,
@@ -896,6 +915,28 @@ impl Terminal {
         self.modes.application_keypad = application;
     }
 
+    /// DECSCUSR (TERM-07): 1 to 6 are xterm's blinking and steady block, underline and bar. 0
+    /// and 7 give the cursor back the settings' shape, as kitty, Ghostty, WezTerm, foot and
+    /// Alacritty take 0, and as xterm takes 7, its own resources: xterm's 0 is a blinking block.
+    /// Any other number does nothing, as in xterm. The shape is kept for both screens, and DECSC
+    /// does not save it.
+    pub(crate) fn set_cursor_style(&mut self, number: usize) {
+        let (shape, blinking) = match number {
+            0 | 7 => {
+                self.modes.cursor_style = None;
+                return;
+            }
+            1 => (CursorShape::Block, true),
+            2 => (CursorShape::Block, false),
+            3 => (CursorShape::Underline, true),
+            4 => (CursorShape::Underline, false),
+            5 => (CursorShape::Bar, true),
+            6 => (CursorShape::Bar, false),
+            _ => return,
+        };
+        self.modes.cursor_style = Some(CursorStyle { shape, blinking });
+    }
+
     pub(crate) fn set_mode(&mut self, mode: Mode, on: bool) {
         match mode {
             Mode::Insert => self.insert = on,
@@ -989,11 +1030,13 @@ impl Terminal {
     /// defaults, autowrap included, but what is on the screen and where the cursor is stay.
     /// The screen being shown forgets its saved cursor; the other keeps its own. The style goes
     /// back to the default whole, as the VT510's does, where xterm's leaves dim, crossed-out and
-    /// double-underlined text on. The kitty keyboard protocol's flags are forgotten on both
+    /// double-underlined text on. The cursor's shape goes back to the settings', as xterm's
+    /// goes back to its resources. The kitty keyboard protocol's flags are forgotten on both
     /// screens, as kitty forgets them. The mouse modes stay, as in xterm, which resets them only
     /// for RIS.
     pub(crate) fn soft_reset(&mut self) {
         self.modes.cursor_visible = true;
+        self.modes.cursor_style = None;
         self.modes.application_cursor = false;
         self.modes.application_keypad = false;
         self.insert = false;

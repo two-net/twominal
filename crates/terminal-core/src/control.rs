@@ -9,8 +9,7 @@
 //! these are never answered: the window title and icon label reports (`CSI 20 t`, `CSI 21 t`),
 //! the answerback to ENQ, and every device control string, DECRQSS and XTGETTCAP among them.
 //!
-//! Left to their own issues: the cursor's shape (#25), the bell, titles and the other operating
-//! system commands (#27).
+//! Left to their own issues: the bell, titles and the other operating system commands (#27).
 
 use alloc::format;
 
@@ -197,6 +196,7 @@ impl Perform for Terminal {
                 self.reply(format!("\x1b[?{flags}u").into_bytes());
             }
             ([b'?'], 'W') if arg(0) == 5 => self.reset_tab_stops(),
+            ([b' '], 'q') => self.set_cursor_style(arg(0)),
             ([b'$'], 'p') => {
                 let number = first(params);
                 let state = self.state(Mode::ansi(number));

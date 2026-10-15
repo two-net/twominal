@@ -1,13 +1,14 @@
-//! Tests of the Renderer (HW-03, FONT-10, TERM-03 to TERM-05): what the webview measured in and
-//! the layout out, the Terminal Core's screen in and frames out, and every shape drawn into
-//! pixels here, to see that it stays in its cell and meets its neighbours.
+//! Tests of the Renderer (HW-03, FONT-10, TERM-03 to TERM-05, TERM-07, ANIM-07, ANIM-08): what
+//! the webview measured in and the layout out, the Terminal Core's screen in and frames out, the
+//! cursor, and every shape drawn into pixels here, to see that it stays in its cell and meets its
+//! neighbours.
 
 use std::collections::BTreeSet;
 
-use terminal_core::{Color, Size, Style, TerminalCore, Underline};
+use terminal_core::{Color, CursorShape, Size, Style, TerminalCore, Underline};
 
 use super::color::Ink;
-use super::shapes::{arms, decorations, is_shape, shape, Weight};
+use super::shapes::{arms, decorations, is_shape, shape, CursorLook, Weight};
 use super::*;
 
 /// A palette whose colors are told apart at a glance.
@@ -16,6 +17,8 @@ fn palette() -> Palette {
         foreground: Rgb::new(200, 200, 200),
         background: Rgb::new(10, 10, 10),
         ansi: std::array::from_fn(|index| Rgb::new(index as u8, 0, 100 + index as u8)),
+        cursor: Rgb::new(250, 250, 0),
+        cursor_text: Rgb::new(0, 0, 50),
     }
 }
 
@@ -526,6 +529,9 @@ fn output(random: &mut Random) -> String {
         "www",
         "\x1b[?25l",
         "\x1b[?25h",
+        "\x1b[5 q",
+        "\x1b[ q",
+        "\x1b[2 q",
     ];
     (0..1 + random.below(12))
         .map(|_| random.pick(PIECES))
@@ -552,12 +558,16 @@ fn frames_add_up_to_what_a_full_frame_draws() {
         let mut core = TerminalCore::new(size, None);
         let mut colors = palette();
         let mut ligatures = true;
+        let mut settings = CursorSettings::default();
+        let mut motion = Motion::Full;
+        let mut focused = true;
         let mut measure = measured(size.cols, size.rows);
         let mut renderer = Renderer::new(colors.clone());
         renderer.measure(&measure).unwrap();
-        // What the window shows, row by row.
+        // What the window shows, row by row, and its cursor.
         let mut canvas: Vec<RowFrame> = Vec::new();
         let mut caret = None;
+        let mut cursor = None;
 
         for step in 0..40 {
             core.interpret(output(&mut random).as_bytes());
@@ -579,10 +589,35 @@ fn frames_add_up_to_what_a_full_frame_draws() {
                     ligatures = !ligatures;
                     renderer.set_ligatures(ligatures);
                 }
+                3 => {
+                    let styles = [CursorShape::Block, CursorShape::Underline, CursorShape::Bar];
+                    settings = CursorSettings {
+                        style: styles[random.below(3)],
+                        blink: random.below(2) == 0,
+                        fade: random.below(2) == 0,
+                        glide: random.below(2) == 0,
+                    };
+                    renderer.set_cursor(settings);
+                }
+                4 => {
+                    focused = !focused;
+                    renderer.set_focused(focused);
+                }
+                5 => {
+                    motion = [Motion::Full, Motion::Reduced, Motion::Off][random.below(3)];
+                    renderer.set_motion(motion);
+                }
                 _ => {}
             }
             let composing = random.pick(&composings);
             if let Some(frame) = renderer.frame(&core, composing) {
+                if frame.full.is_none() && frame.rows.is_empty() {
+                    // Nothing is sent when nothing changed.
+                    assert!(
+                        caret != Some(frame.caret) || cursor != frame.cursor,
+                        "step {step}"
+                    );
+                }
                 if frame.full.is_some() {
                     canvas.clear();
                 }
@@ -594,14 +629,19 @@ fn frames_add_up_to_what_a_full_frame_draws() {
                     canvas[index] = row;
                 }
                 caret = Some(frame.caret);
+                cursor = frame.cursor;
             }
 
             let mut fresh = Renderer::new(colors.clone());
             fresh.set_ligatures(ligatures);
+            fresh.set_cursor(settings);
+            fresh.set_motion(motion);
+            fresh.set_focused(focused);
             fresh.measure(&measure).unwrap();
             let full = fresh.frame(&core, composing).unwrap();
             assert_eq!(canvas, full.rows, "step {step}");
             assert_eq!(caret, Some(full.caret), "step {step}");
+            assert_eq!(cursor, full.cursor, "step {step}");
         }
     }
 }
@@ -905,6 +945,329 @@ fn marks_join_the_composed_character_before_them() {
 }
 
 // ---------------------------------------------------------------------------------------
+// The cursor
+// ---------------------------------------------------------------------------------------
+
+/// A rectangle filled whole.
+fn rect(x: u32, y: u32, width: u32, height: u32) -> Primitive {
+    Primitive::Rect {
+        x,
+        y,
+        width,
+        height,
+        alpha: 1.0,
+    }
+}
+
+/// The cursor `renderer` draws over `core`, in a frame with every row.
+fn drawn(renderer: &mut Renderer, core: &TerminalCore) -> Option<CursorFrame> {
+    renderer.redraw();
+    renderer.frame(core, "").unwrap().cursor
+}
+
+/// What the text under the cursor is: its column, its text and how it takes its cells.
+fn under(cursor: &CursorFrame) -> Option<Text> {
+    cursor
+        .text
+        .as_ref()
+        .map(|run| (run.col, run.text.clone(), run.cells))
+}
+
+/// The cells' block, bar and underline, 8 by 18 pixels with lines a pixel thick.
+const BLOCK: [(u32, u32, u32, u32); 1] = [(0, 0, 8, 18)];
+const BAR: [(u32, u32, u32, u32); 1] = [(0, 0, 2, 18)];
+const UNDERLINE: [(u32, u32, u32, u32); 1] = [(0, 16, 8, 2)];
+
+fn pieces_of(rects: &[(u32, u32, u32, u32)]) -> Vec<Primitive> {
+    rects
+        .iter()
+        .map(|&(x, y, width, height)| rect(x, y, width, height))
+        .collect()
+}
+
+#[test]
+fn the_cursor_is_a_block_in_the_cursor_color_over_its_text_in_the_cursor_text_color() {
+    // TERM-07 and Appendix B: a blinking block, over italic text it draws in its own colors.
+    let frame = first(&core(10, 2, "\x1b[3mxy\x1b[0m\x1b[D"));
+    let cursor = frame.cursor.unwrap();
+    assert_eq!((cursor.row, cursor.col, cursor.cells), (0, 1, 1));
+    assert_eq!(cursor.color, palette().cursor);
+    assert_eq!(cursor.shape, pieces_of(&BLOCK));
+    assert!(cursor.blinks && !cursor.fades && !cursor.glides);
+    assert_eq!(under(&cursor), Some(text(1, "y")));
+    let ink = cursor.text.unwrap().ink;
+    assert_eq!(ink.color, palette().cursor_text);
+    assert!(ink.italic && !ink.bold);
+}
+
+#[test]
+fn a_program_chooses_the_cursors_shape_and_otherwise_the_settings_do() {
+    let mut core = core(10, 1, "ab");
+    let mut renderer = renderer(10, 1);
+    assert_eq!(
+        drawn(&mut renderer, &core).unwrap().shape,
+        pieces_of(&BLOCK)
+    );
+
+    renderer.set_cursor(CursorSettings {
+        style: CursorShape::Bar,
+        ..CursorSettings::default()
+    });
+    let cursor = drawn(&mut renderer, &core).unwrap();
+    assert_eq!(cursor.shape, pieces_of(&BAR));
+    // Only a block draws the text under it.
+    assert_eq!(cursor.text, None);
+
+    core.interpret(b"\x1b[4 q");
+    let cursor = drawn(&mut renderer, &core).unwrap();
+    assert_eq!(cursor.shape, pieces_of(&UNDERLINE));
+    assert!(!cursor.blinks);
+
+    // 0 gives the shape back to the settings, and so does a reset.
+    core.interpret(b"\x1b[0 q");
+    let cursor = drawn(&mut renderer, &core).unwrap();
+    assert_eq!(cursor.shape, pieces_of(&BAR));
+    assert!(cursor.blinks);
+    core.interpret(b"\x1b[1 q\x1b[!p");
+    assert_eq!(drawn(&mut renderer, &core).unwrap().shape, pieces_of(&BAR));
+}
+
+#[test]
+fn a_program_may_ask_for_a_steady_cursor() {
+    let mut core = core(10, 1, "\x1b[2 q");
+    let mut renderer = renderer(10, 1);
+    assert!(!drawn(&mut renderer, &core).unwrap().blinks);
+    core.interpret(b"\x1b[5 q");
+    assert!(drawn(&mut renderer, &core).unwrap().blinks);
+}
+
+#[test]
+fn the_blink_setting_off_wins_over_a_program_asking_for_a_blink() {
+    let core = core(10, 1, "\x1b[5 q");
+    let mut renderer = renderer(10, 1);
+    renderer.set_cursor(CursorSettings {
+        blink: false,
+        fade: true,
+        ..CursorSettings::default()
+    });
+    let cursor = drawn(&mut renderer, &core).unwrap();
+    assert_eq!(cursor.shape, pieces_of(&BAR));
+    assert!(!cursor.blinks && !cursor.fades);
+}
+
+#[test]
+fn an_unfocused_cursor_is_an_outline_that_never_blinks() {
+    // ANIM-07: whatever its shape, a hollow block a light line thick, and still.
+    let core = core(10, 1, "ab\x1b[D\x1b[5 q");
+    let mut renderer = renderer(10, 1);
+    renderer.set_focused(false);
+    let cursor = drawn(&mut renderer, &core).unwrap();
+    assert_eq!(
+        cursor.shape,
+        pieces_of(&[(0, 0, 8, 1), (0, 1, 1, 16), (7, 1, 1, 16), (0, 17, 8, 1)])
+    );
+    assert!(!cursor.blinks);
+    assert_eq!(cursor.text, None);
+
+    renderer.set_focused(true);
+    let cursor = drawn(&mut renderer, &core).unwrap();
+    assert_eq!(cursor.shape, pieces_of(&BAR));
+    assert!(cursor.blinks);
+}
+
+#[test]
+fn fading_needs_a_blink_and_motion_and_gliding_needs_full_motion() {
+    // ANIM-08's effects are off until their settings are on. Under reduced motion a fade of
+    // 150 ms is still allowed, but not the glide (ANIM-02).
+    let mut core = core(10, 1, "");
+    let mut renderer = renderer(10, 1);
+    let effects = |renderer: &mut Renderer, core: &TerminalCore| {
+        let cursor = drawn(renderer, core).unwrap();
+        (cursor.fades, cursor.glides)
+    };
+    assert_eq!(effects(&mut renderer, &core), (false, false));
+
+    renderer.set_cursor(CursorSettings {
+        fade: true,
+        glide: true,
+        ..CursorSettings::default()
+    });
+    assert_eq!(effects(&mut renderer, &core), (true, true));
+    renderer.set_motion(Motion::Reduced);
+    assert_eq!(effects(&mut renderer, &core), (true, false));
+    renderer.set_motion(Motion::Off);
+    assert_eq!(effects(&mut renderer, &core), (false, false));
+
+    // A cursor that does not blink does not fade, but still glides.
+    renderer.set_motion(Motion::Full);
+    core.interpret(b"\x1b[2 q");
+    assert_eq!(effects(&mut renderer, &core), (false, true));
+    core.interpret(b"\x1b[1 q");
+    renderer.set_focused(false);
+    assert_eq!(effects(&mut renderer, &core), (false, true));
+}
+
+#[test]
+fn a_cursor_a_program_hides_is_not_drawn_and_hiding_it_alone_is_a_frame() {
+    let mut core = core(10, 2, "hi");
+    let mut renderer = renderer(10, 2);
+    assert!(renderer.frame(&core, "").unwrap().cursor.is_some());
+
+    core.interpret(b"\x1b[?25l");
+    let frame = renderer.frame(&core, "").unwrap();
+    assert!(frame.full.is_none() && frame.rows.is_empty());
+    assert_eq!(frame.cursor, None);
+    assert_eq!(renderer.frame(&core, ""), None);
+
+    core.interpret(b"\x1b[?25h");
+    let frame = renderer.frame(&core, "").unwrap();
+    assert!(frame.rows.is_empty());
+    assert_eq!(frame.cursor.unwrap().shape, pieces_of(&BLOCK));
+
+    // So is a new shape alone.
+    core.interpret(b"\x1b[6 q");
+    let frame = renderer.frame(&core, "").unwrap();
+    assert!(frame.rows.is_empty());
+    assert_eq!(frame.cursor.unwrap().shape, pieces_of(&BAR));
+}
+
+#[test]
+fn the_cursor_is_not_drawn_while_text_is_being_composed() {
+    // The composed text marks where it goes, underlined.
+    let core = core(10, 1, "ab");
+    let mut renderer = renderer(10, 1);
+    assert_eq!(renderer.frame(&core, "にほ").unwrap().cursor, None);
+    let frame = renderer.frame(&core, "").unwrap();
+    assert_eq!(frame.cursor.unwrap().col, 2);
+    // Text that takes no cell composes nothing.
+    renderer.redraw();
+    assert!(renderer.frame(&core, "\u{7}").unwrap().cursor.is_some());
+}
+
+#[test]
+fn a_cursor_on_either_half_of_a_wide_character_covers_both_cells() {
+    let mut core = core(10, 1, "aに\x1b[2G");
+    let mut renderer = renderer(10, 1);
+    for _ in 0..2 {
+        let cursor = drawn(&mut renderer, &core).unwrap();
+        assert_eq!((cursor.col, cursor.cells), (1, 2));
+        assert_eq!(cursor.shape, pieces_of(&[(0, 0, 16, 18)]));
+        assert_eq!(under(&cursor), Some(whole(1, "に", 2)));
+        // Its right half.
+        core.interpret(b"\x1b[3G");
+    }
+    renderer.set_focused(false);
+    let cursor = drawn(&mut renderer, &core).unwrap();
+    assert_eq!(
+        cursor.shape,
+        pieces_of(&[(0, 0, 16, 1), (0, 1, 1, 16), (15, 1, 1, 16), (0, 17, 16, 1)])
+    );
+}
+
+#[test]
+fn the_cursor_draws_the_sequence_it_is_in_from_its_first_cell() {
+    // The webview cuts it to the cursor's cells, so the cursor shows its part of the flag.
+    let mut renderer = renderer(10, 1);
+    let cursor = drawn(&mut renderer, &core(10, 1, "🇫🇷\x1b[2G")).unwrap();
+    assert_eq!((cursor.col, cursor.cells), (1, 1));
+    assert_eq!(under(&cursor), Some(whole(0, "🇫🇷", 2)));
+
+    let cursor = drawn(&mut renderer, &core(10, 1, "👍🏽\x1b[3G")).unwrap();
+    assert_eq!((cursor.col, cursor.cells), (2, 2));
+    assert_eq!(under(&cursor), Some(whole(0, "👍🏽", 4)));
+
+    let cursor = drawn(&mut renderer, &core(10, 1, "👨\u{200D}👩\x1b[4G")).unwrap();
+    assert_eq!((cursor.col, cursor.cells), (2, 2));
+    assert_eq!(under(&cursor), Some(whole(0, "👨\u{200D}👩", 4)));
+}
+
+#[test]
+fn a_cursor_on_a_blank_draws_no_text_unless_the_blank_is_underlined() {
+    let mut renderer = renderer(10, 1);
+    let blank = |renderer: &mut Renderer, output: &str| {
+        under(&drawn(renderer, &core(10, 1, output)).unwrap())
+    };
+    assert_eq!(blank(&mut renderer, "ab"), None);
+    // A blank inside a ligature's run.
+    assert_eq!(blank(&mut renderer, "-> ->\x1b[3G"), None);
+    // Hidden text draws nothing.
+    assert_eq!(blank(&mut renderer, "\x1b[8mx\x1b[0m\x1b[G"), None);
+    assert_eq!(
+        blank(&mut renderer, "\x1b[4m  \x1b[0m\x1b[G"),
+        Some(text(0, " "))
+    );
+}
+
+#[test]
+fn an_underline_under_the_cursor_takes_the_cursor_text_color_unless_it_has_its_own() {
+    let mut renderer = renderer(10, 1);
+    let ink = |renderer: &mut Renderer, output: &str| {
+        drawn(renderer, &core(10, 1, output))
+            .unwrap()
+            .text
+            .unwrap()
+            .ink
+    };
+    let plain = ink(&mut renderer, "\x1b[4mu\x1b[G");
+    assert_eq!(plain.underline, 1);
+    assert_eq!(plain.underline_color, palette().cursor_text);
+    let red = ink(&mut renderer, "\x1b[4;58;5;196mu\x1b[G");
+    assert_eq!(red.color, palette().cursor_text);
+    assert_eq!(red.underline_color, Rgb::new(255, 0, 0));
+}
+
+#[test]
+fn box_drawing_under_the_cursor_is_a_shape_even_when_its_row_is_not_sent() {
+    let mut core = core(10, 2, "─\r\nx");
+    let mut renderer = renderer(10, 2);
+    renderer.frame(&core, "").unwrap();
+    core.interpret(b"\x1b[1;1H");
+    let frame = renderer.frame(&core, "").unwrap();
+    assert!(frame.rows.is_empty());
+    assert_eq!(under(frame.cursor.as_ref().unwrap()), Some(text(0, "─")));
+    assert!(frame.shapes.contains_key(&'─'));
+}
+
+#[test]
+fn changing_the_cursor_settings_or_the_focus_is_a_frame_without_rows() {
+    // Appendix B: they take effect at once, and draw no row again.
+    let core = core(10, 2, "hi");
+    let mut renderer = renderer(10, 2);
+    renderer.frame(&core, "").unwrap();
+    renderer.set_cursor(CursorSettings::default());
+    renderer.set_motion(Motion::Reduced);
+    assert_eq!(renderer.frame(&core, ""), None);
+
+    renderer.set_cursor(CursorSettings {
+        style: CursorShape::Underline,
+        ..CursorSettings::default()
+    });
+    let frame = renderer.frame(&core, "").unwrap();
+    assert!(frame.full.is_none() && frame.rows.is_empty());
+    assert_eq!(frame.cursor.unwrap().shape, pieces_of(&UNDERLINE));
+
+    renderer.set_focused(false);
+    let frame = renderer.frame(&core, "").unwrap();
+    assert!(frame.full.is_none() && frame.rows.is_empty());
+    assert!(!frame.cursor.unwrap().blinks);
+    renderer.set_focused(false);
+    assert_eq!(renderer.frame(&core, ""), None);
+}
+
+#[test]
+fn a_cursor_outside_the_grid_is_not_drawn() {
+    // Until the Tab has resized the core to the layout, the core may be the larger.
+    let mut renderer = renderer(5, 2);
+    assert_eq!(drawn(&mut renderer, &core(10, 3, "\x1b[3;1H")), None);
+    assert_eq!(drawn(&mut renderer, &core(10, 3, "\x1b[1;6H")), None);
+    assert_eq!(
+        drawn(&mut renderer, &core(10, 3, "\x1b[1;5Hに\x1b[D\x1b[D")),
+        None
+    );
+    assert!(drawn(&mut renderer, &core(10, 3, "\x1b[2;5H")).is_some());
+}
+
+// ---------------------------------------------------------------------------------------
 // Shapes
 // ---------------------------------------------------------------------------------------
 
@@ -1094,6 +1457,41 @@ fn every_shape_stays_in_its_cell() {
     for char in ['a', '■', '\u{E0A0}', '\u{E0C0}', '\u{24FF}'] {
         assert!(!is_shape(char));
         assert_eq!(shape(char, 8, 18, 1, 3), None);
+    }
+}
+
+#[test]
+fn every_cursor_shape_stays_in_its_cells() {
+    let looks = [
+        CursorLook::Block,
+        CursorLook::Underline,
+        CursorLook::Bar,
+        CursorLook::Outline,
+    ];
+    for (width, height, light, _) in cells() {
+        for look in looks {
+            for cells in [1, 2] {
+                let shape = shapes::cursor(look, cells, width, height, light);
+                let context =
+                    format!("{look:?} over {cells} of {width} by {height}, lines {light}");
+                assert!(!shape.is_empty(), "{context}");
+                inside(&shape, cells * width, height, &context);
+                // No piece is filled over another.
+                let area: u32 = shape
+                    .iter()
+                    .map(|piece| match piece {
+                        Primitive::Rect { width, height, .. } => width * height,
+                        Primitive::Polygon(_) => unreachable!("{context}"),
+                    })
+                    .sum();
+                let filled = raster(&shape, cells * width, height)
+                    .iter()
+                    .flatten()
+                    .filter(|pixel| **pixel)
+                    .count();
+                assert_eq!(area as usize, filled, "{context}");
+            }
+        }
     }
 }
 
@@ -1581,11 +1979,34 @@ fn a_frame_is_written_so() {
     let json = renderer.frame(&core, "").unwrap().json();
     assert_eq!(
         json,
-        "{\"colors\":[\"#040068\",\"#c8c8c8\",\"#010065\",\"#ff0000\"],\
+        "{\"colors\":[\"#040068\",\"#c8c8c8\",\"#010065\",\"#ff0000\",\"#fafa00\"],\
          \"styles\":[[1,0],[2,1],[1,24,3]],\
          \"shapes\":{\"─\":[[3,8,5,1],[0,8,4,1]]},\
          \"rows\":[[0,[4,1,0],[[0,0,\"a\"],[1,1,\"b\"],[2,2,\"\\\"c\",0],[4,0,\"─\"]]]],\
+         \"cursor\":{\"cell\":[0,5,1],\"color\":4,\"shape\":[[0,0,8,18]],\"blink\":true},\
          \"caret\":[0,5]}"
+    );
+}
+
+#[test]
+fn a_frame_with_the_cursor_is_written_so() {
+    // A block over bold text, steady, that fades and glides: the text under it is numbered
+    // after the rows' styles, and the cursor's color after their colors.
+    let mut core = core(4, 1, "\x1b[1mab\x1b[0m\x1b[2 q\x1b[D");
+    let mut renderer = renderer(4, 1);
+    renderer.set_cursor(CursorSettings {
+        fade: true,
+        glide: true,
+        ..CursorSettings::default()
+    });
+    renderer.frame(&core, "").unwrap();
+    core.interpret(b"\x1b[1 q");
+    assert_eq!(
+        renderer.frame(&core, "").unwrap().json(),
+        "{\"colors\":[\"#000032\",\"#fafa00\"],\"styles\":[[0,1]],\"shapes\":{},\"rows\":[],\
+         \"cursor\":{\"cell\":[0,1,1],\"color\":1,\"shape\":[[0,0,8,18]],\
+         \"text\":[1,0,\"b\"],\"blink\":true,\"fade\":true,\"glide\":true},\
+         \"caret\":[0,1]}"
     );
 }
 
@@ -1601,7 +2022,11 @@ fn a_full_frame_has_the_layout() {
     );
     assert!(json.contains("\"strikethrough\":[[0,10,8,1]]}"), "{json}");
     assert!(
-        json.ends_with("\"rows\":[[0,[],[]]],\"caret\":[0,0]}"),
+        json.ends_with(
+            "\"rows\":[[0,[],[]]],\
+             \"cursor\":{\"cell\":[0,0,1],\"color\":0,\"shape\":[[0,0,8,18]],\"blink\":true},\
+             \"caret\":[0,0]}"
+        ),
         "{json}"
     );
 }

@@ -14,14 +14,17 @@ styles
 |..........|
 cursor 1;4
 
-## The cursor's shape waits for its issue
-# #25.
+## Mode 12 is ignored, so cnorm keeps the blink
+# xterm-256color's cnorm turns the blink off with 12 before it shows the cursor, and ncurses,
+# vim and top send it. The blink is the settings' and DECSCUSR's (DESIGN.md §3).
 size 10x2
-send a\e[2 qb
+send a\e[5 q\e[?12l\e[?25hb
 screen
 |ab        |
 |          |
 cursor 1;3
+mode cursor_style blinking bar
+mode cursor_visible on
 
 ## Operating system commands wait for their issue
 # #27: titles, the working directory, links and shell marks. A report of the shell

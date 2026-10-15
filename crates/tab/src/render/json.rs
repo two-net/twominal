@@ -14,6 +14,8 @@
 //!   "styles": [[color, flags], [color, flags, underline color], …],
 //!   "shapes": { "─": shape, … },
 //!   "rows":   [[row, [col, count, color, …], [[col, style, "text"], [col, style, "text", cells], …]], …],
+//!   "cursor": { "cell": [row, col, cells], "color": color, "shape": shape,
+//!               "text": [col, style, "text"], "blink": true, "fade": true, "glide": true },
 //!   "caret":  [row, col] }
 //! ```
 //!
@@ -27,15 +29,20 @@
 //! over that many cells. A shape is a list of pieces: `[x, y, width, height]` filled,
 //! `[x, y, width, height, alpha]` filled at `alpha`, and `["p", x, y, x, y, …]` a polygon, in
 //! device pixels from the cell's top left.
+//!
+//! `cursor` is there only while the cursor is drawn. It covers `cells` cells from `col`, and its
+//! shape is filled in its color, from its first cell's top left. `text` is the run under a block,
+//! drawn in the cursor's text color and cut to the cursor's cells: it may start in a cell before
+//! them, as a flag does. Each of `blink`, `fade` and `glide` is there only when true.
 
 use std::collections::HashMap;
 use std::fmt::Write;
 use std::hash::Hash;
 
 use super::color::{Ink, Rgb};
-use super::line::Cells;
+use super::line::{Cells, Run};
 use super::shapes::Primitive;
-use super::{Frame, Full};
+use super::{CursorFrame, Frame, Full};
 
 impl Frame {
     /// The frame as JSON text, for the webview half.
@@ -61,20 +68,15 @@ impl Frame {
                 if index > 0 {
                     rows.push(',');
                 }
-                let style = styles.number(run.ink);
-                let _ = write!(rows, "[{},{style},", run.col);
-                string(&mut rows, &run.text);
-                match run.cells {
-                    Cells::Each => {}
-                    Cells::Joined => rows.push_str(",0"),
-                    Cells::Whole(cells) => {
-                        let _ = write!(rows, ",{cells}");
-                    }
-                }
-                rows.push(']');
+                write_run(&mut rows, run, styles.number(run.ink));
             }
             rows.push_str("]]");
         }
+        // Numbered after the rows' styles, so that theirs are the same with or without it.
+        let text = self.cursor.as_ref().and_then(|cursor| {
+            let run = cursor.text.as_ref()?;
+            Some((run, styles.number(run.ink)))
+        });
 
         let mut out = String::with_capacity(rows.len() + 256);
         out.push('{');
@@ -90,6 +92,10 @@ impl Frame {
                 written.push(',');
             }
             write_style(&mut written, ink, &mut colors);
+        }
+        let mut cursor = String::new();
+        if let Some(frame) = &self.cursor {
+            write_cursor(&mut cursor, frame, colors.number(frame.color), text);
         }
         out.push_str("\"colors\":[");
         for (index, color) in colors.items.iter().enumerate() {
@@ -109,11 +115,50 @@ impl Frame {
         }
         let _ = write!(
             out,
-            "}},\"rows\":[{rows}],\"caret\":[{},{}]}}",
+            "}},\"rows\":[{rows}],{cursor}\"caret\":[{},{}]}}",
             self.caret.row, self.caret.col
         );
         out
     }
+}
+
+/// `run` as a row holds it, in the style numbered `style`.
+fn write_run(out: &mut String, run: &Run, style: usize) {
+    let _ = write!(out, "[{},{style},", run.col);
+    string(out, &run.text);
+    match run.cells {
+        Cells::Each => {}
+        Cells::Joined => out.push_str(",0"),
+        Cells::Whole(cells) => {
+            let _ = write!(out, ",{cells}");
+        }
+    }
+    out.push(']');
+}
+
+/// The cursor, in the color numbered `color`, with the text under it in its numbered style, and
+/// the comma after it.
+fn write_cursor(out: &mut String, cursor: &CursorFrame, color: usize, text: Option<(&Run, usize)>) {
+    let _ = write!(
+        out,
+        "\"cursor\":{{\"cell\":[{},{},{}],\"color\":{color},\"shape\":",
+        cursor.row, cursor.col, cursor.cells
+    );
+    write_shape(out, &cursor.shape);
+    if let Some((run, style)) = text {
+        out.push_str(",\"text\":");
+        write_run(out, run, style);
+    }
+    for (on, name) in [
+        (cursor.blinks, "blink"),
+        (cursor.fades, "fade"),
+        (cursor.glides, "glide"),
+    ] {
+        if on {
+            let _ = write!(out, ",\"{name}\":true");
+        }
+    }
+    out.push_str("},");
 }
 
 /// Things numbered in the order they are first met.

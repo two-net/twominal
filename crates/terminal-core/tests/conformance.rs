@@ -20,8 +20,10 @@
 //! reply \e[?62;22c                                        the next reply not yet checked
 //! mode bracketed_paste on                                 a field of `Modes`: `on` or
 //! mode keyboard 5                                         `off`, the mouse's tracking or
-//!                                                         format, or the keyboard flags'
-//!                                                         number
+//! mode cursor_style steady bar                            format, the keyboard flags'
+//!                                                         number, or the cursor's style:
+//!                                                         `default`, or `blinking` or
+//!                                                         `steady` and its shape
 //! style r bold foreground 1                               `r` stands for this style below
 //! styles                                                  every row again, a letter for the
 //! |rr..|                                                  style of each cell
@@ -51,7 +53,8 @@ use std::fs;
 use std::path::Path;
 
 use terminal_core::{
-    Color, Event, Modes, MouseFormat, MouseTracking, Size, Style, TerminalCore, Underline,
+    Color, CursorShape, Event, Modes, MouseFormat, MouseTracking, Size, Style, TerminalCore,
+    Underline,
 };
 
 #[test]
@@ -132,6 +135,7 @@ struct Row {
 /// The fields of `Modes` a case can name, with the words their values are written in.
 const MODES: &[&str] = &[
     "cursor_visible",
+    "cursor_style",
     "alternate_screen",
     "application_cursor",
     "application_keypad",
@@ -679,6 +683,18 @@ fn mode(modes: &Modes, name: &str) -> String {
     let on = |on: bool| if on { "on" } else { "off" }.to_string();
     match name {
         "cursor_visible" => on(modes.cursor_visible),
+        "cursor_style" => match modes.cursor_style {
+            None => "default".to_string(),
+            Some(style) => {
+                let blinking = if style.blinking { "blinking" } else { "steady" };
+                let shape = match style.shape {
+                    CursorShape::Block => "block",
+                    CursorShape::Underline => "underline",
+                    CursorShape::Bar => "bar",
+                };
+                format!("{blinking} {shape}")
+            }
+        },
         "alternate_screen" => on(modes.alternate_screen),
         "application_cursor" => on(modes.application_cursor),
         "application_keypad" => on(modes.application_keypad),

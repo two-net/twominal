@@ -1,4 +1,5 @@
-# The modes a program sets, which the rest of the tab acts on (TERM-06, TERM-10, TERM-11).
+# The modes a program sets, which the rest of the tab acts on (TERM-06, TERM-07, TERM-10,
+# TERM-11).
 
 ## Modes are kept for the rest of the tab
 size 10x2
@@ -91,3 +92,48 @@ cursor 1;5
 size 10x2
 send \e[?99h\e[99h\e[?1;99h
 mode application_cursor on
+
+## DECSCUSR sets the cursor's shape and whether it blinks
+# ctlseqs: CSI Ps SP q. The settings' shape is in use until a program asks for one.
+size 10x2
+mode cursor_style default
+send \e[1 q
+mode cursor_style blinking block
+send \e[2 q
+mode cursor_style steady block
+send \e[3 q
+mode cursor_style blinking underline
+send \e[4 q
+mode cursor_style steady underline
+send \e[5 q
+mode cursor_style blinking bar
+send \e[6 q
+mode cursor_style steady bar
+
+## DECSCUSR 0, no parameter and 7 give the shape back to the settings
+# xterm's 0 is a blinking block. Here it is the settings' shape, as in kitty, Ghostty,
+# WezTerm, foot and Alacritty, and as xterm's 7, its own resources (DESIGN.md §3).
+size 10x2
+send \e[6 q\e[0 q
+mode cursor_style default
+send \e[4 q\e[ q
+mode cursor_style default
+send \e[2 q\e[7 q
+mode cursor_style default
+
+## DECSCUSR 8 and above, and sub-parameters, are ignored
+size 10x2
+send \e[6 q\e[8 q\e[65535 q\e[2:1 q
+mode cursor_style steady bar
+
+## The cursor's shape stays through DECSC, DECRC and the alternate screen
+# xterm keeps one shape for both screens, and DECSC does not save it.
+size 10x2
+send \e7\e[5 q\e8
+mode cursor_style blinking bar
+send \e[?1049h\e[2 q
+mode cursor_style steady block
+send \e[?1049l
+mode cursor_style steady block
+send \e[4 q\e[?47h
+mode cursor_style steady underline

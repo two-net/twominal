@@ -75,6 +75,8 @@ fn all_changed() -> Settings {
         splash_screen: false,
         cursor_style: CursorStyle::Bar,
         cursor_blink: false,
+        cursor_fade: true,
+        cursor_glide: true,
         scrollback: 0,
         shell: Some(vec!["/bin/bash".to_string(), "--login".to_string()]),
         shell_integration: false,
@@ -103,6 +105,8 @@ animations = false
 splash_screen = false
 cursor_style = "bar"
 cursor_blink = false
+cursor_fade = true
+cursor_glide = true
 scrollback = 0
 shell = ["/bin/bash", "--login"]
 shell_integration = false
@@ -136,6 +140,8 @@ fn the_defaults_are_those_of_appendix_b() {
     assert!(settings.splash_screen);
     assert_eq!(settings.cursor_style, CursorStyle::Block);
     assert!(settings.cursor_blink);
+    assert!(!settings.cursor_fade);
+    assert!(!settings.cursor_glide);
     assert_eq!(settings.scrollback, 10_000);
     assert_eq!(settings.shell, None);
     assert!(settings.shell_integration);

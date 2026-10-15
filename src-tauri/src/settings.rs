@@ -56,7 +56,12 @@ pub struct Settings {
     pub splash_screen: bool,
     /// Programs may override it.
     pub cursor_style: CursorStyle,
+    /// Off, the cursor never blinks, whatever a program asks.
     pub cursor_blink: bool,
+    /// The blink fades in and out (ANIM-08).
+    pub cursor_fade: bool,
+    /// The cursor glides from cell to cell (ANIM-08).
+    pub cursor_glide: bool,
     /// In lines. Shrinking it drops the oldest lines.
     pub scrollback: u32,
     /// The executable and its arguments, or `None` for the user's default shell (SW-01).
@@ -90,6 +95,8 @@ impl Default for Settings {
             splash_screen: true,
             cursor_style: CursorStyle::Block,
             cursor_blink: true,
+            cursor_fade: false,
+            cursor_glide: false,
             scrollback: 10_000,
             shell: None,
             shell_integration: true,
@@ -119,6 +126,8 @@ fn each(visit: &mut impl Visit) {
     visit.flag("splash_screen", |s| &mut s.splash_screen);
     visit.word("cursor_style", |s| &mut s.cursor_style);
     visit.flag("cursor_blink", |s| &mut s.cursor_blink);
+    visit.flag("cursor_fade", |s| &mut s.cursor_fade);
+    visit.flag("cursor_glide", |s| &mut s.cursor_glide);
     visit.count("scrollback", 0..=100_000, |s| &mut s.scrollback);
     visit.command("shell", |s| &mut s.shell);
     visit.flag("shell_integration", |s| &mut s.shell_integration);

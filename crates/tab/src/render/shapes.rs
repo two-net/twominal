@@ -24,6 +24,16 @@ pub(crate) enum Primitive {
     Polygon(Vec<(f64, f64)>),
 }
 
+/// What the cursor is drawn as (TERM-07, ANIM-07).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CursorLook {
+    Block,
+    Underline,
+    Bar,
+    /// A hollow block, for a window without the focus.
+    Outline,
+}
+
 /// How heavy a line is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Weight {
@@ -156,6 +166,32 @@ pub(crate) fn decorations(
     let strikethrough = line(strike).into_iter().collect();
 
     ([single, double, curly, dotted, dashed], strikethrough)
+}
+
+/// The cursor drawn as `look` over `cells` cells `width` by `height` pixels, from the top left
+/// of the first: a whole block, a bar at the left or an underline at the bottom two light lines
+/// thick, or an outline one light line thick, in four pieces that do not overlap.
+pub(crate) fn cursor(
+    look: CursorLook,
+    cells: u32,
+    width: u32,
+    height: u32,
+    light: u32,
+) -> Vec<Primitive> {
+    let cell = Cell::new(width.saturating_mul(cells), height, light, light);
+    let (w, h, t) = (cell.width, cell.height, cell.light);
+    let pieces = match look {
+        CursorLook::Block => vec![cell.rect(0, w, 0, h)],
+        CursorLook::Underline => vec![cell.rect(0, w, h - 2 * t, h)],
+        CursorLook::Bar => vec![cell.rect(0, 2 * t, 0, h)],
+        CursorLook::Outline => vec![
+            cell.rect(0, w, 0, t),
+            cell.rect(0, t, t, h - t),
+            cell.rect(w - t, w, t, h - t),
+            cell.rect(0, w, h - t, h),
+        ],
+    };
+    pieces.into_iter().flatten().collect()
 }
 
 /// A cell, and how thick its lines are, in pixels.

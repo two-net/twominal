@@ -30,7 +30,8 @@ use tab::input::{
 use tab::render::{Measure, Palette, Renderer, Rgb};
 use tab::session::{Output, Session, Shell, Start};
 use terminal_core::{
-    Color, Event, Keyboard, MouseFormat, MouseTracking, Size, Style, TerminalCore, Underline,
+    Color, CursorShape, Event, Keyboard, MouseFormat, MouseTracking, Size, Style, TerminalCore,
+    Underline,
 };
 
 /// How long a test waits for a program before it fails.
@@ -971,6 +972,8 @@ fn palette() -> Palette {
         foreground: Rgb::new(200, 200, 200),
         background: Rgb::new(10, 10, 10),
         ansi: std::array::from_fn(|index| Rgb::new(index as u8, 0, 100 + index as u8)),
+        cursor: Rgb::new(250, 250, 0),
+        cursor_text: Rgb::new(0, 0, 50),
     }
 }
 
@@ -1335,4 +1338,49 @@ fn typing_at_a_prompt_sends_one_row_in_a_small_frame() {
 
     sh.keys("\rexit\r");
     sh.until_exit();
+}
+
+#[test]
+fn vim_asks_for_a_bar_in_insert_mode_and_a_block_after_it() {
+    let Some(vim) = installed("vim") else { return };
+    let home = Folder::new();
+    // What a vimrc commonly says for the cursor's shape: a steady bar in insert mode, and a
+    // steady block after it (TERM-07).
+    let script = format!(
+        "'{vim}' -u NONE -N -n -i NONE --cmd 'set ttimeout ttimeoutlen=10' \
+         -c 'let &t_SI = \"\\e[6 q\"' -c 'let &t_EI = \"\\e[2 q\"'"
+    );
+    let mut vim = Terminal::run(&home.0, &vim, &["/bin/sh", "-c", &script], &[]);
+    vim.until("the screen", |vim| vim.alternate());
+    let shown = |shape: CursorShape| {
+        move |vim: &Terminal| {
+            let modes = vim.core.modes();
+            modes.cursor_visible && modes.cursor_style.is_some_and(|style| style.shape == shape)
+        }
+    };
+    let mut renderer = Renderer::new(palette());
+    renderer.measure(&measure()).unwrap();
+    // The cursor's first piece, and whether it blinks.
+    let mut cursor = |vim: &Terminal| {
+        renderer.redraw();
+        let frame = Json::read(&renderer.frame(&vim.core, "").unwrap().json());
+        let cursor = frame.get("cursor").expect("a cursor").clone();
+        let piece: Vec<f64> = cursor.get("shape").unwrap().items()[0]
+            .items()
+            .iter()
+            .map(Json::number)
+            .collect();
+        (piece, cursor.get("blink").is_some())
+    };
+
+    vim.type_text("i");
+    vim.until("the bar", shown(CursorShape::Bar));
+    assert_eq!(cursor(&vim), (vec![0.0, 0.0, 2.0, 20.0], false));
+    vim.input(press("Escape", held()));
+    vim.until("the block", shown(CursorShape::Block));
+    assert_eq!(cursor(&vim), (vec![0.0, 0.0, 10.0, 20.0], false));
+
+    vim.type_text(":q!");
+    vim.input(press("Enter", held()));
+    vim.until_exit();
 }

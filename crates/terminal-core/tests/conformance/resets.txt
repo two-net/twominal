@@ -2,7 +2,7 @@
 
 ## RIS resets everything but the size
 size 10x3
-send text\e[2;3r\e[?25l\e[?2004h\e[?1000h\e[?1006h\e[?1007l\e[3g\e(0\e[?1049hfull
+send text\e[2;3r\e[6 q\e[?25l\e[?2004h\e[?1000h\e[?1006h\e[?1007l\e[3g\e(0\e[?1049hfull
 send \ec
 screen
 |          |
@@ -11,6 +11,7 @@ screen
 cursor 1;1
 mode alternate_screen off
 mode cursor_visible on
+mode cursor_style default
 mode bracketed_paste off
 mode mouse off
 mode mouse_format legacy
@@ -24,13 +25,14 @@ screen
 
 ## DECSTR resets modes but keeps the screen and the cursor
 size 4x3
-send abc\e[?7l\e[?25l\e[4h\e[?1h\e=\e(0\e[2;3r\e[?6h\e7\e[!p
+send abc\e[?7l\e[?25l\e[3 q\e[4h\e[?1h\e=\e(0\e[2;3r\e[?6h\e7\e[!p
 screen
 |abc |
 |    |
 |    |
 cursor 2;1
 mode cursor_visible on
+mode cursor_style default
 mode application_cursor off
 mode application_keypad off
 send \e[4$p\e[?6$p\e[?7$p

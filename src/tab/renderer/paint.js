@@ -10,7 +10,8 @@
 // frame has shapes for is filled as those shapes: box drawing, blocks, powerline symbols,
 // underlines and crossing out.
 //
-// The frame's format is written down in crates/tab/src/render/json.rs, which writes it.
+// The cursor is painted on a canvas of its own, which src/tab/renderer/cursor.js lays over the
+// grid's. The frame's format is written down in crates/tab/src/render/json.rs, which writes it.
 
 // The font of a style: the font's own bold and italic faces where it has them (FONT-09).
 function fontOf(full, flags) {
@@ -117,54 +118,108 @@ function fillShape(context, shape, x, y) {
   }
 }
 
+// Keeps the context's font and fill, and sets each only when it changes: a context parses both
+// each time they are set. Restoring the context forgets them, and so must its pen.
+function penFor(context) {
+  return {
+    font: null,
+    fill: null,
+    setFont(value) {
+      if (value !== this.font) {
+        context.font = this.font = value;
+      }
+    },
+    setFill(value) {
+      if (value !== this.fill) {
+        context.fillStyle = this.fill = value;
+      }
+    },
+    forget() {
+      this.font = null;
+      this.fill = null;
+    },
+  };
+}
+
+// Draws each character of `text` on its own, in the cells from `x` of the row whose top is
+// `top`: a shape, or a glyph at the cell's left edge. Returns how many cells it took.
+function fillEach(context, full, shapes, pen, text, x, top, ink, flags) {
+  const [cellWidth] = full.cell;
+  let count = 0;
+  for (const char of text) {
+    const at = x + count * cellWidth;
+    const shape = shapes[char];
+    if (shape) {
+      pen.setFill(ink);
+      fillShape(context, shape, at, top);
+    } else if (char !== " ") {
+      pen.setFont(fontOf(full, flags));
+      pen.setFill(ink);
+      fillText(context, pen.font, char, at, top + full.baseline, 1, cellWidth);
+    }
+    count += 1;
+  }
+  return count;
+}
+
+// Draws `run`, one of `frame`'s, in the row whose top is `top`, with column 0 at `left`: its
+// text, then its underline and its crossing out.
+function paintRun(context, full, frame, pen, run, top, left) {
+  const [col, style, text, cells] = run;
+  const [cellWidth] = full.cell;
+  const { colors, styles, shapes } = frame;
+  const [color, flags, underlineColor] = styles[style];
+  const ink = colors[color];
+  const x = left + col * cellWidth;
+  let count = cells;
+  if (cells === undefined) {
+    // A cell for each character.
+    count = fillEach(context, full, shapes, pen, text, x, top, ink, flags);
+  } else if (cells === 0) {
+    // A cell for each character, drawn as one so that ligatures form, or each on its own
+    // when its glyphs do not advance alike.
+    pen.setFont(fontOf(full, flags));
+    pen.setFill(ink);
+    count = text.length;
+    if (!fillJoined(context, pen.font, text, x, top + full.baseline, cellWidth)) {
+      fillEach(context, full, shapes, pen, text, x, top, ink, flags);
+    }
+  } else {
+    // Drawn whole over its cells.
+    pen.setFont(fontOf(full, flags));
+    pen.setFill(ink);
+    fillText(context, pen.font, text, x, top + full.baseline, cells, cellWidth);
+  }
+
+  const underline = flags >> 3;
+  if (underline) {
+    pen.setFill(colors[underlineColor ?? color]);
+    for (let cell = 0; cell < count; cell += 1) {
+      fillShape(context, full.underlines[underline - 1], x + cell * cellWidth, top);
+    }
+  }
+  if (flags & 4) {
+    pen.setFill(ink);
+    for (let cell = 0; cell < count; cell += 1) {
+      fillShape(context, full.strikethrough, x + cell * cellWidth, top);
+    }
+  }
+}
+
 // Paints `frame` with `full`, the layout of the last frame that had every row. A frame with
 // every row paints the whole canvas first, margins included.
 export function paint(context, full, frame) {
   const { canvas } = context;
   const [cellWidth, cellHeight] = full.cell;
-  const { colors, styles, shapes } = frame;
-
-  // A context parses `font` and `fillStyle` each time they are set, so they are set only when
-  // they change. Restoring the context forgets them.
-  let font = null;
-  let fill = null;
-  const setFont = (value) => {
-    if (value !== font) {
-      context.font = font = value;
-    }
-  };
-  const setFill = (value) => {
-    if (value !== fill) {
-      context.fillStyle = fill = value;
-    }
-  };
-
-  // Draws each character of `text` on its own, in the cells from `col` of the row whose top is
-  // `top`: a shape, or a glyph at the cell's left edge. Returns how many cells it took.
-  const fillEach = (text, col, top, ink, flags) => {
-    let count = 0;
-    for (const char of text) {
-      const x = (col + count) * cellWidth;
-      const shape = shapes[char];
-      if (shape) {
-        setFill(ink);
-        fillShape(context, shape, x, top);
-      } else if (char !== " ") {
-        setFont(fontOf(full, flags));
-        setFill(ink);
-        fillText(context, font, char, x, top + full.baseline, 1, cellWidth);
-      }
-      count += 1;
-    }
-    return count;
-  };
+  const { colors } = frame;
+  const pen = penFor(context);
 
   context.textAlign = "left";
   context.textBaseline = "alphabetic";
   context.globalAlpha = 1;
   if (frame.full) {
     forget();
-    setFill(full.background);
+    pen.setFill(full.background);
     context.fillRect(0, 0, canvas.width, canvas.height);
   }
 
@@ -175,53 +230,41 @@ export function paint(context, full, frame) {
     context.rect(0, top, canvas.width, cellHeight);
     context.clip();
 
-    setFill(full.background);
+    pen.setFill(full.background);
     context.fillRect(0, top, canvas.width, cellHeight);
     for (let i = 0; i < spans.length; i += 3) {
-      setFill(colors[spans[i + 2]]);
+      pen.setFill(colors[spans[i + 2]]);
       context.fillRect(spans[i] * cellWidth, top, spans[i + 1] * cellWidth, cellHeight);
     }
-
-    for (const [col, style, text, cells] of runs) {
-      const [color, flags, underlineColor] = styles[style];
-      const ink = colors[color];
-      let count = cells;
-      if (cells === undefined) {
-        // A cell for each character.
-        count = fillEach(text, col, top, ink, flags);
-      } else if (cells === 0) {
-        // A cell for each character, drawn as one so that ligatures form, or each on its own
-        // when its glyphs do not advance alike.
-        setFont(fontOf(full, flags));
-        setFill(ink);
-        count = text.length;
-        if (!fillJoined(context, font, text, col * cellWidth, top + full.baseline, cellWidth)) {
-          fillEach(text, col, top, ink, flags);
-        }
-      } else {
-        // Drawn whole over its cells.
-        setFont(fontOf(full, flags));
-        setFill(ink);
-        fillText(context, font, text, col * cellWidth, top + full.baseline, cells, cellWidth);
-      }
-
-      const underline = flags >> 3;
-      if (underline) {
-        setFill(colors[underlineColor ?? color]);
-        for (let cell = col; cell < col + count; cell += 1) {
-          fillShape(context, full.underlines[underline - 1], cell * cellWidth, top);
-        }
-      }
-      if (flags & 4) {
-        setFill(ink);
-        for (let cell = col; cell < col + count; cell += 1) {
-          fillShape(context, full.strikethrough, cell * cellWidth, top);
-        }
-      }
+    for (const run of runs) {
+      paintRun(context, full, frame, pen, run, top, 0);
     }
 
     context.restore();
-    font = null;
-    fill = null;
+    pen.forget();
   }
+}
+
+// Paints `frame`'s cursor with its cells' top left at `x`, `y`: its shape in its color, and over a
+// block the text under it, in the cursor's text color (TERM-07). The text is cut at the cursor's
+// cells, so text drawn as one from a cell before them, such as a flag, shows the cursor's part.
+// Without `text`, only the shape, as while it glides.
+export function paintCursor(context, full, frame, x, y, text = true) {
+  const { cursor } = frame;
+  const [cellWidth, cellHeight] = full.cell;
+  const pen = penFor(context);
+
+  context.save();
+  context.beginPath();
+  context.rect(x, y, cursor.cell[2] * cellWidth, cellHeight);
+  context.clip();
+  context.textAlign = "left";
+  context.textBaseline = "alphabetic";
+  context.globalAlpha = 1;
+  pen.setFill(frame.colors[cursor.color]);
+  fillShape(context, cursor.shape, x, y);
+  if (text && cursor.text) {
+    paintRun(context, full, frame, pen, cursor.text, y, x - cursor.cell[1] * cellWidth);
+  }
+  context.restore();
 }

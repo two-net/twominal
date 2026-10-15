@@ -88,8 +88,9 @@ pub(crate) fn draw(row: &Row, palette: &Palette) -> Line {
 /// Lays `text`, which an input method is composing, over `line` from column `col`, in the
 /// default colors and underlined, each character in the cells the core would give it. Text that
 /// would pass the last column starts further left, and text longer than the row shows its end.
-/// Returns the column it starts in: the caret.
-pub(crate) fn compose(line: &mut Line, col: usize, text: &str, palette: &Palette) -> usize {
+/// Returns the column it starts in, the caret, or None when it takes no cell, as control
+/// characters and marks with nothing before them take none.
+pub(crate) fn compose(line: &mut Line, col: usize, text: &str, palette: &Palette) -> Option<usize> {
     let look = palette.composing();
     let mut cells: Vec<Drawn> = Vec::new();
     for char in text.chars().filter(|char| !char.is_control()) {
@@ -123,7 +124,7 @@ pub(crate) fn compose(line: &mut Line, col: usize, text: &str, palette: &Palette
     }
     let cols = line.len();
     if cells.is_empty() || cols == 0 {
-        return col.min(cols.saturating_sub(1));
+        return None;
     }
     if cells.len() > cols {
         cells.drain(..cells.len() - cols);
@@ -142,7 +143,7 @@ pub(crate) fn compose(line: &mut Line, col: usize, text: &str, palette: &Palette
         line[end] = Drawn::blank(line[end].look);
     }
     line[start..end].copy_from_slice(&cells);
-    start
+    Some(start)
 }
 
 /// Marks the cells of `line` that may join a ligature: those holding one printable ASCII
@@ -186,6 +187,41 @@ pub(crate) fn ligatures(line: &mut Line, cursor: Option<usize>) {
     for cell in &mut line[start..end] {
         cell.joins = false;
     }
+}
+
+/// The cells a cursor at `col` of `line` covers: its own, or both of a wide character's from
+/// either half. Returns the first, and how many.
+pub(crate) fn covers(line: &Line, col: usize) -> (usize, usize) {
+    match line.get(col).map(|cell| cell.width) {
+        Some(0) if col > 0 => (col - 1, 2),
+        Some(2) if col + 1 < line.len() => (col, 2),
+        _ => (col, 1),
+    }
+}
+
+/// The text the cell at `col` of `line` shows, as a run, for a block cursor to draw over in its
+/// own colors: the cell's character, or the whole of what is drawn as one over it, such as a
+/// wide character, a flag or a character and its skin tone, from its first cell. None where
+/// nothing is drawn: a blank that is not underlined or crossed out, and hidden text.
+pub(crate) fn under(line: &Line, col: usize) -> Option<Run> {
+    runs(line).into_iter().find_map(|run| {
+        let start = usize::from(run.col);
+        match run.cells {
+            Cells::Whole(cells) => (start..start + usize::from(cells))
+                .contains(&col)
+                .then_some(run),
+            // A character a cell.
+            Cells::Each | Cells::Joined => {
+                let char = run.text.chars().nth(col.checked_sub(start)?)?;
+                (char != ' ' || run.ink.decorates()).then(|| Run {
+                    col: col as u16,
+                    ink: run.ink,
+                    text: char.to_string(),
+                    cells: Cells::Each,
+                })
+            }
+        }
+    })
 }
 
 /// Cells next to each other whose text is drawn alike.
