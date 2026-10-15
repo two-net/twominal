@@ -304,6 +304,21 @@ fn a_long_value_is_cut_short_in_its_notice() {
 }
 
 #[test]
+fn a_font_that_is_not_installed_has_a_notice_like_the_others() {
+    // The App Shell finds out, and the store words it (SET-05).
+    let notice = Notice::font_missing("Nope");
+    assert_eq!(notice.setting, "font");
+    assert_eq!(
+        notice.to_string(),
+        "font: \"Nope\" is not an installed font. Using \"JetBrains Mono\"."
+    );
+
+    let notice = Notice::font_missing(&"x".repeat(500)).to_string();
+    assert!(notice.starts_with("font: \"xxx"), "{notice}");
+    assert!(notice.len() < 200, "{notice}");
+}
+
+#[test]
 fn a_file_that_is_not_toml_means_the_defaults_at_startup() {
     let folder = Folder::with("theme = \"dark\"\nfont_size = \n");
     let (store, _changes) = folder.open();

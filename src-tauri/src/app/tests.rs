@@ -5,6 +5,7 @@
 use std::ffi::OsString;
 use std::path::Path;
 
+use super::fonts::{self, Zoom};
 use super::launcher::Problem;
 use super::menu::{self, Action};
 use super::*;
@@ -78,6 +79,19 @@ fn each_menu_item_has_its_action() {
         Some(Action::Theme(Theme::System))
     );
 
+    assert_eq!(
+        menu::action("font-bigger"),
+        Some(Action::FontSize(Zoom::Bigger))
+    );
+    assert_eq!(
+        menu::action("font-smaller"),
+        Some(Action::FontSize(Zoom::Smaller))
+    );
+    assert_eq!(
+        menu::action("font-reset"),
+        Some(Action::FontSize(Zoom::Reset))
+    );
+
     // The OS carries out its own items.
     assert_eq!(menu::action("copy"), None);
 }
@@ -86,6 +100,143 @@ fn each_menu_item_has_its_action() {
 fn new_window_has_the_shortcut_of_each_os() {
     assert_eq!(menu::new_window_shortcut(true), "Cmd+N");
     assert_eq!(menu::new_window_shortcut(false), "Ctrl+Shift+N");
+}
+
+#[test]
+fn the_font_size_items_have_the_shortcuts_of_each_os() {
+    // Appendix A. No plain Ctrl+letter is taken from the shell.
+    let shortcuts = |macos| {
+        [Zoom::Bigger, Zoom::Smaller, Zoom::Reset].map(|zoom| menu::font_size_shortcut(zoom, macos))
+    };
+    assert_eq!(shortcuts(true), ["Cmd+=", "Cmd+-", "Cmd+0"]);
+    assert_eq!(
+        shortcuts(false),
+        ["Ctrl+Shift+=", "Ctrl+Shift+-", "Ctrl+Shift+0"]
+    );
+}
+
+#[test]
+fn the_font_size_items_step_a_whole_point_as_far_as_the_setting_goes() {
+    assert_eq!(fonts::zoomed(13.0, Zoom::Bigger), 14.0);
+    assert_eq!(fonts::zoomed(13.0, Zoom::Smaller), 12.0);
+    // A size the file gave in part of a point goes to the next whole one.
+    assert_eq!(fonts::zoomed(13.5, Zoom::Bigger), 14.0);
+    assert_eq!(fonts::zoomed(13.5, Zoom::Smaller), 13.0);
+    // At either end it stays.
+    assert_eq!(fonts::zoomed(72.0, Zoom::Bigger), 72.0);
+    assert_eq!(fonts::zoomed(71.5, Zoom::Bigger), 72.0);
+    assert_eq!(fonts::zoomed(6.0, Zoom::Smaller), 6.0);
+    assert_eq!(fonts::zoomed(6.5, Zoom::Smaller), 6.0);
+    // Reset is the default of Appendix B, whatever the size.
+    for size in [6.0, 13.0, 20.5, 72.0] {
+        assert_eq!(fonts::zoomed(size, Zoom::Reset), 13.0);
+    }
+}
+
+/// Settings with the Font setting `font` at `size` points.
+fn font_settings(font: &str, size: f64) -> Settings {
+    Settings {
+        font: font.to_string(),
+        font_size: size,
+        ..Settings::default()
+    }
+}
+
+#[test]
+fn the_font_falls_back_to_the_bundled_one_and_then_the_os() {
+    assert_eq!(
+        fonts::font(&font_settings("Fira Code", 13.0), true).0,
+        r#""Fira Code", "JetBrains Mono", monospace"#
+    );
+    // The bundled font is named once, whatever its letter case.
+    for bundled in ["JetBrains Mono", "jetbrains mono", " JETBRAINS MONO "] {
+        assert_eq!(
+            fonts::font(&font_settings(bundled, 13.0), true).0,
+            r#""JetBrains Mono", monospace"#
+        );
+    }
+    // The name as written, but for the spaces around it.
+    assert_eq!(
+        fonts::font(&font_settings("  Iosevka Term  ", 13.0), true).0,
+        r#""Iosevka Term", "JetBrains Mono", monospace"#
+    );
+}
+
+#[test]
+fn any_font_name_is_a_css_string() {
+    let family = |name: &str| fonts::font(&font_settings(name, 13.0), true).0;
+    assert_eq!(
+        family(r#"Say "hi""#),
+        r#""Say \"hi\"", "JetBrains Mono", monospace"#
+    );
+    assert_eq!(
+        family(r"back\slash"),
+        r#""back\\slash", "JetBrains Mono", monospace"#
+    );
+    // A control character is written as its code, ended by a space, so the `font` that
+    // carries it can still be read.
+    assert_eq!(family("a\nb"), r#""a\a b", "JetBrains Mono", monospace"#);
+    assert_eq!(
+        family("a\u{7f}\u{9b}b"),
+        r#""a\7f \9b b", "JetBrains Mono", monospace"#
+    );
+    // Nothing else is escaped.
+    assert_eq!(
+        family("Sarasa Mono 更纱 ✓"),
+        r#""Sarasa Mono 更纱 ✓", "JetBrains Mono", monospace"#
+    );
+}
+
+#[test]
+fn points_are_css_pixels_as_each_os_counts_them() {
+    // macOS counts 72 to the inch, and Linux and Windows 96.
+    for points in [6.0, 13.0, 72.0] {
+        assert_eq!(fonts::font(&font_settings("Menlo", points), true).1, points);
+    }
+    assert_eq!(fonts::font(&font_settings("Menlo", 6.0), false).1, 8.0);
+    assert_eq!(fonts::font(&font_settings("Menlo", 12.0), false).1, 16.0);
+    assert_eq!(fonts::font(&font_settings("Menlo", 72.0), false).1, 96.0);
+}
+
+#[test]
+fn the_notice_that_a_font_is_missing_joins_the_stores() {
+    let store = [Notice {
+        setting: "theme".to_string(),
+        problem: "\"blue\" is not one of \"dark\", \"light\", \"system\"".to_string(),
+        instead: "Using \"system\"".to_string(),
+    }];
+    assert_eq!(texts(&store, None).len(), 1);
+    assert_eq!(
+        texts(&store, Some(&Notice::font_missing("Nope"))),
+        [
+            store[0].to_string(),
+            "font: \"Nope\" is not an installed font. Using \"JetBrains Mono\".".to_string(),
+        ]
+    );
+}
+
+#[test]
+fn the_bundled_font_is_always_installed() {
+    // So it is never looked for.
+    assert!(fonts::is_bundled("JetBrains Mono"));
+    assert!(fonts::is_bundled(" jetbrains MONO "));
+    assert!(fonts::installed("jetbrains mono"));
+    assert!(!fonts::is_bundled("JetBrains Mono NL"));
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn installed_fonts_are_found_by_their_family_names() {
+    // Every Mac has Menlo.
+    assert!(fonts::installed("Menlo"));
+    assert!(fonts::installed("menlo"));
+    assert!(!fonts::installed("No Font Is Named This 23"));
+
+    // Read from the file as well as by fontdb.
+    let menlo = std::fs::read("/System/Library/Fonts/Menlo.ttc").unwrap();
+    assert!(fonts::has_family(&menlo, 0, "MENLO"));
+    assert!(!fonts::has_family(&menlo, 0, "Menlo Regular"));
+    assert!(!fonts::has_family(b"not a font", 0, "Menlo"));
 }
 
 #[test]

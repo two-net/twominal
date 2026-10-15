@@ -12,6 +12,9 @@
 //! Windows are opened here, in code, and each has a Tab Manager of its own. The menus are in
 //! `app/menu.rs`. DESIGN.md §3 says how windows and menus behave on each OS.
 //!
+//! The Font and Font size settings become the font every page draws with in `app/fonts.rs`,
+//! which also finds out whether the font is installed (FONT-02, SET-05).
+//!
 //! The product's name is read from Tauri, which has it from `tauri.conf.json` (GEN-01).
 //! DESIGN.md §3 says where the name, the identifiers and the logo are kept.
 //!
@@ -21,6 +24,7 @@
 //!
 //! Filled in by #41 (splash).
 
+mod fonts;
 mod launcher;
 mod menu;
 #[cfg(unix)]
@@ -38,7 +42,7 @@ use std::thread;
 use tauri::{Emitter, Manager};
 
 use crate::history::HistoryStore;
-use crate::settings::{Change, Notice, SettingsStore, Theme};
+use crate::settings::{Change, Notice, Settings, SettingsStore, Theme};
 use crate::tabs::TabManager;
 use crate::theme::ThemeManager;
 
@@ -48,6 +52,13 @@ use menu::{Action, Menus};
 /// Tells a page what is wrong with the configuration now: every notice, as text. An empty
 /// list means nothing is wrong.
 const SETTINGS_NOTICES: &str = "settings:notices";
+
+/// Tells a page the font to draw with: a CSS family list, and its size in CSS pixels
+/// (FONT-02).
+const SETTINGS_FONT: &str = "settings:font";
+
+/// Whether the Font size setting is in macOS's points.
+const MACOS: bool = cfg!(target_os = "macos");
 
 /// What every window's label starts with. `capabilities/default.json` names the windows by
 /// it, and a window it does not name cannot talk to Rust.
@@ -68,12 +79,22 @@ struct App {
     theme: ThemeManager,
     menus: Menus,
     windows: Mutex<Windows>,
+    /// That the Font setting names no installed font, once a scan has found that out. Held
+    /// while the notices are sent, so that no list overtakes a newer one.
+    font_missing: Mutex<Option<Notice>>,
 }
 
 impl App {
     fn windows(&self) -> MutexGuard<'_, Windows> {
         // Every change to the list is one step, so a panic under the lock leaves it whole.
         self.windows.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn font_missing(&self) -> MutexGuard<'_, Option<Notice>> {
+        // Replaced in one step, so a panic under the lock leaves it whole.
+        self.font_missing
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
     }
 }
 
@@ -233,6 +254,17 @@ fn menu_chosen(handle: &tauri::AppHandle, event: tauri::menu::MenuEvent) {
             // The OS checks or unchecks an item when it is chosen, even if nothing changed.
             report(app.menus.show_theme(app.settings.settings().theme));
         }
+        Action::FontSize(zoom) => {
+            let app = handle.state::<App>();
+            // The store saves the size and announces it, and `settings_changed` sends it to
+            // the pages. At the smallest or largest size nothing changes.
+            let zoomed = |settings: &mut Settings| {
+                settings.font_size = fonts::zoomed(settings.font_size, zoom);
+            };
+            if let Err(notices) = app.settings.update(zoomed) {
+                log(&notices);
+            }
+        }
     }
 }
 
@@ -243,17 +275,38 @@ fn app_ready(window: tauri::WebviewWindow, app: tauri::State<App>) {
         eprintln!("twominal: window {} ready", window.label());
     }
     // Whatever is wrong with the configuration was found before this page could listen.
-    let notices = texts(&app.settings.notices());
+    let font_missing = app.font_missing();
+    let notices = texts(&app.settings.notices(), font_missing.as_ref());
     report(window.emit_to(window.label(), SETTINGS_NOTICES, notices));
+    let font = fonts::font(&app.settings.settings(), MACOS);
+    report(window.emit_to(window.label(), SETTINGS_FONT, font));
 }
 
 /// A setting changed, in Twominal or in the configuration file. This is the one place a
 /// change is passed on from: to the windows and the menus here, to the Theme Manager with
-/// #38, to the Tab Managers with #31, and to the pages, which so far show only the notices
-/// (SET-05).
+/// #38, to the Tab Managers with #31, and to the pages, which so far are given the notices
+/// (SET-05) and the font (FONT-02).
 fn settings_changed(handle: &tauri::AppHandle, change: &Change) {
     log(&change.notices);
-    report(handle.emit(SETTINGS_NOTICES, texts(&change.notices)));
+    // The file can change before the app has finished starting. Then no font has been
+    // looked for yet.
+    match handle.try_state::<App>() {
+        Some(app) => {
+            let mut font_missing = app.font_missing();
+            if change.settings.font != change.previous.font {
+                // The notice was about the font before.
+                *font_missing = None;
+                look_for_font(handle, &change.settings.font);
+            }
+            let notices = texts(&change.notices, font_missing.as_ref());
+            report(handle.emit(SETTINGS_NOTICES, notices));
+        }
+        None => report(handle.emit(SETTINGS_NOTICES, texts(&change.notices, None))),
+    }
+    let (now, before) = (&change.settings, &change.previous);
+    if now.font != before.font || now.font_size != before.font_size {
+        report(handle.emit(SETTINGS_FONT, fonts::font(now, MACOS)));
+    }
     if change.settings.theme != change.previous.theme {
         handle.set_theme(appearance(change.settings.theme));
         // The file can change before the app has finished starting.
@@ -263,8 +316,40 @@ fn settings_changed(handle: &tauri::AppHandle, change: &Change) {
     }
 }
 
-fn texts(notices: &[Notice]) -> Vec<String> {
-    notices.iter().map(Notice::to_string).collect()
+/// Finds out on a thread of its own whether `font` is installed, and then shows the notice
+/// that it is not, or takes it away (SET-05). The bundled font needs no looking for.
+fn look_for_font(handle: &tauri::AppHandle, font: &str) {
+    if fonts::is_bundled(font) {
+        return;
+    }
+    let handle = handle.clone();
+    let font = font.to_string();
+    let looking = thread::Builder::new()
+        .name("fonts".to_string())
+        .spawn(move || {
+            let notice = (!fonts::installed(&font)).then(|| Notice::font_missing(&font));
+            let app = handle.state::<App>();
+            let mut font_missing = app.font_missing();
+            // A font chosen since then is looked for by a thread of its own.
+            if app.settings.settings().font != font || *font_missing == notice {
+                return;
+            }
+            log(notice.as_slice());
+            *font_missing = notice;
+            let notices = texts(&app.settings.notices(), font_missing.as_ref());
+            report(handle.emit(SETTINGS_NOTICES, notices));
+        });
+    report(looking.map(drop));
+}
+
+/// Every notice about the configuration, as text: the store's, and that the font is not
+/// installed.
+fn texts(notices: &[Notice], font_missing: Option<&Notice>) -> Vec<String> {
+    notices
+        .iter()
+        .chain(font_missing)
+        .map(Notice::to_string)
+        .collect()
 }
 
 fn log(notices: &[Notice]) {
@@ -327,6 +412,7 @@ pub fn run() -> ExitCode {
                 log(&settings.notices());
             }
             let theme = settings.settings().theme;
+            let font = settings.settings().font;
             let (menu, menus) = Menus::build(&handle, &app.package_info().name, theme)?;
             app.manage(App {
                 settings,
@@ -334,7 +420,9 @@ pub fn run() -> ExitCode {
                 theme: ThemeManager,
                 menus,
                 windows: Mutex::default(),
+                font_missing: Mutex::default(),
             });
+            look_for_font(&handle, &font);
             handle.set_menu(menu)?;
             handle.set_theme(appearance(theme));
             open_window(&handle, directory)?;

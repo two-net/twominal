@@ -22,3 +22,5 @@ tauri-build = { version = "2", features = [] }
 tauri = { version = "2", features = [] }
 tab = { path = "../crates/tab" }
 toml_edit = "0.25"
+fontdb = "0.24"
+ttf-parser = { version = "0.25", default-features = false, features = ["std"] }

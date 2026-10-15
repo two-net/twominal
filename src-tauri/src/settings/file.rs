@@ -366,6 +366,11 @@ fn outside(item: &Item, least: impl ToString, most: impl ToString) -> String {
     format!("{} is not between {least} and {most}", found(item))
 }
 
+/// Text as a notice shows it: quoted, and cut short if it is long.
+pub(super) fn shown(text: &str) -> String {
+    short(quoted(text))
+}
+
 /// A value as a notice shows it: as the file writes it if that is short, otherwise by kind.
 fn found(item: &Item) -> String {
     let written = match item {
@@ -377,6 +382,11 @@ fn found(item: &Item) -> String {
         Item::Value(Value::Array(_)) | Item::ArrayOfTables(_) => return "a list".to_string(),
         _ => return "a table".to_string(),
     };
+    short(written)
+}
+
+/// `written`, or its start if it is long.
+fn short(written: String) -> String {
     if written.chars().count() <= QUOTED {
         written
     } else {

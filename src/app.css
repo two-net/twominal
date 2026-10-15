@@ -3,6 +3,37 @@
    The colors are the system's until the Theme Manager brings the palettes (#39). Nothing
    here moves or fades: the Animator runs every animation (ARC-05). */
 
+/* The bundled font, JetBrains Mono 2.304, in its four faces (FONT-01). Its copyright notice
+   and license are fonts/OFL.txt. Named "JetBrains Mono", they hide a copy the user has
+   installed, so every machine draws the same font. A face loads when it is first asked for. */
+@font-face {
+  font-family: "JetBrains Mono";
+  font-style: normal;
+  font-weight: 400;
+  src: url("fonts/JetBrainsMono-Regular.woff2") format("woff2");
+}
+
+@font-face {
+  font-family: "JetBrains Mono";
+  font-style: normal;
+  font-weight: 700;
+  src: url("fonts/JetBrainsMono-Bold.woff2") format("woff2");
+}
+
+@font-face {
+  font-family: "JetBrains Mono";
+  font-style: italic;
+  font-weight: 400;
+  src: url("fonts/JetBrainsMono-Italic.woff2") format("woff2");
+}
+
+@font-face {
+  font-family: "JetBrains Mono";
+  font-style: italic;
+  font-weight: 700;
+  src: url("fonts/JetBrainsMono-BoldItalic.woff2") format("woff2");
+}
+
 :root {
   color-scheme: light dark;
   font: 13px/1.4 system-ui, sans-serif;

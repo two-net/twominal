@@ -238,8 +238,9 @@ fn mono(size: f64, scale: f64) -> Measure {
 
 #[test]
 fn cells_are_whole_device_pixels_at_every_scale() {
+    // 6 to 72 pt: as many CSS pixels on macOS, and 8 to 96 on Linux and Windows.
     for scale in [1.0, 1.25, 1.5, 1.75, 2.0, 2.5, 3.0] {
-        for size in 6..=72 {
+        for size in 6..=96 {
             let measure = mono(f64::from(size), scale);
             let geometry = Geometry::new(&measure).unwrap();
             let layout = geometry.layout;

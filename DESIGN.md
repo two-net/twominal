@@ -1,6 +1,6 @@
 # Twominal — Design
 
-**Version:** 0.15 · **Date:** 2026-10-15 · **Tracks:** [SRS](SRS.md) v0.6
+**Version:** 0.16 · **Date:** 2026-10-15 · **Tracks:** [SRS](SRS.md) v0.6
 
 > The SRS says what Twominal must do. This document says how it is built: the technology choices the SRS leaves open (C-1) and where each component of SRS §6 lives. Requirement IDs such as `ARC-02` are the SRS's. Where the two disagree, the SRS wins and this document is corrected.
 
@@ -129,6 +129,8 @@ Every crate Twominal depends on directly is listed here, and nothing else may be
 | `twominal` | `tauri-build` | The build script `tauri` needs |
 | `twominal` | `tab` | The tab tier |
 | `twominal` | `toml_edit` | Reads the configuration file, and saves it with the user's comments kept (SET-03, SET-04) |
+| `twominal` | `fontdb` | Finds the installed fonts: the OS's font folders, and fontconfig's configuration on Linux, so that a Font setting that names none is reported (SET-05, SW-06). Default features on: `memmap` maps each file, which is `unsafe`, so that only the name tables of large fonts are read. Without it Apple Color Emoji's 180 MB would be read whole |
+| `twominal` | `ttf-parser` | Reads each installed face's family names, of which fontdb keeps one (SET-05). Default features off but `std` |
 | `tab` | `terminal-core` | The Terminal Core |
 | `tab` | `portable-pty` | Pseudo-terminals: starts the shell on one and carries its bytes, through ConPTY on Windows (SW-01, PORT-01) |
 | `terminal-core` | `vte` | Parses escape sequences. Default features off: no `std`, and a bounded buffer for OSC sequences (ARC-02, REL-02) |
@@ -142,11 +144,10 @@ Planned, and added by the issue that first needs each:
 | Crate | Will depend on | For | Issue |
 |---|---|---|---|
 | `twominal` | A clipboard library that reaches the Linux primary selection | SW-05 | #28 |
-| `twominal` | A font library that lists installed monospaced families | FONT-02 | #23 |
 
 ## 3. Components
 
-As of this version the Settings Store, the Session, the Terminal Core, the Rust half of the Input Handler and both halves of the Renderer are built, and the App Shell opens windows, builds the native menus, gives the product its name and logo and answers the `twominal` command. Every other Rust home exists as a skeleton: types that say who owns what, and no behaviour. Of the webview homes `src/app.js` and `src/tab/renderer.js` exist. The others are created by their issues, at the paths in §1. No window shows a tab yet: #31 attaches one, and wires the Renderer's two halves together.
+As of this version the Settings Store, the Session, the Terminal Core, the Rust half of the Input Handler and both halves of the Renderer are built, and the App Shell opens windows, builds the native menus, gives the product its name and logo, gives the pages their font and answers the `twominal` command. Every other Rust home exists as a skeleton: types that say who owns what, and no behaviour. Of the webview homes `src/app.js` and `src/tab/renderer.js` exist. The others are created by their issues, at the paths in §1. No window shows a tab yet: #31 attaches one, and wires the Renderer's two halves together.
 
 ### Tier 1: App Shell
 
@@ -155,7 +156,7 @@ As of this version the Settings Store, the Session, the Terminal Core, the Rust 
 - **Wires the stores and managers.** It hears a settings change and passes it to the Theme Manager, the Tab Managers and the webviews. They never name each other.
 - **Creates windows in code, not from `tauri.conf.json`.** A window then opens with the settings it needs for its first frame, so there is no flash of the wrong theme (SPL-02) and reduced motion applies from the start (SPL-07). So far that is the OS appearance the Theme setting asks for. The resolved background comes with #39 and the splash with #41.
 - **Its page** hosts the tab bar, the canvas, the splash screen and the settings, About and help screens (UI-03). The tab bar is at the top and the terminal area fills the rest. Showing or hiding the tab bar takes room from the terminal area and never from the window (UI-01).
-- **Shows the notices that belong to no tab**, such as a bad value in the configuration file (SET-05). They overlay the page and take no room from the terminal (UI-02).
+- **Shows the notices that belong to no tab**, such as a bad value in the configuration file (SET-05). They overlay the page and take no room from the terminal (UI-02). A list the same as the one shown changes nothing, so a list the user dismissed stays hidden when a setting changes.
 - **Must not** contain terminal logic.
 
 #### Windows and menus
@@ -173,13 +174,14 @@ The menus hold only what works. Each feature adds its own items (UI-05).
 | Twominal | About, Services, Hide, Hide Others, Show All, Quit | — |
 | File | New Window, Close Window | New Window, Close Window, Quit |
 | Edit | Undo, Redo, Cut, Copy, Paste, Select All | — |
-| View | Theme: Dark, Light, System. Enter Full Screen | Theme: Dark, Light, System |
+| View | Theme: Dark, Light, System. Increase Font Size, Decrease Font Size, Reset Font Size. Enter Full Screen | Theme: Dark, Light, System. Increase Font Size, Decrease Font Size, Reset Font Size |
 | Window | Minimize, Zoom, Bring All to Front, and the open windows | — |
 | Help | The search field | About |
 
 - **On macOS** the menu bar belongs to the app. On Linux and Windows each window shows it.
 - **Off macOS no item takes a plain Ctrl+letter** (Appendix A). The OS's ready-made Edit items would take Ctrl+C from the shell, so there the Edit menu waits for #28.
 - **Off macOS, Close Window and Quit are Twominal's own items**, because Linux has no ready-made ones.
+- **The font size items** take Appendix A's shortcuts: Cmd+=, Cmd+- and Cmd+0 on macOS, and Ctrl+Shift+=, Ctrl+Shift+- and Ctrl+Shift+0 elsewhere (*Fonts*).
 
 #### Launcher
 
@@ -214,6 +216,23 @@ The `twominal` command is the app's own executable (GEN-02, GEN-05). `src-tauri/
   - The app icons in `src-tauri/icons/` are generated from it with `cargo tauri icon src/logo.svg`. They are never edited by hand.
   - The page shows the file itself, on the splash screen (#41) and the About screen (#44). Until #44 the About dialog is the OS's, and it shows the logo where that dialog has a place for one: on macOS and Linux.
   - It was drawn for Twominal and holds no one else's artwork (C-3).
+
+#### Fonts
+
+`src-tauri/src/app/fonts.rs` turns the Font and Font size settings into the font every page draws with, and finds out whether the font is installed (FONT-02, SW-06, SET-05). The Renderer measures and paints whatever it is given (*Renderer*, Tier 3).
+
+- **The bundled font (FONT-01).** JetBrains Mono 2.304 in its regular, bold, italic and bold italic faces, as WOFF2 in `src/fonts/` with its license (§7). `src/app.css` names the four faces "JetBrains Mono" with `@font-face`. That name hides a copy the user has installed, so every machine draws the same version, with all four faces and the same ligatures. The webview loads a face when it is first asked for.
+- **The family** is a CSS list: the Font setting, then "JetBrains Mono", then `monospace`. When the setting is the bundled name, in any letter case, the list starts at "JetBrains Mono". Each name is written as a CSS string with its quotes, backslashes and control characters escaped, since a canvas ignores a `font` it cannot read.
+  - A font that is not installed is passed over, so the bundled font is drawn: the default SET-05 asks for.
+  - A character the font lacks is drawn from the next font that has it: JetBrains Mono, then the OS's monospace font, then whatever the OS falls back to (FONT-11, SW-06). `monospace` also draws the text if the bundled font could not load. How a fallback glyph fits its cells is the Renderer's.
+  - An installed font that is not monospaced is drawn too, each character in its cell.
+- **The size.** The setting is in points, and the page is given CSS pixels. A point is a pixel on macOS, which counts 72 to the inch, and 96/72 of one on Linux and Windows, which count 96, as in WezTerm. So 13 pt is 13 px on macOS and 17⅓ px elsewhere: what each OS's own terminals mean by 13 pt.
+- **To the pages.** The event `settings:font` carries the family and the size. Every page is sent it when either setting changes, and a page that has just loaded is sent it in answer to `app_ready`. The page hands it to the Renderer (#31), which measures again. The new layout sends every row, so a new font loses nothing on the screen (REL-03), though a smaller grid cuts rows until the Terminal Core reflows them (#26).
+- **Is it installed? (SET-05)** While the Font setting is not the bundled name, a thread named `fonts` lists the installed faces with fontdb, which reads the OS's font folders and, on Linux, fontconfig's configuration. It reads each face's family names with ttf-parser: name IDs 1, 16 and 21, in every language, which are the names a CSS family is matched with. When no face has the name, letter case aside, a notice says so: `font: "Nope" is not an installed font. Using "JetBrains Mono".`
+  - It runs when Twominal starts and each time the Font setting changes to another name, so a font installed while Twominal runs is found. While the bundled font is chosen, nothing is read.
+  - Drawing never waits for it: the family list already falls back to the bundled font. Only the notice waits.
+  - The notice is shown with the Settings Store's. A change of font takes it away at once, and a list finished for a font that is no longer chosen is dropped. Choosing the notice and sending the list happen under one lock, so a list cannot overtake a newer one.
+- **Zoom (FONT-02).** View ▸ Increase Font Size, Decrease Font Size and Reset Font Size change the Font size setting through the Settings Store, as the theme items do, so every window follows and the size is saved. Increase goes to the next whole point up and Decrease to the next one down, between 6 and 72, and Reset to 13. At a limit the item does nothing. It is not disabled, since a disabled item's key would go on to the program.
 
 ### Tier 2: stores and managers
 
@@ -399,7 +418,11 @@ The `twominal` command is the app's own executable (GEN-02, GEN-05). `src-tauri/
   - Tauri 2.12 hands a channel message of under 8 KB to the webview as a script (`ipc/channel.rs`), so what a program writes is part of that script (REL-02). Every string is escaped: quotes, backslashes, every control character, and U+2028 and U+2029. Every number is finite. A test escapes every character there is, and reads it back.
 - **Painting.** A row is painted in a band of its own, clipped to it: the background, the background spans, the text and the shapes, then underlines and crossing out. So a glyph that reaches past its row, as some emoji do, is cut at the row's edge, and a row painted alone comes out as it does among all the others. `font` and `fillStyle` are set only when they change, and the canvas has no alpha.
 - **No animation (ANIM-05).** A frame is painted the moment it arrives, and nothing in the Renderer fades or moves: only the Animator may start an animation, which the architecture test checks (§10). The webview reports a frame drawn at the display's next frame, from `requestAnimationFrame`, so frames never come faster than the display shows them (PERF-07). The report is made even when painting fails, so no frame can stop a tab.
-- **The font** is what the webview half is given, in CSS pixels, until #23 gives it the Font and Font size settings and the bundled font. It waits for the four faces to load before it measures, and measures again whenever a face loads later.
+- **The font** is what the App Shell gives the page: a CSS family list and a size in CSS pixels (*Fonts*, Tier 1). The webview half waits for the four faces to load before it measures, and measures again whenever a face loads later.
+- **Fallback glyphs fit their cells (FONT-11).** A character the font lacks comes from a fallback font, whose glyph may be wider than its cells. Such a glyph is drawn scaled down, as much across as down, to the width of its cells, on the baseline.
+  - A glyph is wider when its advance passes its cells by more than half a pixel a cell, a cell's width being the larger of the cell's and that face's own `0`'s. So no glyph of the font itself is scaled, not even one of a bold face the webview made up.
+  - The webview measures each glyph once for each font, and forgets the measures with every frame of every row and whenever a face loads.
+  - A glyph taller than its row is cut at the row's edge, as every glyph is.
 
 ### Tier 4: Terminal Core
 
@@ -533,7 +556,7 @@ No plugin system, no scripting engine and no network component (ARC-06).
 | Settings | `config.toml` in the OS configuration folder `twominal/`: `~/Library/Application Support` on macOS, `$XDG_CONFIG_HOME` or `~/.config` on Linux, `%APPDATA%` on Windows | TOML. One file (SET-03) |
 | Command history | `history` in the OS data folder `twominal/`: `~/Library/Application Support` on macOS, `$XDG_DATA_HOME` or `~/.local/share` on Linux, `%LOCALAPPDATA%` on Windows | Plain text, one command per line, a line break written as `\n` and a backslash as `\\`. Readable only by the user (SEC-02) |
 | Launcher socket and lock | `twominal.sock` and `twominal.lock`, in the user's own temporary folder on macOS and in `$XDG_RUNTIME_DIR` on Linux. A debug build's are `twominal-dev.sock` and `twominal-dev.lock` | One byte for the version of the exchange, then the directory's bytes. Neither file keeps anything |
-| Bundled font | `src/fonts/`, with its license (FONT-01) | The four JetBrains Mono styles |
+| Bundled font | `src/fonts/`: `JetBrainsMono-Regular.woff2`, `-Bold`, `-Italic` and `-BoldItalic` from release 2.304, and `OFL.txt`, the font's copyright notice and license (FONT-01). The installers also hold `OFL.txt` as a file of its own, as `fonts/OFL.txt` among their resources | WOFF2, which every webview reads, at a third of the size of the TrueType files. Embedded with the rest of `src/` |
 | Logo | `src/logo.svg`. The app icons in `src-tauri/icons/` are generated from it (GEN-03) | SVG, made of shapes only: no text, no style sheet, nothing loaded from elsewhere |
 | Shell integration | The scripts are in `crates/tab/src/session/integration/`, built into the executable. zsh's and bash's are written to the launcher's folder, as `twominal-<hash of the scripts>/zsh/.zshenv` and `twominal-<hash of the scripts>/integration.bash`. PowerShell's goes on its command line | One script per shell, given to the shell at startup. No file of the user's is touched (FISH-04) |
 | Webview code | `src/` | Served as it is |
@@ -594,7 +617,7 @@ ESC ] 2222 ; <nonce> ; <key> ; <value> BEL
 
 Keyboard shortcuts (SET-06), theme color overrides (THM-09) and font features (FONT-12) get their own tables in this file, each added by its feature.
 
-The store checks only what the file can say. Whether the font is installed is the Renderer's to find out (#23), and whether the shell exists is the Session's (FISH-02).
+The store checks only what the file can say. Whether the font is installed is the App Shell's to find out (*Fonts*, §3), and whether the shell exists is the Session's (FISH-02).
 
 What happens to a file that is not right (SET-05):
 
@@ -614,9 +637,10 @@ Saving a setting changes only the keys whose value changed. Comments, the order 
 
 - **`cargo test --workspace`** runs everything below that exists.
 - **Architecture test**, `src-tauri/tests/architecture.rs`. It reads the two marked tables in this document and checks the code against them (§10).
+- **Bundled font**, `src-tauri/tests/fonts.rs`. It checks that the four faces are WOFF2 with TrueType outlines, which Tauri serves as fonts, that `src/app.css` names each with its weight and style, and that the license is there and the installers hold it (FONT-01, C-3).
 - **Identity test**, `src-tauri/tests/identity.rs`. It checks the product's name, that the code spells it only as `Twominal` or `twominal`, the lowercase identifiers, and that the logo stands alone (GEN-01 to GEN-03).
-- **Settings Store.** `src-tauri/src/settings/tests.rs` gives each test a configuration folder of its own, and covers loading, each kind of bad value, hand edits and saving (SET-02 to SET-05, AT-13). The store does not depend on Tauri, so it needs no window.
-- **App Shell.** `src-tauri/src/app/tests.rs` covers what needs no window: window titles and labels, what each menu item does, the shortcut on each OS, and the launcher's arguments, texts and hand-over, in a folder of the test's own. `src-tauri/tests/launcher.rs` runs the executable for what it answers without starting Tauri (GEN-05). The windows and menus themselves, and a window the launcher asks for, are checked by hand (MAINT-02).
+- **Settings Store.** `src-tauri/src/settings/tests.rs` gives each test a configuration folder of its own, and covers loading, each kind of bad value, hand edits, saving and the wording of the notice for a font that is not installed (SET-02 to SET-05, AT-13). The store does not depend on Tauri, so it needs no window.
+- **App Shell.** `src-tauri/src/app/tests.rs` covers what needs no window: window titles and labels, what each menu item does, the shortcut on each OS, the font a page is given and its size on each OS, the font size each zoom item makes, the notice for a font that is not installed, and the launcher's arguments, texts and hand-over, in a folder of the test's own. On macOS it finds Menlo, which every Mac has, and no font of a made-up name. `src-tauri/tests/launcher.rs` runs the executable for what it answers without starting Tauri (GEN-05). The windows and menus themselves, and a window the launcher asks for, are checked by hand (MAINT-02).
 - **Session.** `crates/tab/src/session/tests.rs` starts `/bin/sh` on real pseudo-terminals and checks the bytes both ways, the environment, the directory, the size, the exit status, closing, and an exit while a background program holds the terminal (SW-01, SW-02, FISH-01, TERM-15, SEC-03). It also checks a shell that cannot start: a Shell setting that names no file while another session keeps working, a name missing from the `PATH`, a file that is not executable, and a `$SHELL` that has gone (FISH-02, AT-16). These run on macOS and Linux.
   - Shell integration is tested the same way (FISH-04 to FISH-06). zsh, bash and PowerShell start in a home folder of the test's own, with the user's files in it, and the tests check the reports, that the user's files are read in the usual order, and that the home folder is the same afterwards, file for file. Twominal's own folder, the variables it passes and the setting turned off are checked too. A test whose shell is not installed says so and passes. On macOS, `brew install powershell` installs PowerShell 7.
   - The choice of locale and of PowerShell, the waiter's rule for when to report the exit, how a program is looked for and why it cannot run, the offers and their wording, and which shells get shell integration and what it adds to their command are tested on every OS, but no shell has yet been started on Windows.
@@ -632,8 +656,8 @@ Saving a setting changes only the keys whose value changed. Comments, the order 
 - **Tab tier.** The `tab` crate does not depend on Tauri, so the Command Line, key handling and the Renderer's choice of text runs are unit-tested without a window.
   - **Input Handler.** `crates/tab/src/input/tests.rs` gives DOM key events, pastes, focus changes and input-method text, and checks the bytes: xterm's encodings of every key and modifier, layouts, macOS Option and AltGr, and the kitty protocol's flags, with kitty's own cases from `kitty_tests/keys.py`. It also checks that, with every key reported, every key and every set of modifiers reaches the program, that without the protocol every key xterm can send does, and that no string the webview sends can make it panic (TERM-08, TERM-09, TERM-11, HW-01).
   - It gives mouse and wheel events too, and checks xterm's reports in each mode and format, the limits of the legacy and UTF-8 formats, the gestures Shift and Cmd keep from the program, lost releases, the cells and halves of Twominal's gestures, how a trackpad's pixels and a notch become steps, the cursor keys of 1007, and that no number the webview sends can make it panic or send more than a screen of keys (TERM-10, HW-02).
-  - **Renderer.** `crates/tab/src/render/tests.rs` checks the colors of all 256 indices, inverse, dim and hidden text, and that bold never brightens. It lays out the cell at every scale from 1 to 3 and every font size from 6 to 72, and gets no layout from numbers that are no size. It checks that a frame holds exactly the rows that changed: random output, with each frame painted onto a model of the canvas, gives the canvas a full frame gives. It checks the runs, the spans, the sequences drawn as one and the text being composed. The shapes are drawn into pixels in the test at cells of many sizes from 3 by 6 to 40 by 80: each line leaves its edge where its weight says, so any two characters meet, each double-line character has the pieces it should, blocks that make a cell between them tile it, and nothing reaches out of its cell. The escaping of the frame is checked over every character there is, by a reader written in the test (HW-03, FONT-10, TERM-03 to TERM-05).
-- **Webview.** It has no logic of its own to unit-test. What it draws is checked by the acceptance scenarios (SRS §7) as documented manual tests (MAINT-02). The Renderer's half is checked by hand on each OS once #31 puts a tab in a window: text, box drawing, blocks and powerline symbols at scales 1 and 2, bold and italic faces, and a window dragged between displays of different scales (HW-03, FONT-09, FONT-10). That nothing animates is checked by the architecture test (ANIM-05).
+  - **Renderer.** `crates/tab/src/render/tests.rs` checks the colors of all 256 indices, inverse, dim and hidden text, and that bold never brightens. It lays out the cell at every scale from 1 to 3 and every font size from 6 to 96 CSS pixels, which is 72 pt on Linux and Windows, and gets no layout from numbers that are no size. It checks that a frame holds exactly the rows that changed: random output, with each frame painted onto a model of the canvas, gives the canvas a full frame gives. It checks the runs, the spans, the sequences drawn as one and the text being composed. The shapes are drawn into pixels in the test at cells of many sizes from 3 by 6 to 40 by 80: each line leaves its edge where its weight says, so any two characters meet, each double-line character has the pieces it should, blocks that make a cell between them tile it, and nothing reaches out of its cell. The escaping of the frame is checked over every character there is, by a reader written in the test (HW-03, FONT-10, TERM-03 to TERM-05).
+- **Webview.** It has no logic of its own to unit-test. What it draws is checked by the acceptance scenarios (SRS §7) as documented manual tests (MAINT-02). The Renderer's half is checked by hand on each OS once #31 puts a tab in a window: text, box drawing, blocks and powerline symbols at scales 1 and 2, bold and italic faces, fallback glyphs inside their cells, and a window dragged between displays of different scales (HW-03, FONT-09, FONT-10, FONT-11). So are the font size shortcuts on each OS, and the notice for a font that is not installed (FONT-02, SET-05). That nothing animates is checked by the architecture test (ANIM-05).
 
 ## 9. Risks
 
@@ -645,6 +669,8 @@ Saving a setting changes only the keys whose value changed. Comments, the order 
 | WebKit cannot say how many device pixels the terminal area covers | HW-03 | #22: macOS's scale is 1 or 2, and WebKitGTK is on GTK 3, whose scale is whole, so the size in CSS pixels times the scale is exact | A display with a fractional scale under Wayland is scaled by the compositor, which blurs every GTK 3 app. Twominal moves to WebKitGTK on GTK 4 when Tauri does |
 | Drawing each cell with its own `fillText` is too slow | PERF-04, PERF-05 | #48 | The webview half keeps each glyph it draws in a canvas of its own and copies it, behind the same frame |
 | A font has no bold or italic face | FONT-09 | Nothing can settle it | The webview makes one from the regular face. The bundled font has all four (#23) |
+| The App Shell and a webview find a font by different names | SET-05 | Nothing can settle it | Fonts are found by their family names. A font named by its full or PostScript name, which WebKit also finds, is drawn but gets the notice. The settings screen offers family names only (#42) |
+| GTK does not take Ctrl+Shift+= for the Increase Font Size item, since with Shift the key is `plus` | FONT-02 | By hand on Linux | The Input Handler takes the font size keys as shortcuts (#43) |
 | A frame under 8 KB reaches the webview as a script | REL-02 | #22: every string is escaped, and a test escapes every character | Frames are sent as bytes, which Tauri passes as numbers |
 | IPC adds too much to each key | PERF-04 | #48 | Frames while typing carry only the rows that changed. In Tauri 2.12 a channel message of up to about 8 KB of JSON goes to the webview in one step, and a larger one needs a second |
 | Input methods need decisions in the webview | HW-01 | #31, against the contract in §3 | The webview half of the Input Handler may hold a composition, and nothing else |

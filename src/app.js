@@ -19,6 +19,11 @@ const notices = document.getElementById("notices");
 const list = notices.querySelector("ul");
 
 function showNotices(texts) {
+  // The same list again, as when another setting changed, leaves a dismissed list hidden.
+  const shown = [...list.children].map((item) => item.textContent);
+  if (texts.length === shown.length && texts.every((text, i) => text === shown[i])) {
+    return;
+  }
   // The texts quote the configuration file, so they are never read as HTML.
   list.replaceChildren(
     ...texts.map((text) => {
@@ -35,8 +40,19 @@ notices.querySelector("button").addEventListener("click", () => {
   notices.hidden = true;
 });
 
-// Listening comes first: app_ready makes Rust send what it found before this page loaded.
-// The listener is this window's own, so it hears that answer and what goes to every window.
-getCurrentWebviewWindow()
-  .listen("settings:notices", (event) => showNotices(event.payload))
-  .then(() => invoke("app_ready"));
+// The font the terminal area draws with, from the Font and Font size settings: a CSS family
+// list and its size in CSS pixels (FONT-02). #31 gives it to the Renderer it creates there,
+// with `setFont`, and gives it each new one.
+let font = null;
+
+// Listening comes first: app_ready makes Rust send what it found before this page loaded,
+// and the font. The listeners are this window's own, so they hear that answer and what goes
+// to every window.
+const current = getCurrentWebviewWindow();
+Promise.all([
+  current.listen("settings:notices", (event) => showNotices(event.payload)),
+  current.listen("settings:font", (event) => {
+    const [family, size] = event.payload;
+    font = { family, size };
+  }),
+]).then(() => invoke("app_ready"));

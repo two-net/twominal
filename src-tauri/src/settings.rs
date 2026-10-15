@@ -32,6 +32,9 @@ use file::ConfigFile;
 /// How often the watcher looks at the file.
 const WATCH_EVERY: Duration = Duration::from_millis(250);
 
+/// The sizes the Font size setting takes, in points (Appendix B).
+pub const FONT_SIZES: RangeInclusive<f64> = 6.0..=72.0;
+
 /// What a notice says is done about a file that cannot be read: at startup, and later.
 const USING_DEFAULTS: &str = "Using the defaults";
 const KEEPING_SETTINGS: &str = "Keeping the current settings";
@@ -41,7 +44,7 @@ const KEEPING_SETTINGS: &str = "Keeping the current settings";
 #[derive(Clone, Debug, PartialEq)]
 pub struct Settings {
     pub theme: Theme,
-    /// The font's name. Whether it is installed is for the Renderer to find out.
+    /// The font's family name. Whether it is installed is for the App Shell to find out.
     pub font: String,
     /// In points.
     pub font_size: f64,
@@ -109,7 +112,7 @@ impl Default for Settings {
 fn each(visit: &mut impl Visit) {
     visit.word("theme", |s| &mut s.theme);
     visit.text("font", |s| &mut s.font);
-    visit.number("font_size", 6.0..=72.0, |s| &mut s.font_size);
+    visit.number("font_size", FONT_SIZES, |s| &mut s.font_size);
     visit.flag("font_ligatures", |s| &mut s.font_ligatures);
     visit.flag("vim_mode", |s| &mut s.vim_mode);
     visit.flag("animations", |s| &mut s.animations);
@@ -245,6 +248,16 @@ pub struct Notice {
 }
 
 impl Notice {
+    /// That the Font setting names no installed font, which the App Shell finds out. The
+    /// bundled font, the default, is drawn instead (SET-05).
+    pub fn font_missing(font: &str) -> Self {
+        Self {
+            setting: "font".to_string(),
+            problem: format!("{} is not an installed font", file::shown(font)),
+            instead: format!("Using {}", file::shown(&Settings::default().font)),
+        }
+    }
+
     /// A notice about the file as a whole.
     fn file(problem: String, instead: &str) -> Self {
         Self {

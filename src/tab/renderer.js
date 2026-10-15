@@ -13,11 +13,13 @@
 // was drawn is reported at the display's next frame, so frames never come faster than the
 // display shows them, and a hidden window, whose frames are paused, asks for none (PERF-07).
 //
-// The App Shell's page creates it in the terminal area, gives it the font, and passes what it
-// measures and that a frame was drawn to the Rust half (#31). Filled in by #22 (grid), #23
-// (fonts), #24 (ligatures) and #25 (cursor).
+// The App Shell's page creates it in the terminal area, gives it the font the App Shell sends,
+// and passes what it measures and that a frame was drawn to the Rust half (#31). The font is a
+// CSS family list ending in the bundled JetBrains Mono and the OS's monospace, so a character
+// the chosen font lacks comes from a fallback font, and paint.js fits it to its cells (FONT-11).
+// Filled in by #22 (grid), #23 (fonts), #24 (ligatures) and #25 (cursor).
 
-import { paint } from "./renderer/paint.js";
+import { forget, paint } from "./renderer/paint.js";
 
 // The faces of a font: regular, bold, italic and both, as CSS names them.
 const FACES = ["", "bold ", "italic ", "italic bold "];
@@ -31,8 +33,9 @@ export class Renderer {
   #context;
   #onMeasure;
   #onDrawn;
-  // The font, as CSS names it, and its size in CSS pixels. #23 gives it the Font settings.
-  #font = { family: "monospace", size: 13 };
+  // The font, as CSS names it, and its size in CSS pixels: the bundled font until the App
+  // Shell's page gives it the Font settings.
+  #font = { family: '"JetBrains Mono", monospace', size: 13 };
   // The terminal area, as the ResizeObserver saw it last: in CSS pixels, and in device pixels
   // where the webview says, with the scale it was seen at.
   #area = null;
@@ -78,7 +81,7 @@ export class Renderer {
   }
 
   // The font to draw with: a family, or a list of them, as CSS names it, and its size in CSS
-  // pixels.
+  // pixels. The App Shell makes both from the Font and Font size settings (FONT-02).
   setFont(family, size) {
     this.#font = { family, size };
     this.#measure();
@@ -170,7 +173,11 @@ export class Renderer {
     this.#unwatch = () => query.removeEventListener("change", changed);
   }
 
-  #fontsLoaded = () => this.#measure();
+  // A face that loaded may draw glyphs a fallback font drew before, at another width.
+  #fontsLoaded = () => {
+    forget();
+    this.#measure();
+  };
 
   // Measures the font at its size in device pixels, and the terminal area, once the font's
   // faces have loaded, and reports them.

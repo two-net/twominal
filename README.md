@@ -4,7 +4,7 @@ A desktop terminal with a fish-style command line built in. [SRS.md](SRS.md) say
 
 Twominal is a Tauri v2 app. One Rust process holds all state and logic, and one OS webview per window draws. The webview code is plain HTML and ES modules (no bundler, no Node dependencies).
 
-Version 1.0 is being built. So far the Settings Store works, the App Shell opens windows and builds the native menus, the product has its name and logo, the `twominal` command opens windows, the Session runs the user's shell on a pseudo-terminal with shell integration for zsh, bash and PowerShell, the Terminal Core interprets what it writes as xterm does, wide characters, combining marks, emoji, colors and text styles included, the Input Handler turns keys, pasted text, focus changes, the mouse and the wheel into what programs expect, the kitty keyboard protocol and SGR mouse reports included, the Renderer turns the screen into frames and paints them on a canvas, sharp at any display scale, with box drawing, blocks and powerline symbols that join from cell to cell, and the other components exist as a skeleton. No window shows a shell yet: that comes with tabs.
+Version 1.0 is being built. So far the Settings Store works, the App Shell opens windows and builds the native menus, the product has its name and logo, the `twominal` command opens windows, the Session runs the user's shell on a pseudo-terminal with shell integration for zsh, bash and PowerShell, the Terminal Core interprets what it writes as xterm does, wide characters, combining marks, emoji, colors and text styles included, the Input Handler turns keys, pasted text, focus changes, the mouse and the wheel into what programs expect, the kitty keyboard protocol and SGR mouse reports included, the Renderer turns the screen into frames and paints them on a canvas, sharp at any display scale, with box drawing, blocks and powerline symbols that join from cell to cell and fallback glyphs that fit their cells, the pages are given their font, the bundled JetBrains Mono or any installed one, in the size the View menu's font size items change, and the other components exist as a skeleton. No window shows a shell yet: that comes with tabs.
 
 ## Layout
 
@@ -63,6 +63,10 @@ twominal --version
 ```
 
 If Twominal is already running, the window opens there and the command returns at once. No shell starts in the directory until tabs exist. DESIGN.md §3 has the details.
+
+## Font
+
+Twominal bundles [JetBrains Mono](https://github.com/JetBrains/JetBrainsMono) 2.304, in `src/fonts/`. Copyright 2020 The JetBrains Mono Project Authors. It is licensed under the SIL Open Font License 1.1, whose text is `src/fonts/OFL.txt`, and every installer holds that file as `fonts/OFL.txt`.
 
 ## Logo
 

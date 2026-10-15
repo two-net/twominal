@@ -7,11 +7,13 @@
 //! the command line and programs use.
 
 use tauri::menu::{
-    AboutMetadata, CheckMenuItem, CheckMenuItemBuilder, Menu, MenuBuilder, MenuItemBuilder,
-    SubmenuBuilder, HELP_SUBMENU_ID, WINDOW_SUBMENU_ID,
+    AboutMetadata, CheckMenuItem, CheckMenuItemBuilder, IsMenuItem, Menu, MenuBuilder,
+    MenuItemBuilder, SubmenuBuilder, HELP_SUBMENU_ID, WINDOW_SUBMENU_ID,
 };
 
 use crate::settings::Theme;
+
+use super::fonts::Zoom;
 
 /// What choosing one of Twominal's own items asks for. The items the OS provides, such as
 /// Copy or Minimize, are carried out by the OS.
@@ -23,6 +25,8 @@ pub(super) enum Action {
     /// Off macOS only. There the OS has an item of its own.
     Quit,
     Theme(Theme),
+    /// A font size item: it changes the Font size setting (FONT-02).
+    FontSize(Zoom),
 }
 
 const NEW_WINDOW: &str = "new-window";
@@ -36,16 +40,24 @@ const THEMES: [(&str, &str, Theme); 3] = [
     ("theme-system", "System", Theme::System),
 ];
 
+/// The font size items in menu order: the item's id, its text and what it asks for.
+const ZOOMS: [(&str, &str, Zoom); 3] = [
+    ("font-bigger", "Increase Font Size", Zoom::Bigger),
+    ("font-smaller", "Decrease Font Size", Zoom::Smaller),
+    ("font-reset", "Reset Font Size", Zoom::Reset),
+];
+
 /// What the item with this id asks for. `None` for an item the OS carries out.
 pub(super) fn action(id: &str) -> Option<Action> {
+    let theme = || THEMES.iter().find(|(item, ..)| *item == id);
+    let zoom = || ZOOMS.iter().find(|(item, ..)| *item == id);
     match id {
         NEW_WINDOW => Some(Action::NewWindow),
         CLOSE_WINDOW => Some(Action::CloseWindow),
         QUIT => Some(Action::Quit),
-        _ => THEMES
-            .iter()
-            .find(|(item, ..)| *item == id)
-            .map(|&(.., theme)| Action::Theme(theme)),
+        _ => theme()
+            .map(|&(.., theme)| Action::Theme(theme))
+            .or_else(|| zoom().map(|&(.., zoom)| Action::FontSize(zoom))),
     }
 }
 
@@ -56,6 +68,19 @@ pub(super) fn new_window_shortcut(macos: bool) -> &'static str {
         "Cmd+N"
     } else {
         "Ctrl+Shift+N"
+    }
+}
+
+/// A font size item's shortcut (Appendix A): Mod with =, - or 0, where Mod is Cmd on macOS
+/// and Ctrl+Shift elsewhere.
+pub(super) fn font_size_shortcut(zoom: Zoom, macos: bool) -> &'static str {
+    match (zoom, macos) {
+        (Zoom::Bigger, true) => "Cmd+=",
+        (Zoom::Smaller, true) => "Cmd+-",
+        (Zoom::Reset, true) => "Cmd+0",
+        (Zoom::Bigger, false) => "Ctrl+Shift+=",
+        (Zoom::Smaller, false) => "Ctrl+Shift+-",
+        (Zoom::Reset, false) => "Ctrl+Shift+0",
     }
 }
 
@@ -84,6 +109,19 @@ impl Menus {
             themes.push((value, item));
         }
         let theme_menu = theme_menu.build()?;
+
+        // Never disabled, even at the smallest or largest size: the key of a disabled item
+        // would go on to the program.
+        let zoom_items = ZOOMS
+            .iter()
+            .map(|&(id, text, zoom)| {
+                MenuItemBuilder::with_id(id, text)
+                    .accelerator(font_size_shortcut(zoom, macos))
+                    .build(app)
+            })
+            .collect::<tauri::Result<Vec<_>>>()?;
+        let zooms: Vec<&dyn IsMenuItem<tauri::Wry>> =
+            zoom_items.iter().map(|item| item as _).collect();
 
         let new_window = MenuItemBuilder::with_id(NEW_WINDOW, "New Window")
             .accelerator(new_window_shortcut(macos))
@@ -126,6 +164,8 @@ impl Menus {
             let view = SubmenuBuilder::new(app, "View")
                 .item(&theme_menu)
                 .separator()
+                .items(&zooms)
+                .separator()
                 .fullscreen_with_text("Enter Full Screen")
                 .build()?;
             // Under these two ids macOS lists the open windows and adds the search field.
@@ -148,7 +188,11 @@ impl Menus {
                 .text(CLOSE_WINDOW, "Close Window")
                 .text(QUIT, "Quit")
                 .build()?;
-            let view = SubmenuBuilder::new(app, "View").item(&theme_menu).build()?;
+            let view = SubmenuBuilder::new(app, "View")
+                .item(&theme_menu)
+                .separator()
+                .items(&zooms)
+                .build()?;
             let help = SubmenuBuilder::new(app, "Help")
                 .about_with_text(format!("About {product}"), Some(about))
                 .build()?;
