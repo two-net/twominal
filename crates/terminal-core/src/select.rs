@@ -103,31 +103,6 @@ impl Rows<'_> {
         }
     }
 
-    /// The cell before `col` of row `number`'s line, on the row before when the line goes on
-    /// from there.
-    fn before(&self, number: u64, col: usize) -> Option<(u64, usize)> {
-        if col > 0 {
-            return Some((number, col - 1));
-        }
-        let above = number.checked_sub(1)?;
-        let row = self.get(above).filter(|row| row.wrapped())?;
-        Some((above, row.line().len().checked_sub(1)?))
-    }
-
-    /// The cell after `col` of row `number`'s line, on the next row when the line goes on there.
-    fn after(&self, number: u64, col: usize) -> Option<(u64, usize)> {
-        let row = self.get(number)?;
-        let len = if row.wrapped() {
-            row.line().len()
-        } else {
-            self.cols
-        };
-        if col + 1 < len {
-            return Some((number, col + 1));
-        }
-        (row.wrapped() && number < self.last()).then_some((number + 1, 0))
-    }
-
     /// The word the cell at `col` of row `number` is in, from its first boundary to its last: a
     /// run of word characters, which may go on over the rows a line wraps into. A blank or a
     /// separator is a word of its own.
@@ -173,14 +148,6 @@ impl Rows<'_> {
         Spot {
             row: last.0,
             col: last.1 + 1,
-        }
-    }
-
-    /// `col` of row `number`, or the cell before it when it is a wide character's right half.
-    fn left_half(&self, number: u64, col: usize) -> usize {
-        match self.cell(number, col) {
-            Some(cell) if cell.width() == 0 && col > 0 => col - 1,
-            _ => col,
         }
     }
 

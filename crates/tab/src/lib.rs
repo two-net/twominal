@@ -20,8 +20,13 @@
 //! selected to the [`OsClipboard`], and gives what it pastes back to the Input Handler (TERM-17,
 //! SW-05, SEC-06), as DESIGN.md §3 *What the Tab does with the mouse and the clipboard* says.
 //!
-//! Filled in by #16 (Terminal Core), #20 (Input Handler), #22 (Renderer), #28 (the clipboard) and
-//! #31 (tabs).
+//! And links: before each frame the Tab gives the Renderer where the Input Handler says the mouse
+//! is, so the link there is underlined and where it leads shown, and a click that opens one hands
+//! the [`OsLinks`] the URL the Renderer showed there (TERM-20, SW-07, SEC-07), as DESIGN.md §3
+//! *What the Tab does with links* says.
+//!
+//! Filled in by #16 (Terminal Core), #20 (Input Handler), #22 (Renderer), #28 (the clipboard), #30
+//! (links) and #31 (tabs).
 
 pub mod command_line;
 pub mod input;
@@ -77,4 +82,13 @@ pub trait OsClipboard: Send + Sync {
     /// The text `which` holds. None when it holds none, or no text, and off Linux for the
     /// primary selection.
     fn read(&self, which: Selection) -> Option<String>;
+}
+
+/// The OS's default handler for each kind of link (SW-07): the second part of the Host the App
+/// Shell gives each tab (#31). Any tab's thread may call it.
+pub trait OsLinks: Send + Sync {
+    /// Opens `url` as the OS opens a link of its kind, and returns at once. `url` is one SEC-07
+    /// lets open, as [`terminal_core::opening`] made it of a link the Renderer showed the user
+    /// before the click: one word of printable ASCII.
+    fn open(&self, url: &str);
 }

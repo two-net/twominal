@@ -72,6 +72,13 @@
 //! |.**.|                                                  then the screen's, `*` for a cell a
 //! |#...|                                                  match holds and `#` for one of the
 //!                                                         current match's
+//! hover 2;3                                               the mouse is over this cell
+//! target https://example.com                              where the link at the cell the
+//! target                                                  mouse is over leads, or with no
+//!                                                         text that it has none
+//! hovered                                                 every row there is, as `matches`
+//! |.***|                                                  draws them, `*` for a cell that
+//! |*...|                                                  link holds
 //! ```
 //!
 //! A row is the text of its cells. A wide character takes two columns of it, as it does in a
@@ -92,11 +99,15 @@
 //! `found` and `matches` first bring the matches up to date, as the Tab does before each frame.
 //! `find` searches from the screen's last row, as from a view at the bottom.
 //!
-//! A place to select is a row and a column counted from 1, as `cursor` counts them, from the
+//! `hover` keeps the row the mouse is over by its number, so it stays on its text as output
+//! scrolls it. `target` and `hovered` look for the link there as they come, as the Renderer
+//! does for each frame.
+//!
+//! A place to select, or to hover over, is a row and a column counted from 1, as `cursor` counts them, from the
 //! top left of the screen as it is at that step. Row 0 is the scrollback's newest row, -1 the
 //! one before, and so on. A row or a column past the edge is a drag past it.
 //!
-//! `send`, `reply`, `title`, `directory`, `clipboard`'s text, `copy`'s, and `link`'s URI and id take
+//! `send`, `reply`, `title`, `directory`, `clipboard`'s text, `copy`'s, `target`'s, and `link`'s URI and id take
 //! `\e`, `\a`, `\b`, `\t`, `\n`, `\r`, `\\` and `\xHH`; the rest is UTF-8 as written. No line
 //! may end in a space, so a trailing space is written `\x20`. Every event must be checked: one
 //! left over at the end of a case fails it (SEC-05).
@@ -112,8 +123,8 @@ use std::fs;
 use std::path::Path;
 
 use terminal_core::{
-    Clipboard, Color, CursorShape, Event, LinkId, Modes, MouseFormat, MouseTracking, Place, Search,
-    Selecting, Selection, Size, Style, TerminalCore, ThemeColor, Underline,
+    Clipboard, Color, CursorShape, Event, LinkAt, LinkId, Modes, MouseFormat, MouseTracking, Place,
+    Search, Selecting, Selection, Size, Style, TerminalCore, ThemeColor, Underline,
 };
 
 #[test]
@@ -211,6 +222,11 @@ enum Kind {
     Found(String),
     /// Every row there is as the case drew its matches.
     Matches(Vec<String>),
+    Hover(Spot),
+    /// Where the link the mouse is over leads, or None for no link.
+    Target(Option<String>),
+    /// Every row there is as the case drew the cells of the link the mouse is over.
+    Hovered(Vec<String>),
 }
 
 /// A place to select as a case writes it: the row and the column counted from 1 from the
@@ -464,6 +480,27 @@ fn parse(file: &str, text: &str, problems: &mut Vec<String>) -> Vec<Case> {
                 }
                 why.map_or(Ok(Kind::Matches(rows)), Err)
             }
+            "hover" => parse_spot(rest)
+                .map(Kind::Hover)
+                .ok_or(format!("{rest:?} is not a place such as 3;5")),
+            "target" if rest.is_empty() => Ok(Kind::Target(None)),
+            "target" => unescape(rest).and_then(|uri| match String::from_utf8(uri) {
+                Ok(uri) => Ok(Kind::Target(Some(uri))),
+                Err(_) => Err("a target that is not UTF-8".to_string()),
+            }),
+            "hovered" if rest.is_empty() => {
+                let mut rows = Vec::new();
+                let mut why = None;
+                while let Some((at, row)) = lines.next_if(|(_, row)| row.starts_with('|')) {
+                    match parse_hovered(row, now.cols) {
+                        Ok(()) => rows.push(row.to_string()),
+                        Err(error) => {
+                            why.get_or_insert(format!("row on line {at}: {error}"));
+                        }
+                    }
+                }
+                why.map_or(Ok(Kind::Hovered(rows)), Err)
+            }
             "scrollback" => match rest.parse::<usize>() {
                 Ok(count) => read_rows(&mut lines, count, "scrollback").map(Kind::Scrollback),
                 Err(_) => Err(format!("{rest:?} is not a number of rows")),
@@ -677,6 +714,24 @@ fn parse_matches(text: &str, cols: u16) -> Result<(), String> {
         .ok_or(format!("{text:?} is not a row of matches between two |"))?;
     if let Some(other) = inside.chars().find(|char| !matches!(char, '*' | '#' | '.')) {
         return Err(format!("{other:?} is none of *, # and ."));
+    }
+    let cells = inside.chars().count();
+    if cells != usize::from(cols) {
+        return Err(format!("{cells} cells on a screen {cols} wide"));
+    }
+    Ok(())
+}
+
+/// Checks a row of a link's cells drawn as `|`, `.` or `*` for each of the `cols` cells, and `|`.
+fn parse_hovered(text: &str, cols: u16) -> Result<(), String> {
+    let inside = text
+        .strip_prefix('|')
+        .and_then(|inside| inside.strip_suffix('|'))
+        .ok_or(format!(
+            "{text:?} is not a row of a link's cells between two |"
+        ))?;
+    if let Some(other) = inside.chars().find(|char| !matches!(char, '*' | '.')) {
+        return Err(format!("{other:?} is neither * nor ."));
     }
     let cells = inside.chars().count();
     if cells != usize::from(cols) {
@@ -1016,6 +1071,8 @@ fn run(case: &Case, bytewise: bool) -> Vec<(usize, String)> {
     let mut events = VecDeque::new();
     let mut problems = Vec::new();
     let mut last = case.line;
+    // The cell the mouse is over, by the number of its row.
+    let mut hover = None;
 
     for step in &case.steps {
         last = step.line;
@@ -1137,6 +1194,33 @@ fn run(case: &Case, bytewise: bool) -> Vec<(usize, String)> {
                     ));
                 }
             }
+            Kind::Hover(spot) => {
+                let at = place(&core, *spot);
+                hover = Some((at.row, at.col));
+            }
+            Kind::Target(expected) => {
+                let actual = linked(&core, hover).map(|link| link.target().to_string());
+                if actual != *expected {
+                    let text = |target: &Option<String>| match target {
+                        Some(target) => format!("target {}", escape(target.as_bytes())),
+                        None => "no link".to_string(),
+                    };
+                    problem(format!(
+                        "expected {}, got {}",
+                        text(expected),
+                        text(&actual)
+                    ));
+                }
+            }
+            Kind::Hovered(expected) => {
+                let actual = draw_hovered(&core, hover);
+                if actual != expected.join("\n") {
+                    problem(format!(
+                        "the link's cells differ\nexpected\n{}\ngot\n{actual}",
+                        expected.join("\n")
+                    ));
+                }
+            }
             Kind::Copy(expected) => {
                 let actual = core.copy();
                 if actual != *expected {
@@ -1192,6 +1276,45 @@ fn draw_selected(core: &TerminalCore) -> String {
             let taken = selected.map_or(0..0, |selected| selected.cols(number));
             let cells: String = (0..cols)
                 .map(|col| if taken.contains(&col) { '*' } else { '.' })
+                .collect();
+            format!("|{cells}|")
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// The link at `hover`, a row's number and a column, as the Renderer asks for it.
+fn linked(core: &TerminalCore, hover: Option<(i64, i32)>) -> Option<LinkAt> {
+    let (row, col) = hover?;
+    core.link_at(u64::try_from(row).ok()?, usize::try_from(col).ok()?)
+}
+
+/// Every row there is, as [`draw_matches`] draws them, with `*` for a cell the link at `hover`
+/// holds.
+fn draw_hovered(core: &TerminalCore, hover: Option<(i64, i32)>) -> String {
+    let link = linked(core, hover);
+    let cols = usize::from(core.size().cols);
+    let first = if core.modes().alternate_screen {
+        live(core) as u64
+    } else {
+        core.scrollback().start()
+    };
+    let last = live(core) as u64 + u64::from(core.size().rows);
+    (first..last)
+        .map(|number| {
+            let cells: String = (0..cols)
+                .map(|col| {
+                    let cell = core.row(number).and_then(|row| row.cells().get(col));
+                    let held = link
+                        .as_ref()
+                        .zip(cell)
+                        .is_some_and(|(link, cell)| link.holds(number, col, cell));
+                    if held {
+                        '*'
+                    } else {
+                        '.'
+                    }
+                })
                 .collect();
             format!("|{cells}|")
         })
@@ -1594,6 +1717,18 @@ fn what_cannot_be_read_is_a_problem() {
             "## a\nsize 2x2\nselected\n|..|\n",
             "ends inside the selection",
         ),
+        ("## a\nsize 2x1\nhover 1,1\n", "is not a place"),
+        ("## a\nsize 2x1\nhover\n", "is not a place"),
+        ("## a\nsize 2x1\ntarget \\xff\n", "not UTF-8"),
+        ("## a\nsize 2x1\nhovered\n|*x|\n", "is neither * nor ."),
+        (
+            "## a\nsize 2x1\nhovered\n|***|\n",
+            "3 cells on a screen 2 wide",
+        ),
+        (
+            "## a\nsize 2x1\nhovered now\n",
+            "is not something a case can say",
+        ),
     ] {
         let mut problems = Vec::new();
         let cases = parse("f.txt", text, &mut problems);
@@ -1671,6 +1806,18 @@ fn a_case_fails_where_it_is_not_met() {
             "f.txt:6: g: the selection differs\nexpected\n|***|\ngot\n|**.|",
             "f.txt:8: g: expected copy abc, got copy ab",
             "f.txt:10: g: expected copy ab, got copy, with nothing to copy",
+        ]
+    );
+
+    // The link where the mouse is: another target, none, and other cells.
+    let text = "## h\nsize 12x1\nsend http://a b\nhover 1;2\ntarget http://b\nhover 1;12\ntarget http://a\nhover 1;1\nhovered\n|*...........|\n";
+    let cases = parse("f.txt", text, &mut Vec::new());
+    assert_eq!(
+        check("f.txt", &cases[0]),
+        [
+            "f.txt:5: h: expected target http://b, got target http://a",
+            "f.txt:7: h: expected target http://a, got no link",
+            "f.txt:9: h: the link's cells differ\nexpected\n|*...........|\ngot\n|********....|",
         ]
     );
 }

@@ -1,15 +1,17 @@
 //! Tests of the App Shell: what needs no window (GEN-04, GEN-05, TAB-15, UI-05). The windows
 //! and menus themselves, and a window the launcher asks for, are checked by hand (DESIGN.md
-//! §8). So is the OS clipboard, with an ignored test, since it is the user's (SW-05).
+//! §8). So are the OS clipboard and opening links, with ignored tests, since they are the user's
+//! (SW-05, SW-07).
 
 use std::ffi::OsString;
 use std::path::Path;
 
-use tab::{OsClipboard, Selection};
+use tab::{OsClipboard, OsLinks, Selection};
 
 use super::clipboard::Clipboard;
 use super::fonts::{self, Zoom};
 use super::launcher::Problem;
+use super::links;
 use super::menu::{self, Action};
 use super::*;
 
@@ -367,6 +369,209 @@ fn the_clipboard_gives_back_what_was_written() {
             _ => assert_eq!(read.as_deref(), Some(text), "{which:?}"),
         }
     }
+}
+
+/// A folder for one test of opening links, removed when the test ends.
+#[cfg(unix)]
+struct Files(std::path::PathBuf);
+
+#[cfg(unix)]
+impl Files {
+    fn new() -> Self {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static NEXT: AtomicUsize = AtomicUsize::new(0);
+        let number = NEXT.fetch_add(1, Ordering::Relaxed);
+        let name = format!("twominal-links-{}-{number}", std::process::id());
+        let path = env::temp_dir().join(name);
+        std::fs::create_dir_all(&path).unwrap();
+        // As a link is opened: through every symbolic link, as macOS's temporary folder is one.
+        Self(std::fs::canonicalize(path).unwrap())
+    }
+
+    /// A file named `name` in the folder, with the permissions `mode`.
+    fn file(&self, name: &str, mode: u32) -> std::path::PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let path = self.0.join(name);
+        std::fs::write(&path, "echo hi\n").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).unwrap();
+        path
+    }
+
+    /// Whether the file manager is shown `name` rather than the OS opening it.
+    fn runs(&self, name: &str) -> bool {
+        let path = self.0.join(name);
+        links::runs(&path, &std::fs::metadata(&path).unwrap())
+    }
+}
+
+#[cfg(unix)]
+impl Drop for Files {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn a_file_link_is_read_back_as_its_path() {
+    use std::path::PathBuf;
+    assert_eq!(
+        links::path_of("/tmp/a.txt"),
+        Some(PathBuf::from("/tmp/a.txt"))
+    );
+    assert_eq!(
+        links::path_of("/tmp/a%20b/%E7%95%8C?x=1#y"),
+        Some(PathBuf::from("/tmp/a b/界"))
+    );
+    // Bytes that are no UTF-8 name a file too, as they may on Linux.
+    assert_eq!(
+        links::path_of("/tmp/%FF").map(|path| path.into_os_string().into_encoded_bytes()),
+        Some(b"/tmp/\xff".to_vec())
+    );
+    assert_eq!(
+        links::path_of("/tmp/100%"),
+        Some(PathBuf::from("/tmp/100%"))
+    );
+    // `%` with no two hex digits after it is itself.
+    assert_eq!(
+        links::path_of("/tmp/%+1%2"),
+        Some(PathBuf::from("/tmp/%+1%2"))
+    );
+    assert_eq!(links::path_of("tmp/a"), None);
+}
+
+#[cfg(unix)]
+#[test]
+fn a_file_that_would_run_is_told_from_one_that_opens() {
+    let files = Files::new();
+    files.file("notes.txt", 0o644);
+    files.file("script.sh", 0o755);
+    files.file("mine", 0o744);
+    assert!(!files.runs("notes.txt"));
+    assert!(files.runs("script.sh"));
+    assert!(files.runs("mine"));
+    std::fs::create_dir(files.0.join("folder")).unwrap();
+    assert!(!files.runs("folder"));
+    // By their extension, in any letter case, whatever their permissions.
+    let extensions: &[&str] = if cfg!(target_os = "macos") {
+        &[
+            "command", "TERMINAL", "webloc", "fileloc", "inetloc", "MAILLOC", "url", "jar", "tool",
+        ]
+    } else {
+        // Wine runs Windows' programs where it is installed.
+        &["desktop", "Desktop", "jar", "AppImage", "run", "exe", "lnk"]
+    };
+    for extension in extensions {
+        let name = format!("a.{extension}");
+        files.file(&name, 0o644);
+        assert!(files.runs(&name), "{name}");
+    }
+    if cfg!(target_os = "macos") {
+        // A bundle, by its name or by what it holds.
+        std::fs::create_dir(files.0.join("Some.app")).unwrap();
+        assert!(files.runs("Some.app"));
+        std::fs::create_dir_all(files.0.join("Plugin/Contents")).unwrap();
+        files.file("Plugin/Contents/Info.plist", 0o644);
+        assert!(files.runs("Plugin"));
+        // A Finder alias, whatever it is named: its data starts as a bookmark's.
+        std::fs::write(
+            files.0.join("an alias.txt"),
+            b"book\0\0\0\0mark\0\0\0\08\0\0\0",
+        )
+        .unwrap();
+        assert!(files.runs("an alias.txt"));
+        std::fs::write(files.0.join("book.txt"), b"bookkeeping").unwrap();
+        assert!(!files.runs("book.txt"));
+    }
+    // A pipe is no document, and opening it would wait for whoever writes it.
+    let made = std::process::Command::new("mkfifo")
+        .arg(files.0.join("pipe"))
+        .status()
+        .unwrap();
+    assert!(made.success());
+    assert!(files.runs("pipe"));
+}
+
+#[cfg(unix)]
+#[test]
+fn each_link_opens_with_the_oss_own_command() {
+    use std::ffi::{OsStr, OsString};
+    let files = Files::new();
+    let notes = files.file("my notes.txt", 0o644);
+    let script = files.file("script.sh", 0o755);
+    let words = |url: &str| -> Option<Vec<OsString>> {
+        links::command(url).map(|command| {
+            let mut words = vec![command.get_program().to_owned()];
+            words.extend(command.get_args().map(OsStr::to_owned));
+            words
+        })
+    };
+    let expected = |words: &[&OsStr]| Some(words.iter().map(|word| word.to_os_string()).collect());
+    let macos = cfg!(target_os = "macos");
+    let open = OsStr::new(if macos { "/usr/bin/open" } else { "xdg-open" });
+
+    // A URL is handed over as it is, and on macOS taken as a URL even if it names a file too.
+    let url = "https://example.com/a?b=c&d";
+    let as_url: &[&OsStr] = if macos {
+        &[open, OsStr::new("-u"), OsStr::new(url)]
+    } else {
+        &[open, OsStr::new(url)]
+    };
+    assert_eq!(words(url), expected(as_url));
+    // A file that opens is opened by the path that was looked at, read back from the URL.
+    let link = format!("file://{}/my%20notes.txt?x#y", files.0.display());
+    assert_eq!(words(&link), expected(&[open, notes.as_os_str()]));
+    // A script is shown, not run: selected in Finder on macOS, its folder opened on Linux.
+    let link = format!("file://{}", script.display());
+    let shown: &[&OsStr] = if macos {
+        &[open, OsStr::new("-R"), script.as_os_str()]
+    } else {
+        &[open, files.0.as_os_str()]
+    };
+    assert_eq!(words(&link), expected(shown));
+    // A symbolic link is judged, and opened, by the file it leads to, as the OS would open that:
+    // one named as a document that leads to a program is shown, not run.
+    let payload = files.file(
+        if macos {
+            "payload.terminal"
+        } else {
+            "payload.desktop"
+        },
+        0o644,
+    );
+    std::os::unix::fs::symlink(&payload, files.0.join("readme.txt")).unwrap();
+    let link = format!("file://{}/readme.txt", files.0.display());
+    let shown: &[&OsStr] = if macos {
+        &[open, OsStr::new("-R"), payload.as_os_str()]
+    } else {
+        &[open, files.0.as_os_str()]
+    };
+    assert_eq!(words(&link), expected(shown));
+    std::os::unix::fs::symlink(&notes, files.0.join("doc")).unwrap();
+    let link = format!("file://{}/doc", files.0.display());
+    assert_eq!(words(&link), expected(&[open, notes.as_os_str()]));
+    // A file that is not there is not opened.
+    assert_eq!(words(&format!("file://{}/gone", files.0.display())), None);
+}
+
+/// SW-07, by hand on each OS: `cargo test -p twominal -- --ignored links`. It opens a web page in
+/// the user's browser, and shows a script in the file manager, which must not run it (SEC-07).
+#[cfg(unix)]
+#[test]
+#[ignore = "it opens what the user sees"]
+fn links_open_in_the_oss_own_handlers() {
+    let files = Files::new();
+    let script = files.file("twominal-should-not-run.command", 0o755);
+    // Run, it would leave a file behind.
+    let ran = files.0.join("ran");
+    std::fs::write(&script, format!("#!/bin/sh\ntouch '{}'\n", ran.display())).unwrap();
+    let os = links::Links::new();
+    os.open("https://example.com/");
+    os.open(&format!("file://{}", script.display()));
+    // Each opens on a thread of its own, and the file manager reads the folder after that. The
+    // folder goes when the test ends.
+    std::thread::sleep(std::time::Duration::from_secs(5));
+    assert!(!ran.exists(), "the script ran");
 }
 
 #[cfg(unix)]

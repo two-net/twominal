@@ -637,6 +637,10 @@ fn output(random: &mut Random) -> String {
         "\x1b[5 q",
         "\x1b[ q",
         "\x1b[2 q",
+        "http://a.b ",
+        "(https://c)",
+        "\x1b]8;;u\x07",
+        "\x1b]8;;\x07",
     ];
     (0..1 + random.below(12))
         .map(|_| random.pick(PIECES))
@@ -676,6 +680,8 @@ fn frames_add_up_to_what_a_full_frame_draws() {
         let mut canvas: BTreeMap<i64, Painted> = BTreeMap::new();
         let mut caret = None;
         let mut cursor = None;
+        let mut link = None;
+        let mut hover = None;
         let mut grid = 0;
 
         for step in 0..40 {
@@ -776,7 +782,16 @@ fn frames_add_up_to_what_a_full_frame_draws() {
                     core.find(Some(search), live(&core) + u64::from(core.size().rows) - 1);
                 }
                 18 => core.find_next(random.below(2) == 0),
-                _ => {}
+                // The mouse moves, over a link or not, with a click that would open or not.
+                _ => {
+                    let size = core.size();
+                    hover = (random.below(4) > 0).then(|| Hover {
+                        row: random.below(usize::from(size.rows) + 2) as i32 - 1,
+                        col: random.below(usize::from(size.cols) + 2) as i32 - 1,
+                        opens: random.below(2) == 0,
+                    });
+                    renderer.set_hover(hover);
+                }
             }
             // The Tab brings the matches up to date before each frame.
             core.refind();
@@ -785,7 +800,10 @@ fn frames_add_up_to_what_a_full_frame_draws() {
                 if frame.full.is_none() && frame.rows.is_empty() {
                     // Nothing is sent when nothing changed.
                     assert!(
-                        frame.shift != 0 || caret != Some(frame.caret) || cursor != frame.cursor,
+                        frame.shift != 0
+                            || caret != Some(frame.caret)
+                            || cursor != frame.cursor
+                            || link != frame.link,
                         "step {step}"
                     );
                 }
@@ -812,6 +830,7 @@ fn frames_add_up_to_what_a_full_frame_draws() {
                 }
                 caret = Some(frame.caret);
                 cursor = frame.cursor;
+                link = frame.link;
             }
 
             let mut fresh = Renderer::new(colors.clone());
@@ -819,6 +838,7 @@ fn frames_add_up_to_what_a_full_frame_draws() {
             fresh.set_cursor(settings);
             fresh.set_motion(motion);
             fresh.set_focused(focused);
+            fresh.set_hover(hover);
             fresh.measure(&measure).unwrap();
             fresh.view = renderer.view;
             let full = fresh.frame(&core, composing).unwrap();
@@ -833,6 +853,7 @@ fn frames_add_up_to_what_a_full_frame_draws() {
                 );
             }
             assert_eq!(caret, Some(full.caret), "step {step}");
+            assert_eq!(link, full.link, "step {step}");
             // A cursor that moved with the view does not glide; a first frame cannot tell.
             let still = |cursor: Option<CursorFrame>| {
                 cursor.map(|cursor| CursorFrame {
@@ -1168,6 +1189,240 @@ fn the_last_frame_says_which_row_it_drew_where() {
         ..measured(6, 3)
     });
     assert_eq!((renderer.row_number(0), renderer.offset()), (Some(4), 0.5));
+}
+
+// ---------------------------------------------------------------------------------------
+// Links (TERM-20, SEC-07)
+// ---------------------------------------------------------------------------------------
+
+/// The mouse over row `row` and column `col` of the view, with no modifier held.
+fn over(row: i32, col: i32) -> Option<Hover> {
+    Some(Hover {
+        row,
+        col,
+        opens: false,
+    })
+}
+
+/// Where a link leads, as a frame shows it: `target`, which opens, with no hand, at the bottom.
+fn leads(target: &str) -> Option<LinkFrame> {
+    Some(LinkFrame {
+        target: target.to_string(),
+        opens: true,
+        hand: false,
+        top: false,
+    })
+}
+
+#[test]
+fn the_link_under_the_mouse_is_underlined_and_its_target_shown() {
+    let core = core(20, 2, "see http://a.b/c ok");
+    let mut renderer = renderer(20, 2);
+    renderer.frame(&core, "").unwrap();
+    renderer.set_hover(over(0, 6));
+    let frame = renderer.frame(&core, "").unwrap();
+    // Only its row is sent, the URL's cells underlined in their text's color, so they are a run
+    // of their own.
+    assert_eq!(indexes(&frame), [0]);
+    assert_eq!(
+        texts(&frame.rows[0]),
+        [
+            joined(0, "see"),
+            joined(4, "http://a.b/c"),
+            joined(17, "ok")
+        ]
+    );
+    let ink = ink_at(&frame, 4);
+    assert_eq!(
+        (ink.underline, ink.underline_color),
+        (1, palette().foreground)
+    );
+    assert_eq!(ink_at(&frame, 0).underline, 0);
+    assert_eq!(frame.link, leads("http://a.b/c"));
+    // The mouse moving along it changes nothing.
+    renderer.set_hover(over(0, 15));
+    assert!(renderer.frame(&core, "").is_none());
+    // Off it, the row is sent again as it was, and the target goes.
+    renderer.set_hover(over(0, 17));
+    let frame = renderer.frame(&core, "").unwrap();
+    assert_eq!(indexes(&frame), [0]);
+    assert_eq!(texts(&frame.rows[0]), [joined(0, "see http://a.b/c ok")]);
+    assert_eq!(frame.link, None);
+    assert!(!frame.json().contains("\"link\""));
+    renderer.set_hover(None);
+    assert!(renderer.frame(&core, "").is_none());
+}
+
+#[test]
+fn a_cell_keeps_its_own_underline_and_a_link_a_program_made_is_underlined_wherever_it_is() {
+    let core = core(
+        10,
+        3,
+        "\x1b]8;id=1;u\x07a\x1b[4:3mb\x1b[m\x1b]8;;\x07 cd\r\n\x1b]8;id=1;u\x07ef\x1b]8;;\x07",
+    );
+    let mut renderer = renderer(10, 3);
+    renderer.set_hover(over(1, 1));
+    let frame = renderer.frame(&core, "").unwrap();
+    let underline = |row: usize, col: u16| {
+        frame.rows[row]
+            .runs
+            .iter()
+            .find(|run| run.col <= col && col < run.col + run.text.chars().count() as u16)
+            .map(|run| run.ink.underline)
+    };
+    assert_eq!(underline(0, 0), Some(1));
+    assert_eq!(underline(0, 1), Some(3));
+    assert_eq!(underline(0, 3), Some(0));
+    assert_eq!((underline(1, 0), underline(1, 1)), (Some(1), Some(1)));
+    // u opens nothing: it is no URL.
+    assert_eq!(
+        frame.link,
+        Some(LinkFrame {
+            target: "u".to_string(),
+            opens: false,
+            hand: false,
+            top: false,
+        })
+    );
+}
+
+#[test]
+fn the_link_follows_the_output_and_the_view_under_a_mouse_that_does_not_move() {
+    let mut core = core(12, 2, "http://a.b\r\nxyz");
+    let mut renderer = renderer(12, 2);
+    renderer.set_hover(over(0, 3));
+    assert_eq!(renderer.frame(&core, "").unwrap().link, leads("http://a.b"));
+    // Output scrolls it into the scrollback: the mouse is over `xyz` now.
+    core.interpret(b"\r\nmore");
+    assert_eq!(renderer.frame(&core, "").unwrap().link, None);
+    // Scrolled back, the view brings it under the mouse again.
+    renderer.scroll(&core, -1.0);
+    assert_eq!(renderer.frame(&core, "").unwrap().link, leads("http://a.b"));
+    // On the alternate screen too.
+    core.interpret(b"\x1b[?1049h\x1b[2;1Hmailto:me@a.io");
+    // It wraps there, and the mouse is over its last row.
+    renderer.set_hover(over(1, 1));
+    let link = renderer.frame(&core, "").unwrap().link.unwrap();
+    assert_eq!(link.target, "mailto:me@a.io");
+}
+
+#[test]
+fn a_mouse_outside_the_grid_is_over_no_link() {
+    let core = core(10, 2, "http://a.b");
+    let mut renderer = renderer(10, 2);
+    renderer.frame(&core, "").unwrap();
+    for (row, col) in [(-1, 0), (0, -1), (0, 10), (2, 0), (i32::MAX, i32::MAX)] {
+        renderer.set_hover(over(row, col));
+        assert!(renderer.frame(&core, "").is_none(), "{row};{col}");
+    }
+}
+
+#[test]
+fn a_click_opens_only_the_link_the_last_frame_showed_there() {
+    let mut core = core(20, 2, "http://a.b/c x");
+    let mut renderer = renderer(20, 2);
+    // Before a frame shows it, nothing opens.
+    renderer.set_hover(over(0, 3));
+    assert_eq!(renderer.open(0, 3), None);
+    renderer.frame(&core, "").unwrap();
+    // Any of its cells opens it, and no other.
+    assert_eq!(renderer.open(0, 3).as_deref(), Some("http://a.b/c"));
+    assert_eq!(renderer.open(0, 11).as_deref(), Some("http://a.b/c"));
+    for (row, col) in [(0, 12), (0, 13), (1, 3), (-1, 3), (0, -1)] {
+        assert_eq!(renderer.open(row, col), None, "{row};{col}");
+    }
+    // A program puts another link there: until a frame shows it, the one shown is what opens,
+    // and a cell the frame showed none at opens nothing, though it has a link now.
+    core.interpret(b"\x1b[Hhttps://evil.io \x1b[2;1Hhttp://new.io");
+    assert_eq!(renderer.open(0, 3).as_deref(), Some("http://a.b/c"));
+    assert_eq!(renderer.open(1, 3), None);
+    renderer.frame(&core, "").unwrap();
+    assert_eq!(renderer.open(0, 3).as_deref(), Some("https://evil.io"));
+    // Once the mouse has left, nothing opens.
+    renderer.set_hover(None);
+    renderer.frame(&core, "").unwrap();
+    assert_eq!(renderer.open(0, 3), None);
+}
+
+#[test]
+fn a_link_that_may_not_open_shows_where_it_leads_and_opens_nothing() {
+    let core = core(20, 2, "\x1b]8;;ssh://host\x07login\x1b]8;;\x07");
+    let mut renderer = renderer(20, 2);
+    renderer.set_hover(Some(Hover {
+        row: 0,
+        col: 1,
+        opens: true,
+    }));
+    let frame = renderer.frame(&core, "").unwrap();
+    assert_eq!(
+        frame.link,
+        Some(LinkFrame {
+            target: "ssh://host".to_string(),
+            opens: false,
+            hand: false,
+            top: false,
+        })
+    );
+    assert_eq!(renderer.open(0, 1), None);
+}
+
+#[test]
+fn the_target_shown_is_what_the_os_is_handed() {
+    // What is not ASCII is shown as %XX, as it opens, so no look-alike reads as another.
+    let web = core(30, 2, "https://例え.jp/x");
+    let mut shows = renderer(30, 2);
+    shows.set_hover(over(0, 2));
+    assert_eq!(
+        shows.frame(&web, "").unwrap().link,
+        leads("https://%E4%BE%8B%E3%81%88.jp/x")
+    );
+    // A file on this machine opens once the Renderer knows its name, which alone makes a frame.
+    let file = core(30, 2, "\x1b]8;;file://mac.local/tmp/a\x07a\x1b]8;;\x07");
+    let mut shows = renderer(30, 2);
+    shows.set_hover(over(0, 0));
+    let frame = shows.frame(&file, "").unwrap();
+    assert_eq!(frame.link.map(|link| link.opens), Some(false));
+    assert_eq!(shows.open(0, 0), None);
+    shows.set_host("mac.local");
+    let frame = shows.frame(&file, "").unwrap();
+    assert!(frame.rows.is_empty());
+    assert_eq!(frame.link, leads("file:///tmp/a"));
+    assert_eq!(shows.open(0, 0).as_deref(), Some("file:///tmp/a"));
+}
+
+#[test]
+fn the_target_goes_to_the_top_over_the_lower_half_and_the_hand_shows_what_a_click_does() {
+    let core = core(10, 4, "http://a\r\nhttp://b\r\nhttp://c\r\nhttp://d");
+    let mut renderer = renderer(10, 4);
+    for (row, top) in [(0, false), (1, false), (2, true), (3, true)] {
+        renderer.set_hover(over(row, 1));
+        let link = renderer.frame(&core, "").unwrap().link.unwrap();
+        assert_eq!(link.top, top, "{row}");
+    }
+    // The modifiers alone make a frame of no rows.
+    renderer.set_hover(Some(Hover {
+        row: 3,
+        col: 1,
+        opens: true,
+    }));
+    let frame = renderer.frame(&core, "").unwrap();
+    assert!(frame.rows.is_empty());
+    let json = frame.json();
+    assert!(
+        json.contains(
+            r#""link":{"target":"http://d","opens":true,"hand":true,"top":true},"caret""#
+        ),
+        "{json}"
+    );
+}
+
+#[test]
+fn the_target_is_written_as_javascript_reads_it() {
+    let core = core(20, 2, "\x1b]8;;x:\"\\\x07a\x1b]8;;\x07");
+    let mut renderer = renderer(20, 2);
+    renderer.set_hover(over(0, 0));
+    let json = renderer.frame(&core, "").unwrap().json();
+    assert!(json.contains(r#""link":{"target":"x:\"\\"},"#), "{json}");
 }
 
 // ---------------------------------------------------------------------------------------

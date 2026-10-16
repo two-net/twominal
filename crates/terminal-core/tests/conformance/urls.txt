@@ -1,0 +1,302 @@
+# Links at cells, as the mouse finds them (TERM-20): the one a program made of the cell (OSC 8),
+# or else a URL in the text around it. No terminal is the model for what a URL is: this follows
+# DESIGN.md §3 *URLs*, which Alacritty and kitty are close to. Which links may open is not the
+# screen's, and is tested with `opening` in src/tests.rs.
+
+## A URL in the text is a link to where it says
+size 40x2
+send see https://example.com/a for more
+hover 1;10
+target https://example.com/a
+hovered
+|....*********************...............|
+|........................................|
+
+## The URL holds the cell from its scheme to its last character
+size 40x1
+send see https://example.com/a for more
+hover 1;5
+target https://example.com/a
+hover 1;25
+target https://example.com/a
+hover 1;26
+target
+hover 1;4
+target
+
+## Text with no scheme is no link
+size 40x1
+send see www.example.com or example.com/a
+hover 1;8
+target
+hover 1;25
+target
+
+## A URL goes on over the rows its line wraps into
+size 10x3
+send > http://abc.de/fgh
+hover 2;5
+target http://abc.de/fgh
+hovered
+|..********|
+|*********.|
+|..........|
+
+## A line that does not wrap ends a URL
+size 10x2
+send http://ab\r\ncd
+hover 1;3
+target http://ab
+hover 2;1
+target
+
+## A URL in the scrollback is a link, and stays one as output scrolls it
+size 20x2
+send http://a.b/c\r\n\r\nx
+hover 0;3
+target http://a.b/c
+hovered
+|************........|
+|....................|
+|....................|
+send \r\nmore
+target http://a.b/c
+hovered
+|************........|
+|....................|
+|....................|
+|....................|
+
+## The link is looked for as the screen is when asked
+size 20x1
+send http://a.b/c
+hover 1;3
+target http://a.b/c
+send \e[2J
+target
+send \e[Hhttps://x.y
+target https://x.y
+
+## What a sentence puts after a URL is not part of it
+size 40x1
+send See https://a.io/x. Or https://a.io/y,
+hover 1;6
+target https://a.io/x
+hover 1;26
+target https://a.io/y
+
+## Every kind of punctuation at the end is taken off
+size 40x1
+send https://a.io/x?!:;'*...
+hover 1;3
+target https://a.io/x
+hovered
+|**************..........................|
+
+## Brackets around a URL are not part of it
+size 40x1
+send (see https://a.io/x) [https://b.io/y]
+hover 1;7
+target https://a.io/x
+hover 1;24
+target https://b.io/y
+
+## A URL keeps the brackets it opened
+size 50x1
+send https://en.wikipedia.org/wiki/Rust_(language)
+hover 1;3
+target https://en.wikipedia.org/wiki/Rust_(language)
+
+## A link in Markdown is the URL in its parentheses
+size 40x1
+send [the docs](https://a.io/b).
+hover 1;12
+target https://a.io/b
+hover 1;3
+target
+
+## Quotes and angle brackets end a URL
+size 40x1
+send <https://a.io/x> "https://b.io/y" 'c'
+hover 1;3
+target https://a.io/x
+hover 1;20
+target https://b.io/y
+
+## A single quote after a URL is taken off
+size 40x1
+send 'https://a.io/x'
+hover 1;3
+target https://a.io/x
+
+## The scheme is found in any letter case, and the target keeps it
+size 20x1
+send HTTPS://A.IO/X
+hover 1;3
+target HTTPS://A.IO/X
+
+## A URL starts at its scheme, though text comes before it
+size 30x1
+send url:https://a.io
+hover 1;6
+target https://a.io
+hover 1;2
+target
+hovered
+|..............................|
+
+## A URL goes on to the end of its run, another scheme and all
+# As in Alacritty: a URL may hold another, as a redirect does.
+size 40x1
+send http://a/?to=http://b,http://c
+hover 1;25
+target http://a/?to=http://b,http://c
+
+## A blank parts two URLs
+size 30x1
+send http://a http://b
+hover 1;3
+target http://a
+hover 1;12
+target http://b
+hover 1;9
+target
+
+## Mail and files are URLs too
+size 40x2
+send mailto:me@a.io file:///tmp/a.txt
+hover 1;3
+target mailto:me@a.io
+hover 1;20
+target file:///tmp/a.txt
+
+## Schemes that do not open are not looked for
+# SEC-07: only http, https, mailto and file open, so only they are URLs here.
+size 40x1
+send ftp://a.io ssh://b.io javascript:x
+hover 1;3
+target
+hover 1;14
+target
+hover 1;27
+target
+
+## A scheme with nothing after it is no URL
+size 40x1
+send http:// mailto: https://...
+hover 1;3
+target
+hover 1;11
+target
+hover 1;20
+target
+
+## A scheme's letters must be alone in their cells
+size 20x1
+send h\xcc\x81ttp://a.io
+hover 1;5
+target
+
+## A link a program made is the link at its cells, a URL in its text included
+size 40x1
+send \e]8;;https://a.io/\aclick http://b.io\e]8;;\a here
+hover 1;10
+target https://a.io/
+hovered
+|*****************.......................|
+
+## A link a program made holds every cell it drew, wherever it is
+size 10x2
+send \e]8;id=1;u\aab\e]8;;\a xy\r\n\e]8;id=1;u\acd\e]8;;\a
+hover 2;1
+target u
+hovered
+|**........|
+|**........|
+
+## A blank in a link a program made is part of it
+size 20x1
+send \e]8;;u\aa b\e]8;;\a
+hover 1;2
+target u
+
+## A link a program made ends a URL before it
+size 30x1
+send http://c.d\e]8;;u\aab\e]8;;\a
+hover 1;3
+target http://c.d
+hovered
+|**********....................|
+
+## Hidden text is no link
+# What cannot be seen cannot be clicked.
+size 30x1
+send \e[8mhttps://a.io\e[m \e]8;;u\a\e[8mab\e[m\e]8;;\a
+hover 1;3
+target
+hover 1;15
+target
+
+## Hidden text ends a URL
+size 30x1
+send https://a.io\e[8mxyz\e[m
+hover 1;3
+target https://a.io
+hovered
+|************..................|
+
+## A URL may hold wide characters, from either of whose cells it is found
+size 30x1
+send https://例え.jp/x
+hover 1;9
+target https://例え.jp/x
+hover 1;10
+target https://例え.jp/x
+hovered
+|*****************.............|
+
+## A URL holds no blank a wide character left where it wrapped
+size 10x2
+send http://ab例x
+hover 2;1
+target http://ab例x
+hovered
+|*********.|
+|***.......|
+
+## A URL holds the marks joined to its characters
+size 30x1
+send https://e\xcc\x81.io
+hover 1;3
+target https://e\xcc\x81.io
+hovered
+|************..................|
+
+## CJK punctuation ends a URL
+size 30x1
+send 見てhttps://a.io。ok
+hover 1;8
+target https://a.io
+hover 1;1
+target
+hover 1;18
+target
+
+## A URL on the alternate screen is a link
+size 20x2
+send \e[?1049hhttp://a.b
+hover 1;3
+target http://a.b
+hovered
+|**********..........|
+|....................|
+
+## A cell outside the rows and columns there are has no link
+size 10x1
+send http://a.b
+hover 1;11
+target
+hover 2;1
+target
+hover -5;1
+target

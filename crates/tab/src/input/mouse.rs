@@ -37,6 +37,15 @@ pub(crate) struct Mouse {
     turned: [f64; 2],
     /// Where the wheel's last turn went. Turning it elsewhere starts the steps again.
     route: Option<Route>,
+    /// Where the mouse last was, in CSS pixels from the top left of the first cell, until it left
+    /// the terminal area. Its cell is found when asked, with the view's offset then, so the row
+    /// under a mouse that does not move follows a view scrolled by a part of a row.
+    at: Option<(f64, f64)>,
+    /// The modifiers last held, by the last mouse, wheel or key event, for what a click where
+    /// the mouse is would do.
+    held: Modifiers,
+    /// The release the last event gave was made up for one that was lost.
+    made_up: bool,
 }
 
 /// The buttons pressed since all were up, and whose they are.
@@ -116,21 +125,57 @@ impl Mouse {
         };
     }
 
+    /// The modifiers held now, as a key event says, or none when the window lost the focus and
+    /// their release may never come.
+    pub(crate) fn hold(&mut self, modifiers: Modifiers) {
+        self.held = modifiers;
+    }
+
+    /// Whether the release the last event gave was made up for one that was lost, as when the
+    /// button came up outside the window.
+    pub(crate) fn made_up(&self) -> bool {
+        self.made_up
+    }
+
+    /// The view's row and the column the mouse is over, and the modifiers held, while what it
+    /// does there is Twominal's: not once it has left the terminal area, nor during a gesture
+    /// that is the program's, nor while the program is told of every move, which neither Shift
+    /// nor Meta keeps from it.
+    pub(crate) fn hover(&self, modes: &Modes) -> Option<(i32, i32, Modifiers)> {
+        let (x, y) = self.at?;
+        let place = Place::new(x, y, self.grid?, self.offset);
+        let ours = match self.gesture {
+            Some(gesture) => gesture.owner == Owner::Twominal,
+            None => modes.mouse != MouseTracking::Motion || bypasses(self.held),
+        };
+        ours.then_some((place.row, place.col, self.held))
+    }
+
     /// How many rows the grid has, which is a page. None before there is a grid.
     pub(crate) fn page(&self) -> Option<f64> {
         self.grid.map(|grid| f64::from(grid.size.rows))
     }
 
-    /// What a button going down or up, or the mouse moving, means.
+    /// What a button going down or up, the mouse moving, or the mouse leaving the terminal
+    /// area, means. Leaving means nothing but that the mouse is over no cell: a gesture goes on
+    /// outside, and its buttons are looked at when the mouse comes back.
     pub(crate) fn event(&mut self, event: &MouseEvent, modes: &Modes) -> Option<Action> {
+        self.made_up = false;
+        if event.kind == MouseKind::Leave {
+            self.at = None;
+            self.pointed = None;
+            return None;
+        }
         let grid = self.grid?;
         let place = Place::new(event.x, event.y, grid, self.offset);
+        self.at = Some((event.x, event.y));
+        self.held = event.modifiers;
         let button = Button::from_dom(event.button);
         let pressed = button.map_or(0, Button::bit);
         let (held, up) = match event.kind {
             MouseKind::Down => (held(event.buttons) | pressed, 0),
             MouseKind::Up => (held(event.buttons) & !pressed, pressed),
-            MouseKind::Move => (held(event.buttons), 0),
+            MouseKind::Move | MouseKind::Leave => (held(event.buttons), 0),
         };
 
         // A button of the gesture that is no longer held, or that goes down again, came up
@@ -154,13 +199,16 @@ impl Mouse {
                         }
                         (!bytes.is_empty()).then_some(Action::Send(bytes))
                     }
-                    Owner::Twominal => Some(self.point(
-                        PointerKind::Release,
-                        Button::lowest(gone),
-                        place,
-                        gesture.clicks,
-                        event.modifiers,
-                    )),
+                    Owner::Twominal => {
+                        self.made_up = true;
+                        Some(self.point(
+                            PointerKind::Release,
+                            Button::lowest(gone),
+                            place,
+                            gesture.clicks,
+                            event.modifiers,
+                        ))
+                    }
                 };
             }
         }
@@ -195,7 +243,7 @@ impl Mouse {
         match (event.kind, button) {
             (MouseKind::Down, Some(button)) => self.down(button, event, place, modes),
             (MouseKind::Up, Some(button)) => self.up(button, event, place, modes),
-            (MouseKind::Move, _) => self.moved(event, place, modes),
+            (MouseKind::Move | MouseKind::Leave, _) => self.moved(event, place, modes),
             // A button the DOM has no more of.
             (_, None) => None,
         }
@@ -396,6 +444,9 @@ impl Mouse {
     /// counts, so a trackpad drifting sideways reports nothing.
     pub(crate) fn wheel(&mut self, event: &WheelEvent, modes: &Modes) -> Option<Action> {
         let grid = self.grid?;
+        let place = Place::new(event.x, event.y, grid, self.offset);
+        self.at = Some((event.x, event.y));
+        self.held = event.modifiers;
         let (mut delta_y, mut delta_x) = (finite(event.delta_y), finite(event.delta_x));
         // macOS and Chromium turn a wheel sideways while Shift is held, and Shift scrolls the
         // view.
@@ -460,7 +511,6 @@ impl Mouse {
                     (_, true) => 66,
                     (_, false) => 67,
                 };
-                let place = Place::new(event.x, event.y, grid, self.offset);
                 let code = button | modifier_code(event.modifiers);
                 Some(Action::Send(self.report(code, false, place, modes)))
             }
@@ -556,7 +606,7 @@ fn held(buttons: u16) -> u8 {
 
 /// Whether the modifiers keep the mouse from the program: Shift, so the user can select over a
 /// program that has the mouse, and Meta, which xterm cannot report and Cmd+click needs.
-fn bypasses(modifiers: Modifiers) -> bool {
+pub(crate) fn bypasses(modifiers: Modifiers) -> bool {
     modifiers.shift || modifiers.meta
 }
 

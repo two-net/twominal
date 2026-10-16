@@ -21,8 +21,9 @@
 //! (TERM-12, TERM-13). `colors.rs` keeps the colors programs set, and `links.rs` the links
 //! they make. `rows.rs` numbers the rows of the screen and the scrollback, `select.rs` keeps what
 //! the user selected and gives the text copying takes (TERM-17), and `find.rs` keeps what the user
-//! looks for and every match of it (TERM-18, TERM-19). DESIGN.md §3 lists what is supported and
-//! what is ignored on purpose.
+//! looks for and every match of it (TERM-18, TERM-19). `urls.rs` finds the link at a cell, a
+//! program's or a URL in the text, and says which links may open (TERM-20, SEC-07). DESIGN.md §3
+//! lists what is supported and what is ignored on purpose.
 //!
 //! Filled in by #16 (interpreter and screen model), #17 (conformance suite and fuzzing),
 //! #18 (Unicode), #19 (colors and attributes), #20 (keyboard flags), #21 (mouse modes), #26
@@ -55,6 +56,7 @@ mod style;
 mod terminal;
 #[cfg(test)]
 mod tests;
+mod urls;
 mod width;
 
 use alloc::boxed::Box;
@@ -74,6 +76,7 @@ pub use select::{Place, Selected, Selecting};
 pub use style::{Color, Style, Underline};
 use terminal::Terminal;
 pub use terminal::{Cursor, CursorShape, CursorStyle, Modes, MouseFormat, MouseTracking};
+pub use urls::{opening, LinkAt};
 pub use width::width;
 
 /// The most an operating system command may hold, a report of the shell integration included
@@ -219,6 +222,14 @@ impl TerminalCore {
     /// The link a cell is part of, as [`Cell::link`] names it (TERM-13).
     pub fn link(&self, link: LinkId) -> Option<&Link> {
         self.terminal.link(link)
+    }
+
+    /// The link at `col` of row `number`, as [`Scrollback::start`] numbers the rows, for the
+    /// mouse to show and open (TERM-20): the one a program made of the cell (OSC 8), or else the
+    /// URL in the text around it. None on a hidden cell, on one no URL holds, and on one there
+    /// is not. Whether it may open is [`opening`]'s to say. DESIGN.md §3 *URLs* has the rules.
+    pub fn link_at(&self, number: u64, col: usize) -> Option<LinkAt> {
+        self.terminal.link_at(number, col)
     }
 
     /// Row `number`, as [`Scrollback::start`] numbers the rows: of the scrollback or of the

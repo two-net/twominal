@@ -23,13 +23,15 @@
 //! running (GEN-05).
 //!
 //! `app/clipboard.rs` is the OS clipboard, and on Linux the primary selection, which each tab is
-//! given (SW-05).
+//! given (SW-05). `app/links.rs` opens links in the OS's default handler for their kind, and
+//! shows a file that would run in the file manager instead, for each tab too (SW-07, SEC-07).
 //!
 //! Filled in by #41 (splash).
 
 mod clipboard;
 mod fonts;
 mod launcher;
+mod links;
 mod menu;
 #[cfg(unix)]
 mod socket;

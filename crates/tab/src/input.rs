@@ -20,13 +20,14 @@
 //! it asked or as cursor keys, or Twominal's own, for selection, links and scrolling to act on
 //! (TERM-10, HW-02). The left button of a gesture that is Twominal's selects, by characters,
 //! words, lines or as a block (TERM-17), and on Linux the middle one pastes the primary
-//! selection (SW-05). A paste of more than a line into a program that did not ask for bracketed
+//! selection (SW-05). With the OS's link modifier, a click of it opens the link under it, and
+//! [`InputHandler::hover`] says where the mouse is, for the Renderer to show that link (TERM-20). A paste of more than a line into a program that did not ask for bracketed
 //! paste waits for the user to confirm it (SEC-06). DESIGN.md §3 has the rules, and the contract
 //! the webview half keeps.
 //!
 //! Filled in by #20 (keys and input methods), #21 (mouse), #26 (scrolling and Clear), #28
-//! (selection, copy and paste), #29 (the find bar), #43 (shortcuts) and #36–#37 (Scrollback Vim
-//! mode).
+//! (selection, copy and paste), #29 (the find bar), #30 (links), #43 (shortcuts) and #36–#37
+//! (Scrollback Vim mode).
 
 mod encode;
 mod find;
@@ -36,7 +37,7 @@ mod shortcut;
 #[cfg(test)]
 mod tests;
 
-use terminal_core::{Modes, Search, Selecting, Size};
+use terminal_core::{Modes, MouseTracking, Search, Selecting, Size};
 
 pub use find::FindBar;
 
@@ -62,6 +63,9 @@ pub struct InputHandler {
     taken: Vec<String>,
     /// How the left button's press selects, for the drags and the release of its gesture.
     selecting: Option<Selecting>,
+    /// The cell of the left button's press, made with the link modifier, while its gesture may
+    /// still be a click that opens a link (TERM-20).
+    click: Option<(i32, i32)>,
     /// Whether a paste of more than a line waits for the user to confirm it: the Multi-line
     /// paste warning setting (SEC-06).
     paste_warning: bool,
@@ -99,6 +103,15 @@ impl Os {
             Self::Linux => modifiers.ctrl,
         }
     }
+
+    /// Whether `modifiers` hold this OS's link modifier, with which a click opens a link: Cmd on
+    /// macOS, Ctrl on Linux and Windows (Appendix A).
+    fn links(self, modifiers: Modifiers) -> bool {
+        match self {
+            Self::MacOs => modifiers.meta,
+            Self::Linux | Self::Windows => modifiers.ctrl,
+        }
+    }
 }
 
 /// A key, input-method or mouse event as the webview captured it, before it means anything.
@@ -119,8 +132,8 @@ pub enum InputEvent {
     SelectAll,
     /// The window gained focus, or lost it.
     Focus(bool),
-    /// A mouse button went down or came up, or the mouse moved: `mousedown`, `mouseup` and
-    /// `mousemove` on the terminal area.
+    /// A mouse button went down or came up, the mouse moved, or it left: `mousedown`,
+    /// `mouseup`, `mousemove` and `mouseleave` on the terminal area.
     Mouse(MouseEvent),
     /// The wheel turned, or a trackpad scrolled: `wheel`.
     Wheel(WheelEvent),
@@ -203,13 +216,16 @@ pub struct MouseEvent {
     pub modifiers: Modifiers,
 }
 
-/// Whether a mouse button went down or came up, or the mouse moved.
+/// Whether a mouse button went down or came up, the mouse moved, or it left the terminal area.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum MouseKind {
     #[default]
     Down,
     Up,
     Move,
+    /// The mouse left the terminal area, or went onto the find bar over it: `mouseleave`. Only
+    /// its kind is read.
+    Leave,
 }
 
 /// A wheel event as the DOM gives it. Down and right are positive.
@@ -259,12 +275,16 @@ pub enum Action {
     /// The text being composed changed, so the Renderer must show it at the cursor (#22).
     Composing,
     /// The mouse did something the program is not told of and nothing here takes, for Twominal
-    /// to act on: open a link or show its target (TERM-20), or open the context menu (UI-04).
+    /// to act on, as the context menu will (UI-04).
     Pointer(Pointer),
     /// The left button selects (TERM-17). Its press starts a selection, by characters, words or
     /// lines as its clicks say or as a block with the OS's modifier, and its drags and its
     /// release move the selection's end. The Pointer says where, and its `kind` which it is.
     Select(Pointer, Selecting),
+    /// A click with the OS's link modifier, released in the cell it was pressed in: open the
+    /// link the Renderer showed there, if any (TERM-20, SEC-07). It takes the place of the
+    /// release's `Select`, and selects nothing. The Pointer is the release's.
+    OpenLink(Pointer),
     /// Copy the selection to the clipboard (SW-05).
     Copy,
     /// Paste the clipboard (SW-05). The Tab reads it and gives it to [`InputHandler::paste`].
@@ -324,6 +344,18 @@ pub enum PointerKind {
     Hover,
 }
 
+/// Where the mouse is, for the Renderer to show the link there (TERM-20).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Hover {
+    /// The view's row and the column the mouse is over, as a Pointer's. Outside the grid while
+    /// a gesture goes past its edge.
+    pub row: i32,
+    pub col: i32,
+    /// Whether a left click there, with the modifiers held now, would open a link: it would be
+    /// Twominal's, and the OS's link modifier is held.
+    pub opens: bool,
+}
+
 /// A mouse button, in the order xterm numbers them.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Button {
@@ -347,6 +379,7 @@ impl InputHandler {
             mouse: Mouse::default(),
             taken: Vec::new(),
             selecting: None,
+            click: None,
             paste_warning: true,
             waiting: None,
             find: FindBar::default(),
@@ -378,6 +411,14 @@ impl InputHandler {
     /// key the program cannot be told of, one it did not ask to hear about, or a move that
     /// stays in its cell. Nothing is waited for, so Esc is sent the moment it comes (TERM-08).
     pub fn handle(&mut self, event: InputEvent, modes: &Modes) -> Option<Action> {
+        // What a click where the mouse is would do follows the modifiers, which every key event
+        // tells, so Cmd going down over a link counts without a move. Their releases may never
+        // come once the window has lost the focus.
+        match &event {
+            InputEvent::Key(key) => self.mouse.hold(key.modifiers),
+            InputEvent::Focus(false) => self.mouse.hold(Modifiers::default()),
+            _ => {}
+        }
         let bytes = match event {
             InputEvent::Key(event) => {
                 let press = key::read(&event, self.os == Os::MacOs)?;
@@ -424,13 +465,20 @@ impl InputHandler {
             InputEvent::Focus(focused) if modes.focus => encode::focus(focused).to_vec(),
             InputEvent::Focus(_) => return None,
             InputEvent::Mouse(event) => {
+                // A click that left the terminal area is no click, though it comes back.
+                if event.kind == MouseKind::Leave {
+                    self.click = None;
+                }
                 // A press on the grid gives the keys back to the program, the bar staying open.
                 let blurred = event.kind == MouseKind::Down && self.find.is_focused();
                 if blurred {
                     self.find.blur();
                 }
                 return match self.mouse.event(&event, modes) {
-                    Some(Action::Pointer(pointer)) => Some(self.point(pointer)),
+                    Some(Action::Pointer(pointer)) => {
+                        let made_up = self.mouse.made_up();
+                        Some(self.point(pointer, made_up))
+                    }
                     Some(action) => Some(action),
                     None => blurred.then_some(Action::FindBar),
                 };
@@ -555,6 +603,20 @@ impl InputHandler {
         }
     }
 
+    /// Where the mouse is, for the Renderer to show the link there (TERM-20): over which cell
+    /// of the view, and whether a click there would open a link. None once the mouse has left
+    /// the terminal area, during a gesture that is the program's, and while the program is told
+    /// of every move. The Tab gives it to the Renderer before each frame.
+    pub fn hover(&self, modes: &Modes) -> Option<Hover> {
+        let (row, col, held) = self.mouse.hover(modes)?;
+        let ours = modes.mouse == MouseTracking::Off || mouse::bypasses(held);
+        Some(Hover {
+            row,
+            col,
+            opens: ours && self.os.links(held),
+        })
+    }
+
     /// The find bar: whether it is open and has the keys, its query, caret and toggles, for the
     /// Renderer to draw.
     pub fn find_bar(&self) -> &FindBar {
@@ -563,9 +625,12 @@ impl InputHandler {
 
     /// What `pointer`, of a gesture that is Twominal's, means. The left button selects: its
     /// press as its clicks say, 1, 2 and 3 and round again, or as a block with the OS's modifier,
-    /// and its drags and release as the press did. On Linux a press of the middle button pastes
-    /// the primary selection. The rest is for links and the context menu.
-    fn point(&mut self, pointer: Pointer) -> Action {
+    /// and its drags and release as the press did. A single press with the OS's link modifier
+    /// released in its cell, with no drag out of it, opens a link instead, unless its release
+    /// was `made_up` for one that was lost. On Linux a press of the middle button pastes the
+    /// primary selection. The rest is for the context menu.
+    fn point(&mut self, pointer: Pointer, made_up: bool) -> Action {
+        let cell = (pointer.row, pointer.col);
         match (pointer.kind, pointer.button) {
             (PointerKind::Press, Some(Button::Left)) => {
                 let by = if self.os.blocks(pointer.modifiers) {
@@ -578,13 +643,21 @@ impl InputHandler {
                     }
                 };
                 self.selecting = Some(by);
+                let clicks = self.os.links(pointer.modifiers) && pointer.clicks <= 1;
+                self.click = clicks.then_some(cell);
                 Action::Select(pointer, by)
             }
             (PointerKind::Drag | PointerKind::Release, Some(Button::Left)) => {
+                if self.click != Some(cell) {
+                    self.click = None;
+                }
                 let by = match pointer.kind {
                     PointerKind::Release => self.selecting.take(),
                     _ => self.selecting,
                 };
+                if pointer.kind == PointerKind::Release && self.click.take().is_some() && !made_up {
+                    return Action::OpenLink(pointer);
+                }
                 match by {
                     Some(by) => Action::Select(pointer, by),
                     None => Action::Pointer(pointer),

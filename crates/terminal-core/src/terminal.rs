@@ -31,6 +31,7 @@ use crate::screen::{Cell, Screen};
 use crate::scrollback::{self, Point, Scrollback};
 use crate::select::{Place, Selected, Selecting, Selection};
 use crate::style::Style;
+use crate::urls::{self, LinkAt};
 use crate::width::{discarded, width};
 use crate::{Event, Size};
 
@@ -479,6 +480,11 @@ impl Terminal {
 
     pub(crate) fn link(&self, link: LinkId) -> Option<&Link> {
         self.links.get(link)
+    }
+
+    /// The link at `col` of row `number`: the cell's own, or the URL in the text around it.
+    pub(crate) fn link_at(&self, number: u64, col: usize) -> Option<LinkAt> {
+        urls::link_at(&self.rows(), &self.links, number, col)
     }
 
     // Selecting

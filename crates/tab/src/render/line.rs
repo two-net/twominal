@@ -1,8 +1,9 @@
 //! Each row as it is drawn, and how a frame sends it: the text as runs of cells drawn alike, and
 //! the backgrounds as spans.
 //!
-//! A row is built from the core's, with every color filled in, find's matches, the selection and
-//! the text being composed laid over it (TERM-18, TERM-17, HW-01), and the cells that may join a ligature marked (FONT-04
+//! A row is built from the core's, with every color filled in, find's matches, the selection, the
+//! link under the mouse and the text being composed laid over it (TERM-18, TERM-17, TERM-20,
+//! HW-01), and the cells that may join a ligature marked (FONT-04
 //! to FONT-07). The Renderer compares rows built this way with the ones it sent last, so anything
 //! laid over the screen is drawn and sent the same way.
 
@@ -121,6 +122,19 @@ pub(crate) fn select(line: &mut Line, cols: Range<usize>, selection: Rgb) {
     let end = cols.end.min(line.len());
     for drawn in &mut line[cols.start.min(end)..end] {
         drawn.look.background = selection;
+    }
+}
+
+/// Underlines the cell at `col` of `line`, which the link under the mouse holds (TERM-20), in
+/// its text's color, unless it has an underline of its own. A linked cell then looks like no cell
+/// beside it that is not, so a ligature ends at the link's edge.
+pub(crate) fn link(line: &mut Line, col: usize) {
+    if let Some(drawn) = line.get_mut(col) {
+        let ink = &mut drawn.look.ink;
+        if ink.underline == 0 {
+            ink.underline = 1;
+            ink.underline_color = ink.color;
+        }
     }
 }
 

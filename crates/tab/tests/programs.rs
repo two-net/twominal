@@ -32,7 +32,7 @@ use tab::input::{
     Action, DeltaMode, FindEvent, Grid, InputEvent, InputHandler, KeyEvent, Modifiers, MouseEvent,
     MouseKind, PointerKind, WheelEvent,
 };
-use tab::render::{FindBar, Measure, Palette, Renderer, Rgb};
+use tab::render::{FindBar, Hover, Measure, Palette, Renderer, Rgb};
 use tab::session::{Output, Session, Shell, Start};
 use terminal_core::{
     Clipboard, Color, CursorShape, Event, Keyboard, MouseFormat, MouseTracking, Place, Size, Style,
@@ -159,6 +159,8 @@ struct Terminal {
     renderer: Renderer,
     /// What the core said but replies and the answers to questions about colors, oldest first.
     said: Vec<Event>,
+    /// The URL the Renderer showed under the left button's last press, as the Tab keeps it.
+    pressed: Option<String>,
 }
 
 impl Terminal {
@@ -224,6 +226,7 @@ impl Terminal {
             input,
             renderer: Renderer::new(palette()),
             said: Vec::new(),
+            pressed: None,
         }
     }
 
@@ -1518,6 +1521,182 @@ fn find_tells_letter_case_apart_when_asked() {
     let frame = sh.find([InputEvent::Find(FindEvent::Case)]);
     assert_eq!(counted(&frame), (1, 1));
     assert_eq!(spans(&frame, 0), [(4, 3, current)]);
+}
+
+// ---------------------------------------------------------------------------------------
+// Links (TERM-20, SW-07, SEC-07)
+// ---------------------------------------------------------------------------------------
+
+/// The OS's link modifier: Cmd on macOS, Ctrl elsewhere (Appendix A).
+fn link_modifier() -> Held {
+    if cfg!(target_os = "macos") {
+        held().meta()
+    } else {
+        held().ctrl()
+    }
+}
+
+impl Terminal {
+    /// What the Tab does with the mouse and links (#31): it selects as `select` does, keeps the
+    /// URL the Renderer showed under a press, opens it when the click's release opens a link and
+    /// the Renderer shows the same there still, and before each frame gives the Renderer where
+    /// the Input Handler says the mouse is. The frame after `event`, as the webview reads it, if
+    /// one is sent, and the URL handed to the OS, if any.
+    fn point(&mut self, event: InputEvent) -> (Option<Json>, Option<String>) {
+        let mut url = None;
+        match self.input.handle(event, self.core.modes()) {
+            Some(Action::OpenLink(pointer)) => {
+                let shown = self.renderer.open(pointer.row, pointer.col);
+                url = shown.filter(|shown| self.pressed.as_ref() == Some(shown));
+                self.core.unselect();
+            }
+            Some(Action::Select(pointer, by)) => {
+                if pointer.kind == PointerKind::Press {
+                    self.pressed = self.renderer.open(pointer.row, pointer.col);
+                }
+                let at = Place {
+                    row: self
+                        .renderer
+                        .row_number(pointer.row)
+                        .expect("a frame drawn"),
+                    col: pointer.col,
+                    right_half: pointer.right_half,
+                };
+                match pointer.kind {
+                    PointerKind::Press => self.core.select(at, by),
+                    _ => self.core.extend(at),
+                }
+            }
+            Some(Action::Pointer(_)) | None => {}
+            other => panic!("{other:?} is not the mouse's"),
+        }
+        let hover = self.input.hover(self.core.modes()).map(|hover| Hover {
+            row: hover.row,
+            col: hover.col,
+            opens: hover.opens,
+        });
+        self.renderer.set_hover(hover);
+        let frame = self.renderer.frame(&self.core, self.input.composing());
+        (frame.map(|frame| Json::read(&frame.json())), url)
+    }
+
+    /// The main button pressed at `at` with `modifiers`, moved through `through`, and released
+    /// at the last of them: the URL that opens, if any.
+    fn click_through(
+        &mut self,
+        at: (u16, u16),
+        through: &[(u16, u16)],
+        modifiers: Held,
+    ) -> Option<String> {
+        self.point(mouse(MouseKind::Down, at, 1, modifiers));
+        let mut last = at;
+        for &cell in through {
+            self.point(mouse(MouseKind::Move, cell, 1, modifiers));
+            last = cell;
+        }
+        self.point(mouse(MouseKind::Up, last, 0, modifiers)).1
+    }
+}
+
+/// Where the link in `frame` leads, and which of `opens`, `hand` and `top` it says.
+fn link_in(frame: &Json) -> Option<(String, Vec<&'static str>)> {
+    let link = frame.get("link")?;
+    let flags = ["opens", "hand", "top"]
+        .into_iter()
+        .filter(|flag| link.get(flag).is_some())
+        .collect();
+    Some((link.get("target").unwrap().text().to_string(), flags))
+}
+
+#[test]
+fn links_open_only_when_clicked_with_the_modifier() {
+    let home = Folder::new();
+    // A URL that wraps, from the last four columns into the next row; a link to a web page; and
+    // a link to a shell, which does not open.
+    let script = "printf '%s https://example.com/a/very/long/path\\n' \"$(printf '%075d' 0)\"; \
+                  printf '\\033]8;;https://example.com/b\\007page\\033]8;;\\007 '; \
+                  printf '\\033]8;;ssh://host\\007shell\\033]8;;\\007\\n'";
+    let mut sh = Terminal::run(&home.0, "/bin/sh", &["/bin/sh", "-c", script], &[]);
+    sh.until_exit();
+    assert_eq!(
+        sh.rows()[1..3],
+        ["s://example.com/a/very/long/path", "page shell"],
+        "{}",
+        sh.dump()
+    );
+    sh.renderer.measure(&measure()).unwrap();
+    sh.renderer.frame(&sh.core, "").unwrap();
+    let url = "https://example.com/a/very/long/path";
+
+    // The mouse over the URL underlines every cell of it, on both its rows, and shows where it
+    // leads. Without the modifier a click there would not open it.
+    let (frame, _) = sh.point(mouse(MouseKind::Move, (1, 5), 0, held()));
+    let frame = frame.expect("a frame");
+    assert_eq!(link_in(&frame), Some((url.to_string(), vec!["opens"])));
+    let underlined = |frame: &Json, row: usize| -> Vec<String> {
+        runs(frame, row)
+            .into_iter()
+            .filter(|run| run.4 >> 3 == 1)
+            .map(|run| run.1)
+            .collect()
+    };
+    assert_eq!(underlined(&frame, 0), ["http"]);
+    assert_eq!(underlined(&frame, 1), ["s://example.com/a/very/long/path"]);
+
+    // A click without the modifier opens nothing, nor does a drag with it, which selects.
+    assert_eq!(sh.click_through((1, 5), &[], held()), None);
+    assert_eq!(
+        sh.click_through((1, 5), &[(1, 6), (1, 9)], link_modifier()),
+        None
+    );
+    assert!(sh.core.copy().is_some());
+    // With the modifier held, the mouse is a hand, and a click opens the URL and selects nothing.
+    let (frame, _) = sh.point(mouse(MouseKind::Move, (1, 5), 0, held()));
+    assert_eq!(
+        link_in(&frame.expect("a frame")),
+        Some((url.to_string(), vec!["opens"]))
+    );
+    let (frame, _) = sh.point(mouse(MouseKind::Move, (1, 5), 0, link_modifier()));
+    assert_eq!(
+        link_in(&frame.expect("a frame")),
+        Some((url.to_string(), vec!["opens", "hand"]))
+    );
+    assert_eq!(
+        sh.click_through((1, 5), &[], link_modifier()).as_deref(),
+        Some(url)
+    );
+    assert_eq!(sh.core.copy(), None);
+
+    // The link a program made shows where it leads, and opens there.
+    let (frame, _) = sh.point(mouse(MouseKind::Move, (2, 1), 0, held()));
+    assert_eq!(
+        link_in(&frame.expect("a frame")),
+        Some(("https://example.com/b".to_string(), vec!["opens"]))
+    );
+    assert_eq!(
+        sh.click_through((2, 1), &[], link_modifier()).as_deref(),
+        Some("https://example.com/b")
+    );
+    // The one to a shell shows where it leads, says it does not open, and does not.
+    let (frame, _) = sh.point(mouse(MouseKind::Move, (2, 7), 0, link_modifier()));
+    assert_eq!(
+        link_in(&frame.expect("a frame")),
+        Some(("ssh://host".to_string(), vec![]))
+    );
+    assert_eq!(sh.click_through((2, 7), &[], link_modifier()), None);
+
+    // A link put under the mouse between the press and the release does not open, though the
+    // window showed it: the press was on another.
+    sh.point(mouse(MouseKind::Move, (2, 1), 0, link_modifier()));
+    sh.point(mouse(MouseKind::Down, (2, 1), 1, link_modifier()));
+    sh.show(b"\x1b[3;1H\x1b]8;;https://evil.example/\x07page\x1b]8;;\x07");
+    let (frame, _) = sh.point(mouse(MouseKind::Move, (2, 1), 1, link_modifier()));
+    assert_eq!(
+        link_in(&frame.expect("a frame")).map(|link| link.0),
+        Some("https://evil.example/".to_string())
+    );
+    let (_, url) = sh.point(mouse(MouseKind::Up, (2, 1), 0, link_modifier()));
+    assert_eq!(url, None);
 }
 
 // ---------------------------------------------------------------------------------------

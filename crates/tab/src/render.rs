@@ -7,7 +7,8 @@
 //! pixels from what the webview measured, and turns what the Terminal Core holds, with find's
 //! matches, the selection and the text being composed laid over it, into a [`Frame`] of the rows
 //! that changed, of the cursor, in the shape a program asked for or the settings give (TERM-07),
-//! and of the find bar while it is open, which the webview draws over the grid (TERM-18, UI-02). Its other half,
+//! of the find bar while it is open, and of where the link under the mouse leads, which the
+//! webview draws over the grid (TERM-18, TERM-20, UI-02). Its other half,
 //! `src/tab/renderer.js`, measures the font and the terminal area and paints frames on the
 //! window's canvas, a pixel for each of the display's, so text is sharp at any scale (HW-03).
 //!
@@ -22,13 +23,14 @@
 //! (ANIM-06), and which it moves to show find's current match. Rows are known by the numbers the
 //! Terminal Core gives them, so a frame sends only the rows that changed, not those that moved,
 //! and says how far they moved. It tells the Tab which row the last frame drew where, so the
-//! mouse selects the text under it (TERM-17).
+//! mouse selects the text under it (TERM-17), and which link it showed there, so that only a link
+//! the user saw with its target opens (SEC-07).
 //!
 //! A tab sends a new frame only after the last one was drawn, so frames never queue behind
 //! heavy output (PERF-07).
 //!
 //! Filled in by #22 (grid), #23 (fonts), #24 (ligatures), #25 (cursor), #26 (scrolling), #28
-//! (selection) and #29 (find).
+//! (selection), #29 (find) and #30 (links).
 
 mod color;
 mod json;
@@ -40,10 +42,10 @@ mod tests;
 
 use std::collections::{BTreeMap, HashMap};
 use std::mem;
-use std::ops::RangeInclusive;
+use std::ops::{Range, RangeInclusive};
 use std::sync::Arc;
 
-use terminal_core::{Cursor, CursorShape, Size, TerminalCore, ThemeColor};
+use terminal_core::{opening, Cursor, CursorShape, LinkAt, Size, TerminalCore, ThemeColor};
 
 pub use color::{Palette, Rgb};
 pub use layout::{Layout, Measure};
@@ -93,6 +95,46 @@ pub struct Renderer {
     find: Option<FindBar>,
     /// The find bar the window was last told to draw.
     sent_find: Option<FindFrame>,
+    /// Where the mouse is, as the Input Handler keeps it (TERM-20).
+    hover: Option<Hover>,
+    /// This machine's name, which a `file:` link may give. Empty for none.
+    host: String,
+    /// The link the last frame showed under the mouse.
+    shown: Option<Shown>,
+    /// Where the link under the mouse leads, as the window was last told to show it.
+    sent_link: Option<LinkFrame>,
+}
+
+/// Where the mouse is, as the Tab gives it to the Renderer, out of the Input Handler's.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Hover {
+    /// The view's row the mouse is over, counting the row cut at the top as 0, as
+    /// [`Renderer::row_number`] counts them, and the column.
+    pub row: i32,
+    pub col: i32,
+    /// A left click there, with the modifiers held now, would open a link.
+    pub opens: bool,
+}
+
+/// The link a frame showed under the mouse: the cells it underlined, by row number and
+/// columns, and the URL to hand the OS, when the link may open.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Shown {
+    cells: Vec<(u64, Range<usize>)>,
+    url: Option<String>,
+}
+
+/// Where the link under the mouse leads, as the webview shows it (TERM-20, SEC-07).
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct LinkFrame {
+    /// The URL the OS is handed when the link opens, or the target as the link has it.
+    target: String,
+    /// SEC-07 lets it open.
+    opens: bool,
+    /// A click there would open it now: the pointer is a hand.
+    hand: bool,
+    /// The mouse is in the view's lower half, so the target is shown at the top.
+    top: bool,
 }
 
 /// How many of the view's rows the find bar may lie over, at its top: a match there is shown as
@@ -132,6 +174,8 @@ pub struct Frame {
     caret: Cursor,
     /// The find bar, in every frame while it is open.
     find: Option<FindFrame>,
+    /// Where the link under the mouse leads, in every frame while there is one.
+    link: Option<LinkFrame>,
 }
 
 /// The find bar as the Tab gives it to the Renderer, out of the Input Handler's: its query, its
@@ -265,6 +309,10 @@ impl Renderer {
             shapes: HashMap::new(),
             find: None,
             sent_find: None,
+            hover: None,
+            host: String::new(),
+            shown: None,
+            sent_link: None,
         }
     }
 
@@ -359,6 +407,33 @@ impl Renderer {
     /// frame has it when it changed.
     pub fn set_find(&mut self, find: Option<FindBar>) {
         self.find = find;
+    }
+
+    /// Where the mouse is, or None while it is over nothing of Twominal's (TERM-20). The next
+    /// frame underlines the link there and shows where it leads.
+    pub fn set_hover(&mut self, hover: Option<Hover>) {
+        self.hover = hover;
+    }
+
+    /// This machine's name, so that a `file:` link that gives it may open (SEC-07). Until it is
+    /// called there is none, and only a file link with no host, or `localhost`, may.
+    pub fn set_host(&mut self, host: &str) {
+        host.clone_into(&mut self.host);
+    }
+
+    /// The URL to hand the OS for a click on `row` and `col` of the view, counted as
+    /// [`Renderer::row_number`] counts them: the link the last frame showed there, with where it
+    /// leads, if SEC-07 lets it open. None for a cell it showed no link at, so a link a program
+    /// put there since never opens (TERM-20, SEC-07).
+    pub fn open(&self, row: i32, col: i32) -> Option<String> {
+        let number = u64::try_from(self.row_number(row)?).ok()?;
+        let col = usize::try_from(col).ok()?;
+        let shown = self.shown.as_ref()?;
+        let held = shown
+            .cells
+            .iter()
+            .any(|(row, cols)| *row == number && cols.contains(&col));
+        held.then(|| shown.url.clone())?
     }
 
     /// Moves the view to show `rows` of `core`, by number: find's current match. When they are
@@ -472,6 +547,28 @@ impl Renderer {
                 line::select(line, cols, colors.selection);
             }
         }
+        // The link under the mouse, underlined, and where it leads (TERM-20).
+        let hovered = self.hover.and_then(|hover| {
+            let index = usize::try_from(hover.row)
+                .ok()
+                .filter(|&index| index < count)?;
+            let col = usize::try_from(hover.col).ok()?;
+            let link = core.link_at(top + index as u64, col)?;
+            Some((hover, index, link))
+        });
+        let mut showing = None;
+        let link = hovered.map(|(hover, index, link)| {
+            let cells = underline(core, &link, top, &mut lines);
+            let url = opening(link.target(), &self.host);
+            let frame = LinkFrame {
+                target: url.clone().unwrap_or_else(|| link.target().to_string()),
+                opens: url.is_some(),
+                hand: hover.opens && url.is_some(),
+                top: index * 2 >= usize::from(size.rows),
+            };
+            showing = Some(Shown { cells, url });
+            frame
+        });
         let find = self.find.clone().map(|bar| FindFrame {
             bar,
             current: found.and_then(|found| found.current()),
@@ -559,6 +656,7 @@ impl Renderer {
             })
             .collect();
         self.sent = lines;
+        self.shown = showing;
         self.sent_at = Some((top, offset, live));
         self.sent_offset = f64::from(offset) / f64::from(layout.cell_height);
         self.size = Some(size);
@@ -569,12 +667,14 @@ impl Renderer {
             && self.caret == Some(caret)
             && self.cursor == cursor
             && self.sent_find == find
+            && self.sent_link == link
         {
             return None;
         }
         self.caret = Some(caret);
         self.cursor.clone_from(&cursor);
         self.sent_find.clone_from(&find);
+        self.sent_link.clone_from(&link);
 
         let mut shapes = BTreeMap::new();
         let chars = rows
@@ -613,6 +713,7 @@ impl Renderer {
             cursor,
             caret,
             find,
+            link,
         })
     }
 
@@ -677,4 +778,31 @@ impl Renderer {
             glides: settings.glide && self.motion == Motion::Full && !moved,
         })
     }
+}
+
+/// Underlines in `lines`, the view's rows from row `top` of `core`, the cells `link` holds, and
+/// returns them, by row number and columns.
+fn underline(
+    core: &TerminalCore,
+    link: &LinkAt,
+    top: u64,
+    lines: &mut [Line],
+) -> Vec<(u64, Range<usize>)> {
+    let mut cells: Vec<(u64, Range<usize>)> = Vec::new();
+    for (number, line) in (top..).zip(lines) {
+        let Some(row) = core.row(number) else {
+            continue;
+        };
+        for (col, cell) in row.cells().iter().enumerate().take(line.len()) {
+            if !link.holds(number, col, cell) {
+                continue;
+            }
+            line::link(line, col);
+            match cells.last_mut() {
+                Some((row, cols)) if *row == number && cols.end == col => cols.end += 1,
+                _ => cells.push((number, col..col + 1)),
+            }
+        }
+    }
+    cells
 }

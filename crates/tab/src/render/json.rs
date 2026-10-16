@@ -21,6 +21,7 @@
 //!   "find":   { "query": ["before the caret", "composed", "after it"], "match": [n, count],
 //!               "selected": true, "case": true, "regex": true, "focused": true, "more": true,
 //!               "invalid": true },
+//!   "link":   { "target": "…", "opens": true, "hand": true, "top": true },
 //!   "caret":  [row, col] }
 //! ```
 //!
@@ -52,6 +53,12 @@
 //! from 1, or 0 for none, and how many there are; `more` says there are more than that. Each of
 //! `selected`, the whole query, `case`, `regex`, `focused`, the bar has the keys, `more` and
 //! `invalid`, the query is no pattern, is there only when true.
+//!
+//! `link` is where the link under the mouse leads, in every frame while there is one. `target`
+//! is the URL the OS is handed if it is clicked, or the link's own target when it may not open.
+//! `opens` says it may open, `hand` that a click there would open it now, and `top` that the
+//! mouse is in the view's lower half, so the target is shown at the top. Each is there only when
+//! true.
 
 use std::collections::HashMap;
 use std::fmt::Write;
@@ -60,7 +67,7 @@ use std::hash::Hash;
 use super::color::{Ink, Rgb};
 use super::line::{Cells, Run};
 use super::shapes::Primitive;
-use super::{CursorFrame, FindFrame, Frame, Full};
+use super::{CursorFrame, FindFrame, Frame, Full, LinkFrame};
 
 impl Frame {
     /// The frame as JSON text, for the webview half.
@@ -123,6 +130,9 @@ impl Frame {
         }
         if let Some(find) = &self.find {
             write_find(&mut cursor, find);
+        }
+        if let Some(link) = &self.link {
+            write_link(&mut cursor, link);
         }
         out.push_str("\"colors\":[");
         for (index, color) in colors.items.iter().enumerate() {
@@ -213,6 +223,22 @@ fn write_find(out: &mut String, find: &FindFrame) {
         (bar.focused, "focused"),
         (find.more, "more"),
         (find.invalid, "invalid"),
+    ] {
+        if on {
+            let _ = write!(out, ",\"{name}\":true");
+        }
+    }
+    out.push_str("},");
+}
+
+/// Where the link under the mouse leads, and the comma after it.
+fn write_link(out: &mut String, link: &LinkFrame) {
+    out.push_str("\"link\":{\"target\":");
+    string(out, &link.target);
+    for (on, name) in [
+        (link.opens, "opens"),
+        (link.hand, "hand"),
+        (link.top, "top"),
     ] {
         if on {
             let _ = write!(out, ",\"{name}\":true");

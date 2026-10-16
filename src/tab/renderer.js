@@ -15,19 +15,21 @@
 // half's. Only the cursor moves on its own: it blinks, and fades and glides when its settings say, on a canvas of its own
 // that renderer/cursor.js lays over the grid (ANIM-07, ANIM-08). Over both lies an overlay that
 // takes no room from the grid, where renderer/find.js draws the frame's find bar (UI-02, TERM-18),
-// and where the tab's notices will go (#31, #32). That a frame was drawn is
-// reported at the display's next frame, so frames never come faster than the display shows
-// them, and a hidden window, whose frames are paused, asks for none (PERF-07).
+// renderer/link.js shows where the link under the mouse leads (TERM-20, SEC-07), and the tab's
+// notices will go (#31, #32). While a click would open that link, the mouse is a hand. That a
+// frame was drawn is reported at the display's next frame, so frames never come faster than the
+// display shows them, and a hidden window, whose frames are paused, asks for none (PERF-07).
 //
 // The App Shell's page creates it in the terminal area, gives it the font the App Shell sends,
 // and passes what it measures and that a frame was drawn to the Rust half (#31). The font is a
 // CSS family list ending in the bundled JetBrains Mono and the OS's monospace, so a character
 // the chosen font lacks comes from a fallback font, and paint.js fits it to its cells (FONT-11).
-// Filled in by #22 (grid), #23 (fonts), #24 (ligatures), #25 (cursor), #26 (scrolling) and #29
-// (the find bar).
+// Filled in by #22 (grid), #23 (fonts), #24 (ligatures), #25 (cursor), #26 (scrolling), #29
+// (the find bar) and #30 (links).
 
 import { Cursor } from "./renderer/cursor.js";
 import { FindBar } from "./renderer/find.js";
+import { LinkTarget } from "./renderer/link.js";
 import { forget, paint } from "./renderer/paint.js";
 
 // The faces of a font: regular, bold, italic and both, as CSS names them.
@@ -43,6 +45,7 @@ export class Renderer {
   #cursor;
   #overlay;
   #find;
+  #link;
   #onMeasure;
   #onDrawn;
   // The font, as CSS names it, and its size in CSS pixels: the bundled font until the App
@@ -90,6 +93,7 @@ export class Renderer {
     });
     container.append(this.#overlay);
     this.#find = new FindBar(this.#overlay);
+    this.#link = new LinkTarget(this.#overlay);
 
     this.#observer = new ResizeObserver(([entry]) => this.#resized(entry));
     try {
@@ -113,8 +117,11 @@ export class Renderer {
   // Paints `frame`, the Rust half's JSON read, at once.
   draw(frame) {
     try {
-      // The bar first: it needs no layout, and a frame that cannot be painted still shows it.
+      // The bar and the link first: they need no layout, and a frame that cannot be painted still
+      // shows them.
       this.#find.show(frame.find);
+      this.#link.show(frame.link, this.#find.bottom());
+      this.#container.style.cursor = frame.link?.hand ? "pointer" : "";
       if (frame.full) {
         this.#lay(frame.full);
       }
@@ -162,6 +169,7 @@ export class Renderer {
     document.fonts.removeEventListener("loadingdone", this.#fontsLoaded);
     this.#cursor.destroy();
     this.#find.destroy();
+    this.#link.destroy();
     this.#overlay.remove();
     this.#canvas.remove();
   }

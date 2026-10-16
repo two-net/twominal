@@ -11,8 +11,8 @@ use alloc::{format, vec};
 use crate::fuzz::{self, Random};
 use crate::width::width;
 use crate::{
-    find, osc, Cell, Clipboard, Color, Event, LinkId, Place, Report, Search, Selecting, Selection,
-    Size, TerminalCore, ThemeColor, QUERY,
+    find, opening, osc, Cell, Clipboard, Color, Event, LinkId, Place, Report, Search, Selecting,
+    Selection, Size, TerminalCore, ThemeColor, QUERY,
 };
 
 /// A terminal of `cols` × `rows` that has interpreted `bytes`.
@@ -885,6 +885,12 @@ const PIECES: &[&[u8]] = &[
     b"\x1b[22;2t",
     b"\x1b[23;2t",
     b"aGk=",
+    b"https://",
+    b"mailto:",
+    b"file://",
+    b"(",
+    b")",
+    b"\x1b[8m",
 ];
 
 /// `length` bytes or so of hostile output.
@@ -1220,6 +1226,206 @@ fn a_query_keeps_its_first_1024_characters() {
     // A pattern too large to search is not one.
     core.find(search(r"\w{1000}", true), 3);
     assert_eq!(core.found().map(|found| found.invalid()), Some(true));
+}
+
+// Links at cells (TERM-20, SEC-07)
+
+/// Where the link at `col` of the screen's first row of `core` leads.
+fn target(core: &TerminalCore, col: usize) -> Option<String> {
+    let live = core.scrollback().start() + core.scrollback().len() as u64;
+    core.link_at(live, col)
+        .map(|link| link.target().to_string())
+}
+
+#[test]
+fn a_url_is_looked_for_in_a_run_of_no_more_than_16_cells_in_tests() {
+    // 16 cells, glued text included, hold a URL; 17 hold none.
+    assert_eq!(
+        target(&core(40, 1, b"http://abcdefghi"), 9).as_deref(),
+        Some("http://abcdefghi")
+    );
+    assert_eq!(target(&core(40, 1, b"http://abcdefghij"), 9), None);
+    assert_eq!(
+        target(&core(40, 1, b"xhttp://abcdefgh"), 9).as_deref(),
+        Some("http://abcdefgh")
+    );
+    assert_eq!(target(&core(40, 1, b"xhttp://abcdefghi"), 9), None);
+    // A wide character takes two of them.
+    let wide = "http://abcdefg\u{65e5}";
+    assert_eq!(
+        target(&core(40, 1, wide.as_bytes()), 9).as_deref(),
+        Some(wide)
+    );
+    let wider = "http://abcdefgh\u{65e5}";
+    assert_eq!(target(&core(40, 1, wider.as_bytes()), 9), None);
+    // Text after a blank is another run.
+    assert_eq!(
+        target(&core(40, 1, b"http://abcdefghi jklmnopqrstuvwxyz"), 9).as_deref(),
+        Some("http://abcdefghi")
+    );
+}
+
+#[test]
+fn a_url_takes_no_more_than_24_bytes_in_tests() {
+    // Marks make a URL longer than its cells: 7 bytes and 3 cells of 5.
+    let marked = "http://e\u{301}\u{301}e\u{301}\u{301}e\u{301}\u{301}";
+    assert_eq!(marked.len(), 22);
+    assert_eq!(
+        target(&core(40, 1, marked.as_bytes()), 9).as_deref(),
+        Some(marked)
+    );
+    let longer = [marked, "e\u{301}\u{301}"].concat();
+    assert_eq!(target(&core(40, 1, longer.as_bytes()), 9), None);
+}
+
+#[test]
+fn only_the_links_sec_07_allows_open() {
+    let host = "mac.local";
+    for (target, opens) in [
+        // The web: a host and no user name.
+        (
+            "https://example.com/a?b=c#d",
+            Some("https://example.com/a?b=c#d"),
+        ),
+        ("HTTP://Example.com", Some("http://Example.com")),
+        ("http://localhost:8080/x", Some("http://localhost:8080/x")),
+        ("http:example.com", None),
+        ("http:///path", None),
+        ("https://", None),
+        ("https://user@example.com/", None),
+        ("https://good.example%40evil.example/", None),
+        ("https://evil.example\\@good.example/", None),
+        // Mail, which may ask for no attachment.
+        ("mailto:me@example.com", Some("mailto:me@example.com")),
+        (
+            "mailto:me@example.com?subject=hi&body=a",
+            Some("mailto:me@example.com?subject=hi&body=a"),
+        ),
+        ("mailto:me@example.com?attach=/etc/passwd", None),
+        ("mailto:me@example.com?subject=a&Attachment=x", None),
+        ("mailto:me@example.com?%61ttach=x", None),
+        // However a mail program may read it: decoded first, split at `?`, `&` or `;`, the
+        // blanks around a name dropped, or a name that only starts so.
+        ("mailto:x?subject=a%26attach=/etc/passwd", None),
+        ("mailto:x?attach%3D/etc/passwd", None),
+        ("mailto:x%3Fattach=/etc/passwd", None),
+        ("mailto:x?subject=y?attach=/etc/passwd", None),
+        ("mailto:x?subject=y;attach=/etc/passwd", None),
+        ("mailto:x?%20attach=/etc/passwd", None),
+        ("mailto:x?attach =/etc/passwd", None),
+        ("mailto:x?ATTACHFILE=/etc/passwd", None),
+        // An address or a body that only says so opens.
+        (
+            "mailto:attach@example.com",
+            Some("mailto:attach@example.com"),
+        ),
+        (
+            "mailto:x?body=see%20the%20attachment",
+            Some("mailto:x?body=see%20the%20attachment"),
+        ),
+        ("MAILTO:me@example.com", Some("mailto:me@example.com")),
+        // Files: a path from the root on this machine.
+        ("file:///tmp/a.txt", Some("file:///tmp/a.txt")),
+        ("file:/tmp/a.txt", Some("file:///tmp/a.txt")),
+        ("file://localhost/tmp/a", Some("file:///tmp/a")),
+        ("file://LocalHost/tmp/a", Some("file:///tmp/a")),
+        ("file://mac.local/tmp/a", Some("file:///tmp/a")),
+        ("file://MAC.LOCAL/tmp/a", Some("file:///tmp/a")),
+        ("FILE:///tmp/a", Some("file:///tmp/a")),
+        ("file://other/tmp/a", None),
+        ("file://user@localhost/tmp/a", None),
+        ("file://localhost:22/tmp/a", None),
+        ("file:tmp/a", None),
+        ("file:", None),
+        ("file://", None),
+        ("file://localhost", None),
+        // No Windows network or device path, however it is written.
+        ("file:////server/share", None),
+        ("file://///server/share", None),
+        ("file:///%2F%2Fserver/share", None),
+        ("file:///%2f/server/share", None),
+        ("file:///%5C%5Cserver%5Cshare", None),
+        ("file:///C:\\Windows", None),
+        ("file:///%5C%5C?%5CC:", None),
+        (
+            "file:///C:/Windows/notepad.exe",
+            Some("file:///C:/Windows/notepad.exe"),
+        ),
+        ("file:///tmp/a%00b", None),
+        ("file:///tmp/a%0Ab", None),
+        ("file:///tmp/a%7Fb", None),
+        // No other scheme.
+        ("ssh://host", None),
+        ("ftp://example.com/a", None),
+        ("javascript:alert(1)", None),
+        ("data:text/html,hi", None),
+        ("x-man-page://ls", None),
+        ("vscode://file/tmp", None),
+        ("https", None),
+        ("", None),
+        (" https://example.com", None),
+        ("ht\u{1f}tp://example.com", None),
+        // Every byte RFC 3986 does not give URLs is written as %XX.
+        ("file:///tmp/a b", Some("file:///tmp/a%20b")),
+        ("https://x/a%20b%zz", Some("https://x/a%20b%zz")),
+        (
+            "https://x/\"<>\\^`{|}",
+            Some("https://x/%22%3C%3E%5C%5E%60%7B%7C%7D"),
+        ),
+        (
+            "https://x/!$&'()*+,;=:@[]~-._?/#",
+            Some("https://x/!$&'()*+,;=:@[]~-._?/#"),
+        ),
+        (
+            "https://\u{4f8b}\u{3048}.jp/\u{30d1}\u{30b9}",
+            Some("https://%E4%BE%8B%E3%81%88.jp/%E3%83%91%E3%82%B9"),
+        ),
+        ("mailto:a@b?subject=a b", Some("mailto:a@b?subject=a%20b")),
+    ] {
+        let url = opening(target, host);
+        assert_eq!(url.as_deref(), opens, "{target:?}");
+        if let Some(url) = url {
+            assert_eq!(
+                opening(&url, host).as_deref(),
+                Some(url.as_str()),
+                "{target:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_file_on_a_named_host_opens_only_when_the_name_is_given() {
+    assert_eq!(opening("file://mac.local/tmp/a", ""), None);
+    assert_eq!(
+        opening("file:///tmp/a", "").as_deref(),
+        Some("file:///tmp/a")
+    );
+    assert_eq!(
+        opening("file://localhost/tmp/a", "").as_deref(),
+        Some("file:///tmp/a")
+    );
+}
+
+#[test]
+fn a_link_a_program_made_is_found_from_any_of_its_cells() {
+    // Its blanks, its wide characters' right halves, and wherever it is drawn again.
+    let core = core(
+        10,
+        2,
+        "\x1b]8;id=1;u\x07a \u{65e5}\x1b]8;;\x07\r\n\x1b]8;id=1;u\x07b\x1b]8;;\x07".as_bytes(),
+    );
+    let link = core.link_at(0, 3).expect("a link");
+    assert_eq!(link.target(), "u");
+    let cells = |row: u64| -> Vec<bool> {
+        let cells = core.row(row).expect("a row").cells();
+        (0..cells.len())
+            .map(|col| link.holds(row, col, &cells[col]))
+            .collect()
+    };
+    assert_eq!(cells(0)[..5], [true, true, true, true, false]);
+    assert_eq!(cells(1)[..2], [true, false]);
+    assert_eq!(core.link_at(0, 1), core.link_at(1, 0));
 }
 
 #[test]

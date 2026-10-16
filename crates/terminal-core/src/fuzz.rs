@@ -7,12 +7,13 @@
 //! rest is the output. The size and the scrollback stand for the window and the settings,
 //! which Twominal trusts, so they are kept small enough to fuzz quickly: a resize reflows
 //! every row the scrollback keeps. Only the output is hostile. The seed also says where the
-//! user selects (TERM-17), and copies, and what the user looks for (TERM-18).
+//! user selects (TERM-17), and copies, what the user looks for (TERM-18), and where the mouse
+//! finds links (TERM-20).
 
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use crate::{Clipboard, Event, Place, Search, Selecting, Size, TerminalCore};
+use crate::{opening, Clipboard, Event, Place, Search, Selecting, Size, TerminalCore};
 
 /// The nonce of the reports in fuzzed output, so that reports are read and not only skipped.
 pub const NONCE: &str = "n1";
@@ -179,7 +180,9 @@ pub fn input(size: Size, seed: u64, output: &[u8]) -> Vec<u8> {
 /// left copies what it did before, but for the rows dropped past the scrollback's limit, which
 /// leave its start (TERM-17). A search is made, moved or ended between pieces too, and the
 /// matches, brought up to date after some of them, are those a search of the rows as they are
-/// finds (TERM-18).
+/// finds (TERM-18). The link at a cell the seed chooses holds that cell, a URL found in the text
+/// looks like one, and what `opening` makes of any link, or of any piece, opens as itself and
+/// is handed to the OS as one word (TERM-20, SEC-07).
 pub fn interpret(data: &[u8]) {
     let input = Input::read(data);
     let mut random = Random::new(input.seed);
@@ -212,6 +215,10 @@ pub fn interpret(data: &[u8]) {
             }
         }
         check(&core);
+        link(&core, &mut random);
+        if let Some(url) = opening(&String::from_utf8_lossy(piece), "h") {
+            assert!(opens(&url), "{piece:?} opens as {url:?}");
+        }
         if random.below(2) == 0 {
             refind(&mut core);
         }
@@ -290,6 +297,54 @@ fn run(input: Input, mut cut: impl FnMut(usize) -> usize) -> (TerminalCore, Vec<
 fn is_copy(text: &str) -> bool {
     !text.chars().any(|char| char.is_control() && char != '\n')
         && !text.split('\n').any(|line| line.ends_with(' '))
+}
+
+/// The schemes that may open (SEC-07), as `opening` writes them.
+const OPENS: [&str; 4] = ["http:", "https:", "mailto:", "file:"];
+
+/// Panics unless the link at a cell the seed chooses, if there is one, holds that cell, and
+/// unless a URL the text holds starts with a scheme that may open and has no blank or control
+/// character in it. What `opening` makes of the link must open as itself.
+fn link(core: &TerminalCore, random: &mut Random) {
+    let at = random.place(core);
+    let (Ok(row), Ok(col)) = (u64::try_from(at.row), usize::try_from(at.col)) else {
+        return;
+    };
+    let Some(link) = core.link_at(row, col) else {
+        return;
+    };
+    let cell = core
+        .row(row)
+        .and_then(|row| row.line().get(col))
+        .expect("a link is at a cell there is");
+    assert!(link.holds(row, col, cell), "{link:?} leaves {row};{col}");
+    let target = link.target();
+    if cell.link().is_none() {
+        let scheme = OPENS.iter().any(|scheme| {
+            target
+                .get(..scheme.len())
+                .is_some_and(|start| start.eq_ignore_ascii_case(scheme))
+        });
+        let blank = target
+            .chars()
+            .any(|char| char.is_whitespace() || char.is_control());
+        assert!(scheme && !blank, "found the URL {target:?}");
+        assert!(
+            target.len() <= crate::urls::TARGET,
+            "found the URL {target:?}"
+        );
+    }
+    if let Some(url) = opening(target, "h") {
+        assert!(opens(&url), "{target:?} opens as {url:?}");
+    }
+}
+
+/// Whether `url`, which `opening` gave, is printable ASCII with no space, starts with a scheme
+/// that may open, and opens as itself.
+fn opens(url: &str) -> bool {
+    url.bytes().all(|byte| (0x21..=0x7e).contains(&byte))
+        && OPENS.iter().any(|scheme| url.starts_with(scheme))
+        && opening(url, "h").as_deref() == Some(url)
 }
 
 /// Brings the matches up to date, and panics unless they are what a search of the rows finds.

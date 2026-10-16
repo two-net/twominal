@@ -1,5 +1,5 @@
-//! The rows there are, by number: the scrollback's and the screen's, as the selection and find
-//! take them (TERM-17, TERM-18).
+//! The rows there are, by number: the scrollback's and the screen's, as the selection, find and
+//! the links at cells take them (TERM-17, TERM-18, TERM-20).
 //!
 //! Rows are numbered as [`Scrollback::start`] numbers them, so what is kept by their numbers
 //! stays on its text while output scrolls it up the screen and into the scrollback.
@@ -65,6 +65,39 @@ impl<'a> Rows<'a> {
     /// kept without the blanks at its end, and a row that wraps early without its last cell.
     pub(crate) fn cell(&self, number: u64, col: usize) -> Option<&'a Cell> {
         self.get(number)?.line().get(col)
+    }
+
+    /// The cell before `col` of row `number`'s line, on the row before when the line goes on
+    /// from there.
+    pub(crate) fn before(&self, number: u64, col: usize) -> Option<(u64, usize)> {
+        if col > 0 {
+            return Some((number, col - 1));
+        }
+        let above = number.checked_sub(1)?;
+        let row = self.get(above).filter(|row| row.wrapped())?;
+        Some((above, row.line().len().checked_sub(1)?))
+    }
+
+    /// The cell after `col` of row `number`'s line, on the next row when the line goes on there.
+    pub(crate) fn after(&self, number: u64, col: usize) -> Option<(u64, usize)> {
+        let row = self.get(number)?;
+        let len = if row.wrapped() {
+            row.line().len()
+        } else {
+            self.cols
+        };
+        if col + 1 < len {
+            return Some((number, col + 1));
+        }
+        (row.wrapped() && number < self.last()).then_some((number + 1, 0))
+    }
+
+    /// `col` of row `number`, or the cell before it when it is a wide character's right half.
+    pub(crate) fn left_half(&self, number: u64, col: usize) -> usize {
+        match self.cell(number, col) {
+            Some(cell) if cell.width() == 0 && col > 0 => col - 1,
+            _ => col,
+        }
     }
 
     /// Whether row `number` goes on in the next row there is.

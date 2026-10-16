@@ -168,6 +168,13 @@ export class FindBar {
     }
   }
 
+  // How far down the terminal area the bar reaches, in CSS pixels, or 0 while it is hidden, so
+  // that what else lies at the top goes below it.
+  bottom() {
+    const bar = this.#bar;
+    return bar.style.display === "none" ? 0 : bar.offsetTop + bar.offsetHeight;
+  }
+
   // The caret's box in CSS pixels from the top left of `container`, the terminal area, while
   // the bar has the keys: where the textarea goes, so that an input method opens its window
   // there (#31). Null otherwise.

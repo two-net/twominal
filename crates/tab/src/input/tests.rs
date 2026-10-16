@@ -136,6 +136,7 @@ fn sent_on(macos: bool, modes: &Modes, event: &Event) -> String {
             action @ (Action::Composing
             | Action::Pointer(_)
             | Action::Select(..)
+            | Action::OpenLink(_)
             | Action::Scroll(_)
             | Action::Clear
             | Action::Copy
@@ -2810,6 +2811,192 @@ fn a_lost_release_of_the_left_button_ends_the_selection() {
         selects(&mut input, &off, moved(0, 2, 1 | 2)).0.kind,
         PointerKind::Drag
     );
+}
+
+/// An Input Handler as on `os`, on [`GRID`].
+fn on(os: Os) -> InputHandler {
+    let mut input = InputHandler::on(os);
+    input.resize(GRID);
+    input
+}
+
+/// Whether `event` opens a link. A Select or a Pointer action, or none, opens nothing.
+#[track_caller]
+fn opens(input: &mut InputHandler, modes: &Modes, event: impl Into<InputEvent>) -> bool {
+    match input.handle(event.into(), modes) {
+        Some(Action::OpenLink(_)) => true,
+        Some(Action::Select(..) | Action::Pointer(_)) | None => false,
+        other => panic!("{other:?} is no click"),
+    }
+}
+
+#[test]
+fn a_click_with_the_link_modifier_opens_a_link() {
+    // TERM-20, Appendix A: Cmd+click on macOS, Ctrl+click on Linux and Windows.
+    let off = Modes::default();
+    for (os, with, without) in [
+        (Os::MacOs, down(2, 3).meta(), down(2, 3).ctrl()),
+        (Os::Linux, down(2, 3).ctrl(), down(2, 3).meta()),
+        (Os::Windows, down(2, 3).ctrl(), down(2, 3).meta()),
+    ] {
+        let mut input = on(os);
+        // The press selects as without the modifier, a block's included on Linux, and the
+        // release opens in the place of the selection's.
+        let (press, _) = selects(&mut input, &off, with.detail(1));
+        assert_eq!(press.kind, PointerKind::Press);
+        match input.handle(up(2, 3).into(), &off) {
+            Some(Action::OpenLink(release)) => assert_eq!(
+                (release.kind, release.row, release.col),
+                (PointerKind::Release, 2, 3)
+            ),
+            other => panic!("{os:?}: {other:?}"),
+        }
+        // Without it a click opens nothing.
+        selects(&mut input, &off, without.detail(1));
+        assert!(!opens(&mut input, &off, up(2, 3)), "{os:?}");
+        // The DOM may count no click at all.
+        selects(&mut input, &off, with.detail(0));
+        assert!(opens(&mut input, &off, up(2, 3)), "{os:?}");
+        // The modifier counts at the press only.
+        selects(&mut input, &off, down(2, 3).detail(1));
+        assert!(!opens(&mut input, &off, up(2, 3).meta().ctrl()), "{os:?}");
+    }
+}
+
+#[test]
+fn only_a_click_that_stays_in_its_cell_opens() {
+    let off = Modes::default();
+    let mut input = on(Os::MacOs);
+    // Wavering between the halves of its cell, it is still a click.
+    selects(&mut input, &off, down(2, 3).meta().detail(1));
+    selects(&mut input, &off, moved(2, 3, 1).x(37.0));
+    selects(&mut input, &off, moved(2, 3, 1));
+    assert!(opens(&mut input, &off, up(2, 3).x(37.0)));
+    // A drag out of the cell selects, though it comes back.
+    selects(&mut input, &off, down(2, 3).meta().detail(1));
+    selects(&mut input, &off, moved(2, 4, 1));
+    selects(&mut input, &off, moved(2, 3, 1));
+    assert!(!opens(&mut input, &off, up(2, 3)));
+    // So does a release in another cell, whatever moves were not seen.
+    selects(&mut input, &off, down(2, 3).meta().detail(1));
+    assert!(!opens(&mut input, &off, up(5, 6)));
+    // A double-click selects a word, after its first click opened.
+    selects(&mut input, &off, down(2, 3).meta().detail(1));
+    assert!(opens(&mut input, &off, up(2, 3)));
+    let (_, by) = selects(&mut input, &off, down(2, 3).meta().detail(2));
+    assert_eq!(by, Selecting::Words);
+    assert!(!opens(&mut input, &off, up(2, 3).detail(2)));
+    // A release that was lost opens nothing, though the mouse is back in the cell.
+    selects(&mut input, &off, down(2, 3).meta().detail(1));
+    let (release, _) = selects(&mut input, &off, moved(2, 3, 0));
+    assert_eq!(release.kind, PointerKind::Release);
+    // Nor one that left the terminal area, as onto the find bar, though it comes back.
+    selects(&mut input, &off, down(2, 3).meta().detail(1));
+    input.handle(at(MouseKind::Leave, 0, 0).into(), &off);
+    assert!(!opens(&mut input, &off, up(2, 3)));
+    // Nor does another button.
+    pointer(&mut input, &off, down(2, 3).button(2).meta());
+    assert!(!opens(&mut input, &off, up(2, 3).button(2)));
+    // The press after it starts again.
+    selects(&mut input, &off, down(2, 3).meta().detail(1));
+    assert!(opens(&mut input, &off, up(2, 3)));
+}
+
+#[test]
+fn a_link_under_a_program_that_has_the_mouse_takes_shift_but_on_macos() {
+    // Cmd keeps the gesture from the program on macOS. Ctrl is reported, so on Linux and
+    // Windows Shift+Ctrl opens, as in WezTerm (DESIGN.md §3).
+    let modes = tracking(MouseTracking::Click, MouseFormat::Sgr);
+    let mut input = on(Os::MacOs);
+    selects(&mut input, &modes, down(2, 3).meta().detail(1));
+    assert!(opens(&mut input, &modes, up(2, 3)));
+    for os in [Os::Linux, Os::Windows] {
+        let mut input = on(os);
+        assert_eq!(
+            bytes(&mut input, &modes, down(2, 3).ctrl().detail(1)),
+            b"\x1b[<16;4;3M".to_vec()
+        );
+        assert_eq!(
+            bytes(&mut input, &modes, up(2, 3).ctrl()),
+            b"\x1b[<16;4;3m".to_vec()
+        );
+        selects(&mut input, &modes, down(2, 3).ctrl().shift().detail(1));
+        assert!(opens(&mut input, &modes, up(2, 3)), "{os:?}");
+    }
+}
+
+#[test]
+fn the_hover_is_where_the_mouse_is_while_it_is_twominals() {
+    let off = Modes::default();
+    let hover = |row, col, opens| Some(Hover { row, col, opens });
+    let mut input = on(Os::MacOs);
+    assert_eq!(input.hover(&off), None);
+    input.handle(moved(3, 4, 0).into(), &off);
+    assert_eq!(input.hover(&off), hover(3, 4, false));
+    // Cmd going down, as a key or with a move, means a click there would open a link, and its
+    // going up that it would not.
+    let cmd = key("Meta").code("MetaLeft");
+    input.handle(InputEvent::Key(cmd.clone().meta().0), &off);
+    assert_eq!(input.hover(&off), hover(3, 4, true));
+    input.handle(InputEvent::Key(cmd.release().0), &off);
+    assert_eq!(input.hover(&off), hover(3, 4, false));
+    input.handle(moved(3, 4, 0).meta().into(), &off);
+    assert_eq!(input.hover(&off), hover(3, 4, true));
+    // Losing the focus lets them go, since their release may never come.
+    input.handle(InputEvent::Focus(false), &off);
+    assert_eq!(input.hover(&off), hover(3, 4, false));
+    // Leaving the terminal area, the mouse is over nothing, until it comes back.
+    input.handle(at(MouseKind::Leave, 0, 0).into(), &off);
+    assert_eq!(input.hover(&off), None);
+    input.handle(moved(5, 6, 0).into(), &off);
+    assert_eq!(input.hover(&off), hover(5, 6, false));
+    // The wheel says where it is too: at row 1 and column 2.
+    input.handle(pixels(40.0).into(), &off);
+    assert_eq!(input.hover(&off), hover(1, 2, false));
+    // A view scrolled by a part of a row moves the rows under a mouse that does not: at 1.75
+    // rows down, it is over row 1, and over row 2 once the rows are drawn half a row up.
+    input.handle(moved(0, 6, 0).y(35.0).into(), &off);
+    assert_eq!(input.hover(&off), hover(1, 6, false));
+    input.set_offset(0.5);
+    assert_eq!(input.hover(&off), hover(2, 6, false));
+    input.set_offset(0.0);
+    // A drag of Twominal's goes on being where the mouse is, past the grid's edge too.
+    selects(&mut input, &off, down(2, 2));
+    selects(&mut input, &off, moved(30, 2, 1));
+    assert_eq!(input.hover(&off), hover(30, 2, false));
+    selects(&mut input, &off, up(30, 2));
+}
+
+#[test]
+fn the_hover_is_none_while_the_program_has_the_mouse() {
+    // Every move is reported under 1003, so the mouse is over nothing of Twominal's, unless
+    // Shift or Cmd keeps it from the program.
+    let motion = tracking(MouseTracking::Motion, MouseFormat::Sgr);
+    let mut input = on(Os::MacOs);
+    bytes(&mut input, &motion, moved(3, 4, 0));
+    assert_eq!(input.hover(&motion), None);
+    input.handle(moved(3, 4, 0).meta().into(), &motion);
+    assert_eq!(
+        input.hover(&motion),
+        Some(Hover {
+            row: 3,
+            col: 4,
+            opens: true
+        })
+    );
+    // Nor during a gesture of the program's.
+    let click = tracking(MouseTracking::Click, MouseFormat::Sgr);
+    let mut input = on(Os::Linux);
+    input.handle(moved(3, 4, 0).into(), &click);
+    assert!(input.hover(&click).is_some());
+    bytes(&mut input, &click, down(3, 4));
+    assert_eq!(input.hover(&click), None);
+    bytes(&mut input, &click, up(3, 4));
+    // Ctrl is the program's there, so only Shift+Ctrl would open.
+    input.handle(moved(3, 4, 0).ctrl().into(), &click);
+    assert_eq!(input.hover(&click).map(|hover| hover.opens), Some(false));
+    input.handle(moved(3, 4, 0).ctrl().shift().into(), &click);
+    assert_eq!(input.hover(&click).map(|hover| hover.opens), Some(true));
 }
 
 #[test]
