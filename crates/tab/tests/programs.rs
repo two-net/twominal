@@ -1,5 +1,5 @@
 //! Real programs, shown by the Terminal Core, typed into through the Input Handler and drawn by
-//! the Renderer (TERM-01 to TERM-06, TERM-08 to TERM-14, TERM-16, TERM-17, FONT-08, FONT-10,
+//! the Renderer (TERM-01 to TERM-06, TERM-08 to TERM-14, TERM-16 to TERM-19, FONT-08, FONT-10,
 //! REL-03).
 //!
 //! Each test starts a program on a pseudo-terminal through the Session, as a tab does, and
@@ -9,7 +9,8 @@
 //! changes, the mouse and the wheel go through the Input Handler, by the modes the program set,
 //! as DOM events, on cells of 10 by 20 pixels. The Renderer turns the screen into frames, which
 //! are read back as the webview reads them, and says which row it drew under the mouse, where
-//! the core selects. The Tab will do that itself with #31; here the test does. A test whose
+//! the core selects, and from which row find looks. The Tab will do that itself with #31; here
+//! the test does. A test whose
 //! program is not installed says so, and passes.
 //!
 //! Every program runs with an environment of its own and a home folder of the test's own, so
@@ -28,10 +29,10 @@ use std::time::{Duration, Instant};
 use std::{env, fs};
 
 use tab::input::{
-    Action, DeltaMode, Grid, InputEvent, InputHandler, KeyEvent, Modifiers, MouseEvent, MouseKind,
-    PointerKind, WheelEvent,
+    Action, DeltaMode, FindEvent, Grid, InputEvent, InputHandler, KeyEvent, Modifiers, MouseEvent,
+    MouseKind, PointerKind, WheelEvent,
 };
-use tab::render::{Measure, Palette, Renderer, Rgb};
+use tab::render::{FindBar, Measure, Palette, Renderer, Rgb};
 use tab::session::{Output, Session, Shell, Start};
 use terminal_core::{
     Clipboard, Color, CursorShape, Event, Keyboard, MouseFormat, MouseTracking, Place, Size, Style,
@@ -1382,6 +1383,144 @@ fn the_mouse_selects_what_sh_prints_and_copying_gives_it_back() {
 }
 
 // ---------------------------------------------------------------------------------------
+// Find (TERM-18, TERM-19)
+// ---------------------------------------------------------------------------------------
+
+impl Terminal {
+    /// What the Tab does with find (#31): the core looks for what the find bar says, from the last
+    /// row the Renderer drew, and the view shows the current match. Then the next frame, with the
+    /// matches brought up to date and the bar, as the webview reads it.
+    fn find(&mut self, events: impl IntoIterator<Item = InputEvent>) -> Json {
+        for event in events {
+            let action = self.input.handle(event, self.core.modes());
+            let last = self
+                .renderer
+                .row_number(i32::from(SIZE.rows) - 1)
+                .expect("a frame drawn");
+            match action {
+                Some(Action::Find(search)) => self.core.find(search, last as u64),
+                Some(Action::FindStep { up }) => self.core.find_next(up),
+                Some(Action::FindBar) | None => continue,
+                other => panic!("{other:?} is not find's"),
+            }
+            if let Some(rows) = self.core.found().and_then(|found| found.current_rows()) {
+                self.renderer.reveal(&self.core, rows);
+            }
+        }
+        self.core.refind();
+        let bar = self.input.find_bar();
+        self.renderer.set_find(bar.is_open().then(|| FindBar {
+            query: bar.query().to_string(),
+            caret: bar.caret(),
+            composing: bar.composing().to_string(),
+            selected: bar.is_selected(),
+            case: bar.case(),
+            regex: bar.regex(),
+            focused: bar.is_focused(),
+        }));
+        let frame = self.renderer.frame(&self.core, self.input.composing());
+        Json::read(&frame.expect("a frame").json())
+    }
+}
+
+/// The keys that type `text`.
+fn typing(text: &str) -> Vec<InputEvent> {
+    text.chars()
+        .map(|char| press(&char.to_string(), held()))
+        .collect()
+}
+
+/// What the find bar in `frame` counts: the current match, from 1, and how many there are.
+fn counted(frame: &Json) -> (usize, usize) {
+    let counted = frame.get("find").expect("a find bar").get("match").unwrap();
+    let [current, count] = counted.items() else {
+        panic!("{counted:?} is no count");
+    };
+    (current.number() as usize, count.number() as usize)
+}
+
+/// The index of the row of `frame` whose text is `text`.
+fn row_of(frame: &Json, text: &str) -> usize {
+    frame
+        .get("rows")
+        .unwrap()
+        .items()
+        .iter()
+        .map(|row| row.items()[0].number() as usize)
+        .find(|row| {
+            let runs: String = runs(frame, *row)
+                .into_iter()
+                .map(|(_, text, ..)| text)
+                .collect();
+            runs == text
+        })
+        .unwrap_or_else(|| panic!("no row {text:?} in {frame:?}"))
+}
+
+#[test]
+fn find_goes_up_through_what_seq_printed() {
+    let home = Folder::new();
+    let mut sh = Terminal::run(&home.0, "/bin/sh", &["/bin/sh", "-c", "seq 1 5000"], &[]);
+    sh.until_exit();
+    sh.renderer.measure(&measure()).unwrap();
+    sh.renderer.frame(&sh.core, "").unwrap();
+
+    // AT-09's 4242, deep in the scrollback: the view goes back to show it in its middle.
+    let frame = sh.find([shortcut("f")].into_iter().chain(typing("4242")));
+    assert_eq!(counted(&frame), (1, 1));
+    let row = row_of(&frame, "4242");
+    assert_eq!(row, 11);
+    assert_eq!(spans(&frame, row), [(0, 4, hex(palette().find_current))]);
+
+    // As a regular expression, a hundred lines; the current match stays on 4242, the 43rd.
+    let regex = typing("^42[0-9]{2}$");
+    let frame = sh.find(
+        [InputEvent::Find(FindEvent::Regex), shortcut("f")]
+            .into_iter()
+            .chain(regex),
+    );
+    assert_eq!(counted(&frame), (43, 100));
+    // Enter goes up, to 4241, which the view already shows.
+    let frame = sh.find([press("Enter", held())]);
+    assert_eq!(counted(&frame), (42, 100));
+    assert_eq!(
+        spans(&frame, row - 1),
+        [(0, 4, hex(palette().find_current))]
+    );
+    assert_eq!(spans(&frame, row), [(0, 4, hex(palette().find))]);
+    // Esc closes the bar, and the matches go.
+    let frame = sh.find([press("Escape", held())]);
+    assert_eq!(frame.get("find"), None);
+    assert_eq!(spans(&frame, row), []);
+}
+
+#[test]
+fn find_tells_letter_case_apart_when_asked() {
+    let home = Folder::new();
+    let mut sh = Terminal::run(
+        &home.0,
+        "/bin/sh",
+        &["/bin/sh", "-c", "printf 'Foo foo FOO\\n'"],
+        &[],
+    );
+    sh.until_exit();
+    assert!(sh.shows("Foo foo FOO"), "{}", sh.dump());
+    sh.renderer.measure(&measure()).unwrap();
+    sh.renderer.frame(&sh.core, "").unwrap();
+
+    let frame = sh.find([shortcut("f")].into_iter().chain(typing("foo")));
+    assert_eq!(counted(&frame), (3, 3));
+    let (find, current) = (hex(palette().find), hex(palette().find_current));
+    assert_eq!(
+        spans(&frame, 0),
+        [(0, 3, find.clone()), (4, 3, find), (8, 3, current.clone())]
+    );
+    let frame = sh.find([InputEvent::Find(FindEvent::Case)]);
+    assert_eq!(counted(&frame), (1, 1));
+    assert_eq!(spans(&frame, 0), [(4, 3, current)]);
+}
+
+// ---------------------------------------------------------------------------------------
 // The Renderer
 // ---------------------------------------------------------------------------------------
 
@@ -1394,6 +1533,9 @@ fn palette() -> Palette {
         cursor: Rgb::new(250, 250, 0),
         cursor_text: Rgb::new(0, 0, 50),
         selection: Rgb::new(60, 60, 120),
+        find: Rgb::new(200, 160, 0),
+        find_current: Rgb::new(250, 120, 0),
+        find_text: Rgb::new(0, 0, 0),
     }
 }
 

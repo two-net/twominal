@@ -1,7 +1,7 @@
 //! Terminal Core (SRS §6.1).
 //!
-//! Interprets a session's output; keeps the screen, scrollback, selection and Vim cursor;
-//! answers terminal queries; announces what shell integration reports.
+//! Interprets a session's output; keeps the screen, scrollback, selection, find's matches and Vim
+//! cursor; answers terminal queries; announces what shell integration reports.
 //!
 //! Must not depend on the interface, rendering or OS processes (ARC-02). `no_std` makes
 //! that a compile error: this crate cannot name a process, file, socket, thread or clock.
@@ -19,13 +19,15 @@
 //! `report.rs` reads what shell integration reports. `osc.rs` reads what the other operating
 //! system commands ask for: titles, the working directory, colors, links and the clipboard
 //! (TERM-12, TERM-13). `colors.rs` keeps the colors programs set, and `links.rs` the links
-//! they make. `select.rs` keeps what the user selected and gives the text copying takes
-//! (TERM-17). DESIGN.md §3 lists what is supported and what is ignored on purpose.
+//! they make. `rows.rs` numbers the rows of the screen and the scrollback, `select.rs` keeps what
+//! the user selected and gives the text copying takes (TERM-17), and `find.rs` keeps what the user
+//! looks for and every match of it (TERM-18, TERM-19). DESIGN.md §3 lists what is supported and
+//! what is ignored on purpose.
 //!
 //! Filled in by #16 (interpreter and screen model), #17 (conformance suite and fuzzing),
 //! #18 (Unicode), #19 (colors and attributes), #20 (keyboard flags), #21 (mouse modes), #26
-//! (scrollback and reflow), #27 (operating system commands and the bell), #28 (selection) and
-//! #29–#30.
+//! (scrollback and reflow), #27 (operating system commands and the bell), #28 (selection), #29
+//! (find) and #30.
 
 #![no_std]
 #![forbid(unsafe_code)]
@@ -36,6 +38,7 @@ extern crate std;
 
 mod colors;
 mod control;
+mod find;
 /// What the fuzz targets check. Only for them and for the tests.
 #[cfg(any(test, fuzzing))]
 #[doc(hidden)]
@@ -44,6 +47,7 @@ mod keyboard;
 mod links;
 mod osc;
 mod report;
+mod rows;
 mod screen;
 mod scrollback;
 mod select;
@@ -59,6 +63,7 @@ use alloc::vec::Vec;
 use core::{mem, str};
 
 pub use colors::{ColorQuery, Colors, Rgb, ThemeColor};
+pub use find::{Found, Search, QUERY};
 pub use keyboard::Keyboard;
 pub use links::{Link, LinkId};
 pub use osc::{Clipboard, ClipboardQuery, Directory, Selection};
@@ -83,7 +88,7 @@ pub struct Size {
     pub rows: u16,
 }
 
-/// One tab's terminal: its screen, scrollback, selection and Vim cursor.
+/// One tab's terminal: its screen, scrollback, selection, find's matches and Vim cursor.
 pub struct TerminalCore {
     /// Boxed, because its buffer for operating system commands is [`REPORT_LIMIT`] long.
     parser: Box<vte::Parser<REPORT_LIMIT>>,
@@ -260,6 +265,37 @@ impl TerminalCore {
     pub fn copy(&self) -> Option<String> {
         let text = self.selected()?.text();
         (!text.is_empty()).then_some(text)
+    }
+
+    /// Looks for `search` on the screen shown and in the scrollback, in place of what was looked
+    /// for, or with None for nothing (TERM-18, TERM-19). Every row is searched. The current match
+    /// is the last that starts at or before where the search before it was, so that it stays as
+    /// the query is typed, or with none, in or above row `from`, as [`Scrollback::start`] numbers
+    /// rows: the view's last row, so that find starts from what the user sees and goes up. With
+    /// no such match, it is the first. The same search again changes nothing.
+    pub fn find(&mut self, search: Option<Search>, from: u64) {
+        self.terminal.find(search, from);
+    }
+
+    /// Searches again the rows output changed since the matches were found, so that they are
+    /// those a search of the rows as they are gives. Output only marks the rows it changes, so
+    /// that a long line that keeps growing is not searched again at every read: the Tab calls
+    /// this before each frame (DESIGN.md §3 *Find*).
+    pub fn refind(&mut self) {
+        self.terminal.refind();
+    }
+
+    /// Makes the match above the current one current, toward older output, or the one below it
+    /// when not `up`, round the ends. What output changed is searched again first.
+    pub fn find_next(&mut self, up: bool) {
+        self.terminal.find_next(up);
+    }
+
+    /// What find found, for the Renderer to draw and the find bar to count: as it was when last
+    /// brought up to date by [`TerminalCore::refind`]. None while nothing is looked for, and
+    /// while every row is yet to be searched again, as after a resize, Clear or RIS.
+    pub fn found(&self) -> Option<Found<'_>> {
+        self.terminal.found()
     }
 }
 

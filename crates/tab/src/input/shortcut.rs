@@ -1,6 +1,6 @@
 //! Twominal's own keys (Appendix A), taken before a key is encoded for the program, whatever the
 //! kitty keyboard protocol asks, as kitty takes its own. So far a page of scrolling, Clear, Copy,
-//! Paste and Select All; #43 makes this the table of every shortcut, which the user can remap
+//! Paste, Select All and Find; #43 makes this the table of every shortcut, which the user can remap
 //! (SET-06). DESIGN.md §3 has the rules.
 
 use terminal_core::Modes;
@@ -20,10 +20,12 @@ pub(crate) enum Shortcut {
     Paste,
     /// Selects everything.
     SelectAll,
+    /// Opens the find bar, or gives it the keys (TERM-18).
+    Find,
 }
 
 /// The shortcut `press` is, if it is one. On `macos` Mod is Cmd, and elsewhere Ctrl+Shift.
-pub(crate) fn find(press: &Press, modes: &Modes, macos: bool) -> Option<Shortcut> {
+pub(crate) fn read(press: &Press, modes: &Modes, macos: bool) -> Option<Shortcut> {
     let held = press.mods.held();
     let page = match press.key {
         Key::Named(Named::PageUp) | Key::Pad(Pad::PageUp) => Some(true),
@@ -48,6 +50,7 @@ pub(crate) fn find(press: &Press, modes: &Modes, macos: bool) -> Option<Shortcut
         ('c', Shortcut::Copy),
         ('v', Shortcut::Paste),
         ('a', Shortcut::SelectAll),
+        ('f', Shortcut::Find),
     ]
     .into_iter()
     .find_map(|(letter, shortcut)| is(press, letter).then_some(shortcut))
@@ -55,7 +58,7 @@ pub(crate) fn find(press: &Press, modes: &Modes, macos: bool) -> Option<Shortcut
 
 /// Whether `press` is the key for `letter`: the key that types it on the layout, or on a layout
 /// that types no ASCII there, the key in its place on a US keyboard, as Ctrl takes it.
-fn is(press: &Press, letter: char) -> bool {
+pub(crate) fn is(press: &Press, letter: char) -> bool {
     match press.key {
         Key::Char(char) if char.is_ascii() => char == letter,
         Key::Char(_) => press.us.is_some_and(|(base, _)| base == letter),

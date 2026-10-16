@@ -4,10 +4,10 @@
 //! palette, the colors programs set over it, and the cursor.
 //!
 //! Must not change terminal state. This half only reads: it lays out the grid in whole device
-//! pixels from what the webview measured, and turns what the Terminal Core holds, with the
-//! selection and the text being composed laid over it, into a [`Frame`] of the rows that changed
-//! and of the cursor, in
-//! the shape a program asked for or the settings give (TERM-07). Its other half,
+//! pixels from what the webview measured, and turns what the Terminal Core holds, with find's
+//! matches, the selection and the text being composed laid over it, into a [`Frame`] of the rows
+//! that changed, of the cursor, in the shape a program asked for or the settings give (TERM-07),
+//! and of the find bar while it is open, which the webview draws over the grid (TERM-18, UI-02). Its other half,
 //! `src/tab/renderer.js`, measures the font and the terminal area and paints frames on the
 //! window's canvas, a pixel for each of the display's, so text is sharp at any scale (HW-03).
 //!
@@ -19,15 +19,16 @@
 //! rules.
 //!
 //! It keeps the view: how far it is scrolled back, which a trackpad moves pixel by pixel
-//! (ANIM-06). Rows are known by the numbers the Terminal Core gives them, so a frame sends only
-//! the rows that changed, not those that moved, and says how far they moved. It tells the Tab
-//! which row the last frame drew where, so the mouse selects the text under it (TERM-17).
+//! (ANIM-06), and which it moves to show find's current match. Rows are known by the numbers the
+//! Terminal Core gives them, so a frame sends only the rows that changed, not those that moved,
+//! and says how far they moved. It tells the Tab which row the last frame drew where, so the
+//! mouse selects the text under it (TERM-17).
 //!
 //! A tab sends a new frame only after the last one was drawn, so frames never queue behind
 //! heavy output (PERF-07).
 //!
-//! Filled in by #22 (grid), #23 (fonts), #24 (ligatures), #25 (cursor), #26 (scrolling) and #28
-//! (selection).
+//! Filled in by #22 (grid), #23 (fonts), #24 (ligatures), #25 (cursor), #26 (scrolling), #28
+//! (selection) and #29 (find).
 
 mod color;
 mod json;
@@ -39,6 +40,7 @@ mod tests;
 
 use std::collections::{BTreeMap, HashMap};
 use std::mem;
+use std::ops::RangeInclusive;
 use std::sync::Arc;
 
 use terminal_core::{Cursor, CursorShape, Size, TerminalCore, ThemeColor};
@@ -87,7 +89,15 @@ pub struct Renderer {
     /// The shapes of the characters drawn as shapes, for the layout in use. `None` for a
     /// character in their ranges that the font draws.
     shapes: HashMap<char, Option<Arc<[Primitive]>>>,
+    /// The find bar, while it is open (TERM-18).
+    find: Option<FindBar>,
+    /// The find bar the window was last told to draw.
+    sent_find: Option<FindFrame>,
 }
+
+/// How many of the view's rows the find bar may lie over, at its top: a match there is shown as
+/// one outside the view is.
+const UNDER_BAR: u64 = 2;
 
 /// How far the view is scrolled back: the number of its top row, as the Terminal Core numbers
 /// rows, and the part of a row past it (DESIGN.md §3, *The view*).
@@ -120,6 +130,40 @@ pub struct Frame {
     /// Where the text being composed starts, or the cursor while nothing is: the cell the
     /// Input Handler's textarea follows (#31).
     caret: Cursor,
+    /// The find bar, in every frame while it is open.
+    find: Option<FindFrame>,
+}
+
+/// The find bar as the Tab gives it to the Renderer, out of the Input Handler's: its query, its
+/// toggles and whether it has the keys (TERM-18). What it found is the Terminal Core's.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct FindBar {
+    pub query: String,
+    /// Where the caret is in the query, in bytes.
+    pub caret: usize,
+    /// The text an input method is composing at the caret.
+    pub composing: String,
+    /// The whole query is selected.
+    pub selected: bool,
+    /// Letter case counts.
+    pub case: bool,
+    /// The query is a regular expression.
+    pub regex: bool,
+    /// The bar has the keys.
+    pub focused: bool,
+}
+
+/// The find bar as the webview draws it: what the Tab gave, and what was found.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct FindFrame {
+    bar: FindBar,
+    /// Which match is current, from 0, and how many there are.
+    current: Option<usize>,
+    count: usize,
+    /// There are more matches than are kept.
+    more: bool,
+    /// The query is no pattern, or one too large to search.
+    invalid: bool,
 }
 
 /// The cursor as the webview draws it, over the rows (TERM-07, ANIM-07, ANIM-08).
@@ -219,6 +263,8 @@ impl Renderer {
             cursor: None,
             full: true,
             shapes: HashMap::new(),
+            find: None,
+            sent_find: None,
         }
     }
 
@@ -309,6 +355,41 @@ impl Renderer {
         self.view = None;
     }
 
+    /// The find bar to draw over the grid, or None while it is closed (TERM-18, UI-02). The next
+    /// frame has it when it changed.
+    pub fn set_find(&mut self, find: Option<FindBar>) {
+        self.find = find;
+    }
+
+    /// Moves the view to show `rows` of `core`, by number: find's current match. When they are
+    /// outside the view, or in the rows at its top that the find bar may lie over, the view puts
+    /// them in its middle, or their first row at its top when they are taller than it. Rows in
+    /// the view stay where they are. On the alternate screen, which has no scrollback, every row
+    /// is in the view.
+    pub fn reveal(&mut self, core: &TerminalCore, rows: RangeInclusive<u64>) {
+        if core.modes().alternate_screen {
+            return;
+        }
+        let size = core.size();
+        let scrollback = core.scrollback();
+        let live = scrollback.start() + scrollback.len() as u64;
+        let height = u64::from(size.rows);
+        let top = self
+            .view
+            .filter(|view| view.size == size)
+            .map_or(live as f64, |view| view.top);
+        // The rows drawn whole, but those under the bar.
+        let shown = top.ceil() as u64 + UNDER_BAR.min(height - 1)..(top + height as f64) as u64;
+        let (first, last) = (*rows.start(), *rows.end());
+        if shown.contains(&first) && shown.contains(&last) {
+            return;
+        }
+        let tall = last.saturating_sub(first) + 1;
+        let top = first.saturating_sub(height.saturating_sub(tall) / 2) as f64;
+        let top = top.max(scrollback.start() as f64);
+        self.view = (top < live as f64).then_some(View { top, size });
+    }
+
     /// The number of the row the last frame drew `row` rows down from the top of the grid,
     /// counting the row cut at the top as 0, as the Terminal Core numbers rows: what the Input
     /// Handler's Pointer is on, for the Tab to select (TERM-17). It may be a row there is not, past
@@ -379,11 +460,25 @@ impl Renderer {
                 line::draw(row, usize::from(size.cols), &colors)
             })
             .collect();
-        if let Some(selected) = core.selected() {
-            for (number, line) in (top..).zip(&mut lines) {
-                line::select(line, selected.cols(number), colors.selection);
+        // Find's matches, and the selection over them.
+        let selected = core.selected();
+        let found = core.found();
+        for (number, line) in (top..).zip(&mut lines) {
+            let cols = selected.map_or(0..0, |selected| selected.cols(number));
+            for (matched, current) in found.iter().flat_map(|found| found.cols(number)) {
+                line::find(line, matched, &cols, &colors, current);
+            }
+            if !cols.is_empty() {
+                line::select(line, cols, colors.selection);
             }
         }
+        let find = self.find.clone().map(|bar| FindFrame {
+            bar,
+            current: found.and_then(|found| found.current()),
+            count: found.map_or(0, |found| found.count()),
+            more: found.is_some_and(|found| found.more()),
+            invalid: found.is_some_and(|found| found.invalid()),
+        });
 
         // The line the cursor is on, if it is in the view.
         let cursor = core.cursor();
@@ -473,11 +568,13 @@ impl Renderer {
             && shift == 0
             && self.caret == Some(caret)
             && self.cursor == cursor
+            && self.sent_find == find
         {
             return None;
         }
         self.caret = Some(caret);
         self.cursor.clone_from(&cursor);
+        self.sent_find.clone_from(&find);
 
         let mut shapes = BTreeMap::new();
         let chars = rows
@@ -515,6 +612,7 @@ impl Renderer {
             shapes,
             cursor,
             caret,
+            find,
         })
     }
 

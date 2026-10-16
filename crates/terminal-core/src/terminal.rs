@@ -9,8 +9,10 @@
 //! title and the titles saved, the colors set over the theme's, and the link what is printed is
 //! part of, with every link the cells hold.
 //!
-//! And it keeps the selection (TERM-17), which `select.rs` makes and reads. Every change to the
-//! rows here tells it which rows changed, and a change to a row it covers ends it.
+//! And it keeps the selection (TERM-17), which `select.rs` makes and reads, and the search find
+//! made with what it found (TERM-18), which `find.rs` keeps. Every change to the rows here tells
+//! them which rows changed: a change to a row the selection covers ends it, and find searches the
+//! row again when the matches are next brought up to date.
 
 use alloc::boxed::Box;
 use alloc::string::String;
@@ -19,13 +21,15 @@ use core::mem;
 use core::ops::Range;
 
 use crate::colors::{ColorQuery, Colors};
+use crate::find::{Find, Found, Search};
 use crate::keyboard::{Keyboard, Stack};
 use crate::links::{Link, LinkId, Links};
 use crate::osc::{ColorChange, NewLink, Osc};
 use crate::report::Report;
+use crate::rows::Rows;
 use crate::screen::{Cell, Screen};
 use crate::scrollback::{self, Point, Scrollback};
-use crate::select::{Place, Rows, Selected, Selecting, Selection};
+use crate::select::{Place, Selected, Selecting, Selection};
 use crate::style::Style;
 use crate::width::{discarded, width};
 use crate::{Event, Size};
@@ -359,6 +363,9 @@ pub(crate) struct Terminal {
     events: Vec<Event>,
     /// What the user selected, on the screen shown and the scrollback above it (TERM-17).
     selection: Option<Selection>,
+    /// What the user looks for, and what it found on each screen (TERM-18). None while the user
+    /// looks for nothing.
+    find: Option<Find>,
 }
 
 impl Terminal {
@@ -395,6 +402,7 @@ impl Terminal {
             waiting: None,
             events: Vec::new(),
             selection: None,
+            find: None,
         }
     }
 
@@ -477,12 +485,13 @@ impl Terminal {
 
     /// The rows of the screen shown, and of the scrollback above the primary screen, by number.
     pub(crate) fn rows(&self) -> Rows<'_> {
-        Rows {
-            screen: self.screen(),
-            scrollback: &self.scrollback,
-            alternate: self.modes.alternate_screen,
-            cols: self.cols,
-        }
+        rows(
+            &self.primary,
+            &self.alternate,
+            &self.scrollback,
+            self.modes.alternate_screen,
+            self.cols,
+        )
     }
 
     /// Starts a selection `by` at `at`, in place of the one there was.
@@ -512,14 +521,92 @@ impl Terminal {
         self.selection.as_ref()?.selected(self.rows())
     }
 
-    /// Ends the selection if it covers any of `rows`, counted from the top of the screen shown,
-    /// whose text changed or which a scroll numbered anew.
+    // Finding
+
+    /// Looks for `search`, in place of what was looked for, or for nothing. The current match is
+    /// the last that starts at or before where the search before it was, or with none, in or
+    /// above row `from`, by number; or else the first match.
+    pub(crate) fn find(&mut self, search: Option<Search>, from: u64) {
+        let Some(search) = search else {
+            self.find = None;
+            return;
+        };
+        let alternate = self.modes.alternate_screen;
+        if self
+            .find
+            .as_ref()
+            .is_some_and(|find| *find.search() == search)
+        {
+            return;
+        }
+        let before = self.find.as_ref().and_then(|find| find.place(alternate));
+        self.find = Some(Find::new(search, &self.rows(), from, before));
+    }
+
+    /// Searches again what output changed since the matches were found.
+    pub(crate) fn refind(&mut self) {
+        let Self {
+            find,
+            primary,
+            alternate,
+            scrollback,
+            modes,
+            cols,
+            ..
+        } = self;
+        if let Some(find) = find {
+            find.refind(&rows(
+                primary,
+                alternate,
+                scrollback,
+                modes.alternate_screen,
+                *cols,
+            ));
+        }
+    }
+
+    /// Makes the match above the current one current, or below it when not `up`.
+    pub(crate) fn find_next(&mut self, up: bool) {
+        let Self {
+            find,
+            primary,
+            alternate,
+            scrollback,
+            modes,
+            cols,
+            ..
+        } = self;
+        if let Some(find) = find {
+            let rows = rows(
+                primary,
+                alternate,
+                scrollback,
+                modes.alternate_screen,
+                *cols,
+            );
+            find.step(&rows, up);
+        }
+    }
+
+    pub(crate) fn found(&self) -> Option<Found<'_>> {
+        self.find.as_ref()?.found(&self.rows())
+    }
+
+    /// Tells find, and the selection, that `rows`, counted from the top of the screen shown,
+    /// changed their text or were numbered anew by a scroll. The selection ends if it covers any
+    /// of them.
     fn changed(&mut self, rows: Range<usize>) {
+        if self.selection.is_none() && self.find.is_none() {
+            return;
+        }
+        let live = self.scrollback.start() + self.scrollback.len() as u64;
+        let changed = live + rows.start as u64..live + rows.end as u64;
+        if let Some(find) = &mut self.find {
+            find.changed(self.modes.alternate_screen, changed.clone());
+        }
         let Some(selection) = &self.selection else {
             return;
         };
-        let live = self.scrollback.start() + self.scrollback.len() as u64;
-        let changed = live + rows.start as u64..live + rows.end as u64;
         let covered = selection.rows();
         if changed.start <= *covered.end() && *covered.start() < changed.end {
             self.selection = None;
@@ -1253,9 +1340,12 @@ impl Terminal {
             }
             Mode::AlternateScroll => self.modes.alternate_scroll = on,
         }
-        // A selection is of the screen it was made on.
+        // A selection is of the screen it was made on, and the matches are of their screen.
         if self.modes.alternate_screen != shown {
             self.unselect();
+            if let Some(find) = &mut self.find {
+                find.switched(self.modes.alternate_screen);
+            }
         }
         // Each screen has flags of its own, so switching changes the ones in use.
         self.keyboard_changed();
@@ -1299,6 +1389,11 @@ impl Terminal {
         let (title, titles) = (self.title.take(), mem::take(&mut self.titles));
         let mut colors = mem::take(&mut self.colors);
         colors.reset_palette();
+        // What the user looks for is the user's, and stays.
+        let mut find = self.find.take();
+        if let Some(find) = &mut find {
+            find.everything();
+        }
         *self = Self {
             nonce,
             events,
@@ -1306,6 +1401,7 @@ impl Terminal {
             title,
             titles,
             colors,
+            find,
             ..Self::new(self.size(), None)
         };
     }
@@ -1318,6 +1414,9 @@ impl Terminal {
     pub(crate) fn clear(&mut self) {
         self.scrollback.clear();
         self.unselect();
+        if let Some(find) = &mut self.find {
+            find.everything();
+        }
         if self.modes.alternate_screen {
             return;
         }
@@ -1386,6 +1485,9 @@ impl Terminal {
         }
         // The rows are numbered anew.
         self.unselect();
+        if let Some(find) = &mut self.find {
+            find.resized();
+        }
         let alternate = self.modes.alternate_screen;
         let point = |row, col, pending| Some(Point { row, col, pending });
         let mut cursor = point(self.row, self.col, self.pending);
@@ -1495,6 +1597,35 @@ impl Terminal {
         if let Some(selection) = &self.selection {
             selection.check(&self.rows());
         }
+        if let Some(find) = &self.find {
+            find.check(&self.rows());
+        }
+    }
+
+    /// Whether the matches are those a search of the rows gives now, as they are once brought
+    /// up to date. True while the user looks for nothing.
+    #[cfg(any(test, fuzzing))]
+    pub(crate) fn found_fresh(&self) -> bool {
+        self.find
+            .as_ref()
+            .is_none_or(|find| find.is_fresh(&self.rows()))
+    }
+}
+
+/// The rows of the screen shown, the alternate one when `alternate`, by number, with the
+/// scrollback's above the primary screen.
+fn rows<'a>(
+    primary: &'a Screen,
+    alternate_screen: &'a Screen,
+    scrollback: &'a Scrollback,
+    alternate: bool,
+    cols: usize,
+) -> Rows<'a> {
+    Rows {
+        screen: if alternate { alternate_screen } else { primary },
+        scrollback,
+        alternate,
+        cols,
     }
 }
 

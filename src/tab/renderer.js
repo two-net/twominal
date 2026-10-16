@@ -13,7 +13,9 @@
 // moves the rows only as far as the wheel or the trackpad did, which the frame says in device
 // pixels, so text stays sharp while it moves pixel by pixel (ANIM-06); the view is the Rust
 // half's. Only the cursor moves on its own: it blinks, and fades and glides when its settings say, on a canvas of its own
-// that renderer/cursor.js lays over the grid (ANIM-07, ANIM-08). That a frame was drawn is
+// that renderer/cursor.js lays over the grid (ANIM-07, ANIM-08). Over both lies an overlay that
+// takes no room from the grid, where renderer/find.js draws the frame's find bar (UI-02, TERM-18),
+// and where the tab's notices will go (#31, #32). That a frame was drawn is
 // reported at the display's next frame, so frames never come faster than the display shows
 // them, and a hidden window, whose frames are paused, asks for none (PERF-07).
 //
@@ -21,9 +23,11 @@
 // and passes what it measures and that a frame was drawn to the Rust half (#31). The font is a
 // CSS family list ending in the bundled JetBrains Mono and the OS's monospace, so a character
 // the chosen font lacks comes from a fallback font, and paint.js fits it to its cells (FONT-11).
-// Filled in by #22 (grid), #23 (fonts), #24 (ligatures), #25 (cursor) and #26 (scrolling).
+// Filled in by #22 (grid), #23 (fonts), #24 (ligatures), #25 (cursor), #26 (scrolling) and #29
+// (the find bar).
 
 import { Cursor } from "./renderer/cursor.js";
+import { FindBar } from "./renderer/find.js";
 import { forget, paint } from "./renderer/paint.js";
 
 // The faces of a font: regular, bold, italic and both, as CSS names them.
@@ -37,6 +41,8 @@ export class Renderer {
   #canvas;
   #context;
   #cursor;
+  #overlay;
+  #find;
   #onMeasure;
   #onDrawn;
   // The font, as CSS names it, and its size in CSS pixels: the bundled font until the App
@@ -74,6 +80,16 @@ export class Renderer {
     container.append(this.#canvas);
     this.#context = this.#canvas.getContext("2d", { alpha: false });
     this.#cursor = new Cursor(container);
+    // Over the grid and the cursor, as large as the terminal area, and in the way of no click but
+    // on what it holds.
+    this.#overlay = document.createElement("div");
+    Object.assign(this.#overlay.style, {
+      position: "absolute",
+      inset: "0",
+      pointerEvents: "none",
+    });
+    container.append(this.#overlay);
+    this.#find = new FindBar(this.#overlay);
 
     this.#observer = new ResizeObserver(([entry]) => this.#resized(entry));
     try {
@@ -97,6 +113,8 @@ export class Renderer {
   // Paints `frame`, the Rust half's JSON read, at once.
   draw(frame) {
     try {
+      // The bar first: it needs no layout, and a frame that cannot be painted still shows it.
+      this.#find.show(frame.find);
       if (frame.full) {
         this.#lay(frame.full);
       }
@@ -116,9 +134,13 @@ export class Renderer {
   }
 
   // The caret's cell, in CSS pixels from the top left of the terminal area: where the text
-  // being composed starts, or the cursor. The Input Handler's textarea follows it (#31). Null
-  // before the first frame.
+  // being composed starts, or the cursor, or while the find bar has the keys, the caret in its
+  // field. The Input Handler's textarea follows it (#31). Null before the first frame.
   get caret() {
+    const found = this.#find.caret(this.#container);
+    if (found) {
+      return found;
+    }
     const full = this.#full;
     if (!full || !this.#caret) {
       return null;
@@ -139,6 +161,8 @@ export class Renderer {
     this.#unwatch();
     document.fonts.removeEventListener("loadingdone", this.#fontsLoaded);
     this.#cursor.destroy();
+    this.#find.destroy();
+    this.#overlay.remove();
     this.#canvas.remove();
   }
 

@@ -14,7 +14,9 @@
 //! any layout, and `encode.rs` turns it, a paste or a change of focus into the bytes a program
 //! expects, by the modes the Terminal Core keeps (TERM-08, TERM-09, TERM-11, HW-01). Before that,
 //! `shortcut.rs` takes Twominal's own keys: a page of scrolling, Clear (TERM-22), Copy, Paste and
-//! Select All. `mouse.rs` decides whether the mouse and the wheel are the program's, reported as
+//! Select All, and Find, which opens the find bar: while it has the keys, `find.rs` edits its
+//! query with them, and no key reaches the program (TERM-18). `mouse.rs` decides whether the
+//! mouse and the wheel are the program's, reported as
 //! it asked or as cursor keys, or Twominal's own, for selection, links and scrolling to act on
 //! (TERM-10, HW-02). The left button of a gesture that is Twominal's selects, by characters,
 //! words, lines or as a block (TERM-17), and on Linux the middle one pastes the primary
@@ -23,17 +25,22 @@
 //! the webview half keeps.
 //!
 //! Filled in by #20 (keys and input methods), #21 (mouse), #26 (scrolling and Clear), #28
-//! (selection, copy and paste), #43 (shortcuts) and #36–#37 (Scrollback Vim mode).
+//! (selection, copy and paste), #29 (the find bar), #43 (shortcuts) and #36–#37 (Scrollback Vim
+//! mode).
 
 mod encode;
+mod find;
 mod key;
 mod mouse;
 mod shortcut;
 #[cfg(test)]
 mod tests;
 
-use terminal_core::{Modes, Selecting, Size};
+use terminal_core::{Modes, Search, Selecting, Size};
 
+pub use find::FindBar;
+
+use find::Edit;
 use mouse::Mouse;
 use shortcut::Shortcut;
 
@@ -60,6 +67,8 @@ pub struct InputHandler {
     paste_warning: bool,
     /// The paste waiting for the user to confirm it.
     waiting: Option<String>,
+    /// The find bar, open or not, with the query it keeps (TERM-18).
+    find: FindBar,
 }
 
 /// The OS whose keys and mouse an Input Handler reads.
@@ -115,6 +124,27 @@ pub enum InputEvent {
     Mouse(MouseEvent),
     /// The wheel turned, or a trackpad scrolled: `wheel`.
     Wheel(WheelEvent),
+    /// The find bar's buttons, a click in its field, and the menus' Find item (#31).
+    Find(FindEvent),
+}
+
+/// What the user did with the find bar, besides typing into it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FindEvent {
+    /// Open the bar, or give it the keys with its query selected: Edit ▸ Find, as Mod+F does.
+    Open,
+    /// Give the bar the keys: a click in its field.
+    Focus,
+    /// Go to the match above the current one: its ↑ button.
+    Up,
+    /// Go to the match below the current one: its ↓ button.
+    Down,
+    /// Turn letter case counting on or off: its case button.
+    Case,
+    /// Turn reading the query as a regular expression on or off: its regex button.
+    Regex,
+    /// Close the bar: its × button.
+    Close,
 }
 
 /// A key event as the DOM gives it.
@@ -254,6 +284,15 @@ pub enum Action {
     Scroll(f64),
     /// Clear: the screen and the scrollback, keeping the line with the cursor (TERM-22).
     Clear,
+    /// The find bar looks for this now, or for nothing: its query or a toggle changed, it
+    /// opened, or it closed (TERM-18). The Tab has the Terminal Core search, and the view show
+    /// the current match.
+    Find(Option<Search>),
+    /// Go to the match above the current one, toward older output, or below it when not `up`.
+    FindStep { up: bool },
+    /// The find bar changed only how it looks: its caret, what is selected or composed in it,
+    /// or whether it has the keys. The Renderer draws it.
+    FindBar,
 }
 
 /// A mouse event that is Twominal's: where it fell on the grid, and with what.
@@ -310,6 +349,7 @@ impl InputHandler {
             selecting: None,
             paste_warning: true,
             waiting: None,
+            find: FindBar::default(),
         }
     }
 
@@ -355,6 +395,18 @@ impl InputHandler {
                     Action::Send(bytes)
                 });
             }
+            InputEvent::Text(text) if self.find.is_focused() => {
+                let edit = self.find.insert(&text);
+                return self.found(edit);
+            }
+            InputEvent::Compose(text) if self.find.is_focused() => {
+                let edit = self.find.compose(text);
+                return self.found(edit);
+            }
+            InputEvent::SelectAll if self.find.is_focused() => {
+                let edit = self.find.select_all();
+                return self.found(edit);
+            }
             InputEvent::Text(text) => {
                 self.composing.clear();
                 return (!text.is_empty()).then(|| Action::Type(text.into_bytes()));
@@ -372,21 +424,30 @@ impl InputHandler {
             InputEvent::Focus(focused) if modes.focus => encode::focus(focused).to_vec(),
             InputEvent::Focus(_) => return None,
             InputEvent::Mouse(event) => {
-                return match self.mouse.event(&event, modes)? {
-                    Action::Pointer(pointer) => Some(self.point(pointer)),
-                    action => Some(action),
+                // A press on the grid gives the keys back to the program, the bar staying open.
+                let blurred = event.kind == MouseKind::Down && self.find.is_focused();
+                if blurred {
+                    self.find.blur();
+                }
+                return match self.mouse.event(&event, modes) {
+                    Some(Action::Pointer(pointer)) => Some(self.point(pointer)),
+                    Some(action) => Some(action),
+                    None => blurred.then_some(Action::FindBar),
                 };
             }
             InputEvent::Wheel(event) => return self.mouse.wheel(&event, modes),
+            InputEvent::Find(event) => return self.find_event(event),
         };
         (!bytes.is_empty()).then_some(Action::Send(bytes))
     }
 
-    /// What `press`, the key `event`, means if it is a shortcut or a key taken as one: the
-    /// shortcut's action as it goes down or repeats, and nothing as it comes up. None when it is
-    /// neither, and goes to the program. Only a key going down is taken. While it repeats it
-    /// stays taken, whatever modifiers are held by then, and a key the program had stays the
-    /// program's, so a program never hears a repeat or a release without the press.
+    /// What `press`, the key `event`, means if it is a shortcut, a key for the find bar while it
+    /// has the keys, or a key taken as one of those: the action as it goes down or repeats, and
+    /// nothing as it comes up. None when it goes to the program. Only a key going down is taken.
+    /// While it repeats it stays taken, whatever modifiers are held by then, and a key the program
+    /// had stays the program's, so a program never hears a repeat or a release without the
+    /// press. While the bar has the keys, the repeats of a key the program had are dropped, and
+    /// only its release goes on.
     fn shortcut(
         &mut self,
         event: &KeyEvent,
@@ -394,37 +455,48 @@ impl InputHandler {
         modes: &Modes,
     ) -> Option<Option<Action>> {
         let taken = self.taken.iter().position(|code| *code == event.code);
+        let macos = self.os == Os::MacOs;
+        let bar = self.find.is_focused();
         match press.kind {
             Kind::Release => {
                 self.taken.remove(taken?);
                 return Some(None);
             }
             Kind::Repeat => {
-                taken?;
-                let shortcut = shortcut::find(press, modes, self.os == Os::MacOs);
-                return Some(shortcut.and_then(|shortcut| self.act(shortcut)));
+                if taken.is_none() {
+                    return bar.then_some(None);
+                }
+                return Some(match shortcut::read(press, modes, macos) {
+                    Some(shortcut) => self.act(shortcut),
+                    None if bar => self.edit(press),
+                    None => None,
+                });
             }
             Kind::Press => {}
         }
-        let Some(shortcut) = shortcut::find(press, modes, self.os == Os::MacOs) else {
+        let shortcut = shortcut::read(press, modes, macos);
+        if shortcut.is_none() && !bar {
             // Down again, as itself: its release, if it was lost, is the program's.
             if let Some(taken) = taken {
                 self.taken.remove(taken);
             }
             return None;
-        };
+        }
         if taken.is_none() {
             if self.taken.len() == TAKEN {
                 self.taken.remove(0);
             }
             self.taken.push(event.code.clone());
         }
-        Some(self.act(shortcut))
+        Some(match shortcut {
+            Some(shortcut) => self.act(shortcut),
+            None => self.edit(press),
+        })
     }
 
-    /// What `shortcut` does: scroll a page, of as many rows as the grid has, Clear, Copy, Paste
-    /// or Select All.
-    fn act(&self, shortcut: Shortcut) -> Option<Action> {
+    /// What `shortcut` does: scroll a page, of as many rows as the grid has, Clear, Copy, Paste,
+    /// Select All, or Find. While the find bar has the keys Select All selects its query.
+    fn act(&mut self, shortcut: Shortcut) -> Option<Action> {
         match shortcut {
             Shortcut::Page { up } => self
                 .mouse
@@ -433,8 +505,60 @@ impl InputHandler {
             Shortcut::Clear => Some(Action::Clear),
             Shortcut::Copy => Some(Action::Copy),
             Shortcut::Paste => Some(Action::Paste),
+            Shortcut::SelectAll if self.find.is_focused() => {
+                let edit = self.find.select_all();
+                self.found(edit)
+            }
             Shortcut::SelectAll => Some(Action::SelectAll),
+            Shortcut::Find => self.find_event(FindEvent::Open),
         }
+    }
+
+    /// What `press`, a key going down or repeating while the find bar has the keys, does.
+    fn edit(&mut self, press: &key::Press) -> Option<Action> {
+        let edit = self.find.key(press, self.os == Os::MacOs);
+        self.found(edit)
+    }
+
+    /// What the user did with the find bar, besides typing into it. Giving the bar the keys ends
+    /// the text the grid was composing.
+    fn find_event(&mut self, event: FindEvent) -> Option<Action> {
+        let open = self.find.is_open();
+        let edit = match event {
+            FindEvent::Open => {
+                self.composing.clear();
+                self.find.open()
+            }
+            FindEvent::Focus if open => {
+                self.composing.clear();
+                self.find.focus();
+                Edit::Look
+            }
+            FindEvent::Up if open => Edit::Step { up: true },
+            FindEvent::Down if open => Edit::Step { up: false },
+            FindEvent::Case if open => self.find.toggle_case(),
+            FindEvent::Regex if open => self.find.toggle_regex(),
+            FindEvent::Close => self.find.close(),
+            _ => Edit::Nothing,
+        };
+        self.found(edit)
+    }
+
+    /// The action an edit of the find bar is.
+    fn found(&self, edit: Edit) -> Option<Action> {
+        match edit {
+            Edit::Search => Some(Action::Find(self.find.search())),
+            Edit::Look => Some(Action::FindBar),
+            Edit::Step { up } => Some(Action::FindStep { up }),
+            Edit::Close => Some(Action::Find(None)),
+            Edit::Nothing => None,
+        }
+    }
+
+    /// The find bar: whether it is open and has the keys, its query, caret and toggles, for the
+    /// Renderer to draw.
+    pub fn find_bar(&self) -> &FindBar {
+        &self.find
     }
 
     /// What `pointer`, of a gesture that is Twominal's, means. The left button selects: its
@@ -481,6 +605,11 @@ impl InputHandler {
         if text.is_empty() {
             return None;
         }
+        // Into the find bar while it has the keys, where it runs nothing. The paste waiting stays.
+        if self.find.is_focused() {
+            let edit = self.find.insert(&text);
+            return self.found(edit);
+        }
         if self.paste_warning && !modes.bracketed_paste && text.contains(['\n', '\r']) {
             let lines = lines(&text);
             self.waiting = Some(text);
@@ -498,9 +627,14 @@ impl InputHandler {
     }
 
     /// The text an input method is composing, for the Renderer to show at the cursor. Empty
-    /// when nothing is being composed.
+    /// when nothing is being composed there, as while the find bar has the keys: its own is
+    /// the bar's.
     pub fn composing(&self) -> &str {
-        &self.composing
+        if self.find.is_focused() {
+            ""
+        } else {
+            &self.composing
+        }
     }
 }
 

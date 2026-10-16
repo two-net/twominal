@@ -1,8 +1,8 @@
 //! Each row as it is drawn, and how a frame sends it: the text as runs of cells drawn alike, and
 //! the backgrounds as spans.
 //!
-//! A row is built from the core's, with every color filled in, the selection and the text being
-//! composed laid over it (TERM-17, HW-01), and the cells that may join a ligature marked (FONT-04
+//! A row is built from the core's, with every color filled in, find's matches, the selection and
+//! the text being composed laid over it (TERM-18, TERM-17, HW-01), and the cells that may join a ligature marked (FONT-04
 //! to FONT-07). The Renderer compares rows built this way with the ones it sent last, so anything
 //! laid over the screen is drawn and sent the same way.
 
@@ -92,6 +92,26 @@ pub(crate) fn draw(row: &Row, cols: usize, colors: &Colors) -> Line {
         line.resize(cols, Drawn::blank(colors.look(&Style::default())));
     }
     line
+}
+
+/// Draws the cells `cols` of `line`, which a match holds, the current one when `current`, in the
+/// matches' colors (TERM-18), but those of them in `selected`: the selection is drawn over a match.
+/// A matched cell then looks like no cell beside it that is not, so a ligature ends at the match's
+/// edge.
+pub(crate) fn find(
+    line: &mut Line,
+    cols: Range<usize>,
+    selected: &Range<usize>,
+    colors: &Colors,
+    current: bool,
+) {
+    let end = cols.end.min(line.len());
+    let start = cols.start.min(end);
+    for (col, drawn) in line[start..end].iter_mut().enumerate() {
+        if !selected.contains(&(start + col)) {
+            drawn.look = colors.found(drawn.look, current);
+        }
+    }
 }
 
 /// Gives the cells `cols` of `line`, which are selected, the background `selection` (TERM-17).

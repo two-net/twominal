@@ -1,0 +1,346 @@
+# Find (TERM-18, TERM-19): what a search finds on the screen and in the scrollback, which match
+# is current, and how the matches keep up with output. No terminal is the model here: what find
+# takes follows DESIGN.md §3 *Find*, and its matches are those the `regex` crate finds in each
+# line, as copying gives the line.
+
+## Every match is found, on the screen and in the scrollback
+size 6x2
+send foo\r\nbar\r\nfoo
+find foo
+found 2 of 2
+matches
+|***...|
+|......|
+|###...|
+
+## Find starts at the bottom, goes up, and round the ends
+size 6x3
+send ab\r\nab\r\nab
+find ab
+found 3 of 3
+next up
+found 2 of 3
+next up
+found 1 of 3
+next up
+found 3 of 3
+next down
+found 1 of 3
+
+## Letter case does not count unless the toggle says so
+size 12x1
+send Foo foo FOO
+find foo
+found 3 of 3
+matches
+|***.***.###.|
+find case foo
+found 1 of 1
+matches
+|....###.....|
+
+## A match goes on over the rows a line wraps into
+size 4x2
+send abcdefgh
+find def
+found 1 of 1
+matches
+|...#|
+|##..|
+
+## A match does not go on past the end of a line
+size 4x2
+send abc\r\ndef
+find cd
+found 0
+
+## The spaces at the end of a line are not part of it
+size 6x2
+send ab\r\ncd
+find regex b\x20
+found 0
+find regex b$
+found 1 of 1
+
+## Find takes the spaces where a line wraps as part of it
+size 4x2
+send ab\x20\x20cd
+find b\x20\x20c
+matches
+|.###|
+|#...|
+
+## A wide character is found whole
+size 6x1
+send a中b
+find 中
+matches
+|.##...|
+
+## A mark is found with the character it joins
+size 4x1
+send ae\xcc\x81b
+find e\xcc\x81
+matches
+|.#..|
+
+## Two matches in the characters of one cell are one
+# `.` finds the e and the mark joined to it apart, and the cell is the first one's.
+size 4x1
+send ae\xcc\x81b
+find regex .
+found 3 of 3
+matches
+|**#.|
+
+## A regular expression finds what it matches, from the start of each line to its end
+size 10x3
+send 4241\r\n4242\r\nx4243
+find regex ^42[0-9]{2}$
+found 2 of 2
+matches
+|****......|
+|####......|
+|..........|
+
+## A pattern that is none finds nothing, and says so
+size 6x1
+send a(b
+find regex a(
+found invalid
+matches
+|......|
+find a(
+found 1 of 1
+
+## Empty matches are skipped
+size 6x1
+send abc
+find regex x*
+found 0
+
+## Plain text finds the characters a pattern gives a meaning to
+size 12x1
+send a.b+c*d?(e)
+find .b+c*
+matches
+|.#####......|
+
+## Output adds matches
+size 6x2
+find foo
+found 0
+send foo
+found 1 of 1
+
+## Output that writes over a match takes it away
+size 8x1
+send foo bar
+find foo
+found 1 of 1
+send \rx
+found 0
+
+## Output that erases a match takes it away
+size 6x2
+send foo\r\nfoo
+find foo
+found 2 of 2
+send \e[2J
+found 0
+
+## A line that stops wrapping is searched again from where it ends
+# Erasing the last cell of a row ends its line there, so the next row starts one of its own.
+size 2x2
+send abcd
+find regex ^cd
+found 0
+send \e[1;2H\e[X
+found 1 of 1
+matches
+|..|
+|##|
+
+## A line whose first rows are dropped is searched again from the oldest row kept
+size 2x1
+limit 1
+send abcd
+find regex ^cd
+found 0
+send ef
+found 1 of 1
+matches
+|##|
+|..|
+
+## Matches in rows dropped past the scrollback's limit go
+size 4x1
+limit 2
+send ab\r\nab\r\nab
+find ab
+found 3 of 3
+send \r\nab
+found 2 of 3
+matches
+|**..|
+|##..|
+|**..|
+
+## With no scrollback only the screen is searched
+size 4x2
+limit 0
+send ab\r\nab\r\nab
+find ab
+found 2 of 2
+
+## Clear leaves the matches of the line it keeps
+size 4x3
+send ab\r\nab\r\nab
+find ab
+found 3 of 3
+clear
+found 1 of 1
+matches
+|##..|
+|....|
+|....|
+
+## ED 3 takes the scrollback's matches away
+size 4x1
+send ab\r\nab
+find ab
+found 2 of 2
+send \e[3J
+found 1 of 1
+
+## A resize finds the matches again, and the newest is current
+size 6x2
+send foo\r\nfoo\r\nfoo
+find foo
+next up
+found 2 of 3
+resize 3x2
+found 3 of 3
+matches
+|***|
+|***|
+|###|
+
+## The alternate screen is searched alone, and the primary's matches come back after it
+size 6x2
+send foo\r\nfoo\r\nfoo
+find foo
+next up
+found 2 of 3
+send \e[?1049h
+found 0
+send \e[Hfoo
+found 1 of 1
+matches
+|###...|
+|......|
+send \e[?1049l
+found 2 of 3
+
+## A scroll inside the alternate screen moves the matches with their text
+size 6x3
+send \e[?1049hfoo\r\nbar\r\nbaz
+find foo
+matches
+|###...|
+|......|
+|......|
+send \e[H\eM
+matches
+|......|
+|###...|
+|......|
+
+## RIS keeps what is looked for, and finds it again
+size 6x1
+send foo
+find foo
+found 1 of 1
+send \ec
+found 0
+send foo
+found 1 of 1
+
+## The current match stays on its text while output scrolls it
+size 6x2
+send foo\r\nbar\r\nfoo
+find foo
+next up
+found 1 of 2
+send \r\nfoo\r\nbaz
+found 1 of 3
+
+## When the current match goes, the match before it is current
+size 6x3
+send foo\r\nfoo\r\nfoo
+find foo
+next up
+found 2 of 3
+send \e[2;1Hx
+found 1 of 2
+
+## The same search again keeps the current match
+size 6x3
+send foo\r\nfoo\r\nfoo
+find foo
+next up
+found 2 of 3
+find foo
+found 2 of 3
+
+## A new search goes on from where the search before it was
+# The current match is the last that starts at or before it: the same match while it still
+# matches, as a query is typed, and else the one above it.
+size 8x3
+send food\r\nfood\r\nfood
+find foo
+next up
+found 2 of 3
+find food
+found 2 of 3
+find ood
+found 1 of 3
+
+## A query that finds nothing on the way keeps the place
+size 8x3
+send food\r\nfood\r\nfood
+find foo
+next up
+found 2 of 3
+find foox
+found 0
+find foo
+found 2 of 3
+
+## A pattern that is none on the way keeps the place
+size 8x3
+send food\r\nfood\r\nfood
+find regex fo
+next up
+found 2 of 3
+find regex fo[
+found invalid
+find regex fo[o]
+found 2 of 3
+
+## Find looks from the row it is given when it is new
+# The suite gives the screen's last row, as a view at the bottom does, so the newest match
+# above it is current, and the matches below what output brings later come after it.
+size 6x3
+find foo
+send foo\r\nfoo
+found 2 of 2
+
+## Looking for nothing finds nothing
+size 6x1
+send foo
+find foo
+find
+found nothing
+matches
+|......|

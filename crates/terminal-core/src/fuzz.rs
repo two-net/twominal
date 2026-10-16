@@ -7,12 +7,12 @@
 //! rest is the output. The size and the scrollback stand for the window and the settings,
 //! which Twominal trusts, so they are kept small enough to fuzz quickly: a resize reflows
 //! every row the scrollback keeps. Only the output is hostile. The seed also says where the
-//! user selects (TERM-17), and copies.
+//! user selects (TERM-17), and copies, and what the user looks for (TERM-18).
 
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use crate::{Clipboard, Event, Place, Selecting, Size, TerminalCore};
+use crate::{Clipboard, Event, Place, Search, Selecting, Size, TerminalCore};
 
 /// The nonce of the reports in fuzzed output, so that reports are read and not only skipped.
 pub const NONCE: &str = "n1";
@@ -24,6 +24,23 @@ const MAX_ROWS: u16 = 60;
 
 /// The scrollback's limits fuzzed: none, one row, a few, and more than a screenful.
 const LIMITS: [usize; 4] = [0, 1, 7, 64];
+
+/// What the user may look for, and whether it is a regular expression: text, patterns, one that
+/// is no pattern, and what fuzzed output is full of, so that the most matches kept is reached.
+const SEARCHES: [(&str, bool); 12] = [
+    ("a", false),
+    ("ab", false),
+    (" ", false),
+    ("e\u{301}", false),
+    ("\u{4e2d}", false),
+    ("[", false),
+    ("[a-z]+", true),
+    ("^.", true),
+    (".$", true),
+    (r"\w+\s\w", true),
+    ("a.*b", true),
+    ("(", true),
+];
 
 /// xorshift64: the same numbers for the same seed, on every machine.
 pub struct Random(u64);
@@ -79,6 +96,23 @@ impl Random {
             Selecting::Lines,
             Selecting::Block,
         ][self.below(4)]
+    }
+
+    /// Something to look for, letter case counting or not.
+    fn search(&mut self) -> Search {
+        let (query, regex) = SEARCHES[self.below(SEARCHES.len())];
+        Search {
+            query: query.into(),
+            case: self.below(2) == 1,
+            regex,
+        }
+    }
+
+    /// A row of `core` to look from: any there is, or one past them.
+    fn from(&mut self, core: &TerminalCore) -> u64 {
+        let scrollback = core.scrollback();
+        let rows = scrollback.len() + usize::from(core.size().rows) + 1;
+        scrollback.start() + self.below(rows) as u64
     }
 
     /// How much of the `left` bytes to interpret next: one byte, a few, many, or all.
@@ -143,7 +177,9 @@ pub fn input(size: Size, seed: u64, output: &[u8]) -> Vec<u8> {
 /// selection made or moved between some of them. What is selected copies as text with no control
 /// character but the line feed, and no space at the end of a line, and a selection that output
 /// left copies what it did before, but for the rows dropped past the scrollback's limit, which
-/// leave its start (TERM-17).
+/// leave its start (TERM-17). A search is made, moved or ended between pieces too, and the
+/// matches, brought up to date after some of them, are those a search of the rows as they are
+/// finds (TERM-18).
 pub fn interpret(data: &[u8]) {
     let input = Input::read(data);
     let mut random = Random::new(input.seed);
@@ -176,6 +212,9 @@ pub fn interpret(data: &[u8]) {
             }
         }
         check(&core);
+        if random.below(2) == 0 {
+            refind(&mut core);
+        }
         match random.below(32) {
             0..4 => core.resize(random.size()),
             4 => core.set_scrollback(random.limit()),
@@ -186,6 +225,12 @@ pub fn interpret(data: &[u8]) {
             }
             7 => core.extend(random.place(&core)),
             8 => core.select_all(),
+            9..11 => {
+                let (search, from) = (random.search(), random.from(&core));
+                core.find(Some(search), from);
+            }
+            11 => core.find_next(random.below(2) == 0),
+            12 => core.find(None, 0),
             _ => {}
         }
         check(&core);
@@ -213,8 +258,9 @@ pub fn split(data: &[u8]) {
 }
 
 /// A terminal that has interpreted `input`'s output, in pieces as long as `cut` says, and the
-/// events it gave. At a byte the seed chooses, the same in every run, the user selects, so the
-/// output after it ends the selection, or keeps it, the same way however it is cut.
+/// events it gave. At a byte the seed chooses, the same in every run, the user selects and looks
+/// for something, so the output after it ends the selection, or keeps it, and changes the
+/// matches the same way however it is cut. They are brought up to date at the end.
 fn run(input: Input, mut cut: impl FnMut(usize) -> usize) -> (TerminalCore, Vec<Event>) {
     let mut core = input.core();
     let mut events = Vec::new();
@@ -231,8 +277,11 @@ fn run(input: Input, mut cut: impl FnMut(usize) -> usize) -> (TerminalCore, Vec<
             let (at, by) = (chosen.place(&core), chosen.selecting());
             core.select(at, by);
             core.extend(chosen.place(&core));
+            let (search, from) = (chosen.search(), chosen.from(&core));
+            core.find(Some(search), from);
         }
     }
+    core.refind();
     (core, events)
 }
 
@@ -241,6 +290,16 @@ fn run(input: Input, mut cut: impl FnMut(usize) -> usize) -> (TerminalCore, Vec<
 fn is_copy(text: &str) -> bool {
     !text.chars().any(|char| char.is_control() && char != '\n')
         && !text.split('\n').any(|line| line.ends_with(' '))
+}
+
+/// Brings the matches up to date, and panics unless they are what a search of the rows finds.
+fn refind(core: &mut TerminalCore) {
+    core.refind();
+    assert!(
+        core.terminal.found_fresh(),
+        "the matches are not what a search finds: {:?}",
+        core.terminal
+    );
 }
 
 /// Panics if `core` breaks a rule the Terminal Core relies on.

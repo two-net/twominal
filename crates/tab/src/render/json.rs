@@ -18,6 +18,9 @@
 //!   "rows":   [[row, [col, count, color, …], [[col, style, "text"], [col, style, "text", cells], …]], …],
 //!   "cursor": { "cell": [row, col, cells], "color": color, "shape": shape,
 //!               "text": [col, style, "text"], "blink": true, "fade": true, "glide": true },
+//!   "find":   { "query": ["before the caret", "composed", "after it"], "match": [n, count],
+//!               "selected": true, "case": true, "regex": true, "focused": true, "more": true,
+//!               "invalid": true },
 //!   "caret":  [row, col] }
 //! ```
 //!
@@ -43,6 +46,12 @@
 //! filled in its color, from its first cell's top left. `text` is the run under a block,
 //! drawn in the cursor's text color and cut to the cursor's cells: it may start in a cell before
 //! them, as a flag does. Each of `blink`, `fade` and `glide` is there only when true.
+//!
+//! `find` is the find bar, in every frame while it is open. Its query is cut at the caret, with
+//! the text an input method is composing there between. `match` is the current match, counted
+//! from 1, or 0 for none, and how many there are; `more` says there are more than that. Each of
+//! `selected`, the whole query, `case`, `regex`, `focused`, the bar has the keys, `more` and
+//! `invalid`, the query is no pattern, is there only when true.
 
 use std::collections::HashMap;
 use std::fmt::Write;
@@ -51,7 +60,7 @@ use std::hash::Hash;
 use super::color::{Ink, Rgb};
 use super::line::{Cells, Run};
 use super::shapes::Primitive;
-use super::{CursorFrame, Frame, Full};
+use super::{CursorFrame, FindFrame, Frame, Full};
 
 impl Frame {
     /// The frame as JSON text, for the webview half.
@@ -112,6 +121,9 @@ impl Frame {
         if let Some(frame) = &self.cursor {
             write_cursor(&mut cursor, frame, colors.number(frame.color), text);
         }
+        if let Some(find) = &self.find {
+            write_find(&mut cursor, find);
+        }
         out.push_str("\"colors\":[");
         for (index, color) in colors.items.iter().enumerate() {
             if index > 0 {
@@ -168,6 +180,39 @@ fn write_cursor(out: &mut String, cursor: &CursorFrame, color: usize, text: Opti
         (cursor.blinks, "blink"),
         (cursor.fades, "fade"),
         (cursor.glides, "glide"),
+    ] {
+        if on {
+            let _ = write!(out, ",\"{name}\":true");
+        }
+    }
+    out.push_str("},");
+}
+
+/// The find bar, and the comma after it.
+fn write_find(out: &mut String, find: &FindFrame) {
+    let bar = &find.bar;
+    // A caret that is not on a character's start is at the end.
+    let caret = if bar.query.is_char_boundary(bar.caret) {
+        bar.caret
+    } else {
+        bar.query.len()
+    };
+    let (before, after) = bar.query.split_at(caret);
+    out.push_str("\"find\":{\"query\":[");
+    string(out, before);
+    out.push(',');
+    string(out, &bar.composing);
+    out.push(',');
+    string(out, after);
+    let current = find.current.map_or(0, |current| current + 1);
+    let _ = write!(out, "],\"match\":[{current},{}]", find.count);
+    for (on, name) in [
+        (bar.selected, "selected"),
+        (bar.case, "case"),
+        (bar.regex, "regex"),
+        (bar.focused, "focused"),
+        (find.more, "more"),
+        (find.invalid, "invalid"),
     ] {
         if on {
             let _ = write!(out, ",\"{name}\":true");

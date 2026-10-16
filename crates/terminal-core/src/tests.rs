@@ -11,8 +11,8 @@ use alloc::{format, vec};
 use crate::fuzz::{self, Random};
 use crate::width::width;
 use crate::{
-    osc, Cell, Clipboard, Color, Event, LinkId, Place, Report, Selecting, Selection, Size,
-    TerminalCore, ThemeColor,
+    find, osc, Cell, Clipboard, Color, Event, LinkId, Place, Report, Search, Selecting, Selection,
+    Size, TerminalCore, ThemeColor, QUERY,
 };
 
 /// A terminal of `cols` × `rows` that has interpreted `bytes`.
@@ -1062,6 +1062,166 @@ fn rows_are_found_by_their_numbers_on_the_screen_shown() {
     assert!(core.row(0).is_none());
 }
 
+// Finding
+
+/// A search for `query`, as plain text or as a regular expression.
+fn search(query: &str, regex: bool) -> Option<Search> {
+    Some(Search {
+        query: query.to_string(),
+        case: false,
+        regex,
+    })
+}
+
+/// The screen's last row, by number: where find starts from a view at the bottom.
+fn last_row(core: &TerminalCore) -> u64 {
+    let scrollback = core.scrollback();
+    scrollback.start() + scrollback.len() as u64 + u64::from(core.size().rows) - 1
+}
+
+/// The matches `core` has found, up to date, as their rows and the columns of each row.
+fn matches(core: &mut TerminalCore) -> Vec<(u64, core::ops::Range<usize>)> {
+    core.refind();
+    let found = core.found().expect("a search");
+    let scrollback = core.scrollback();
+    let last = last_row(core);
+    (scrollback.start()..=last)
+        .flat_map(|row| found.cols(row).map(move |(cols, _)| (row, cols)))
+        .collect()
+}
+
+#[test]
+fn find_keeps_the_newest_matches_and_says_there_are_more() {
+    let mut core = core(4, 2, &numbered(12));
+    core.find(search("[0-9]+", true), last_row(&core));
+    let found = core.found().expect("a search");
+    assert_eq!((found.count(), found.more()), (find::MOST, true));
+    // The newest: lines 5 to 12, on rows 4 to 11.
+    assert_eq!(matches(&mut core).first(), Some(&(4, 0..1)));
+    // Two of them go, so two older ones come back.
+    core.interpret(b"\x1b[2J");
+    assert_eq!(matches(&mut core).first(), Some(&(2, 0..1)));
+    let found = core.found().expect("a search");
+    assert_eq!((found.count(), found.more()), (find::MOST, true));
+    // With no more to come back, there are no more.
+    core.interpret(b"\x1b[3J");
+    core.refind();
+    let found = core.found().expect("a search");
+    assert_eq!((found.count(), found.more()), (0, false));
+}
+
+#[test]
+fn the_older_matches_left_out_can_go_while_the_newest_stay() {
+    // Found by the fuzzer: the two left out are erased, and the eight kept do not change.
+    let mut core = core(4, 10, &numbered(10));
+    core.find(search("[0-9]+", true), last_row(&core));
+    let found = core.found().expect("a search");
+    assert_eq!((found.count(), found.more()), (find::MOST, true));
+    core.interpret(b"\x1b[H\x1b[2K\x1b[2;1H\x1b[2K");
+    core.refind();
+    let found = core.found().expect("a search");
+    assert_eq!((found.count(), found.more()), (find::MOST, false));
+    assert!(core.terminal.found_fresh());
+}
+
+#[test]
+fn a_long_line_is_searched_in_pieces() {
+    // One line of 24 characters over 12 rows two wide: the pieces are rows 0 to 3, 4 to 7 and 8
+    // to 11, as their numbers are multiples of 4 in the tests.
+    let mut core = core(2, 12, b"abcdefghijklmnopqrstuvwx");
+    core.find(search("fg", false), last_row(&core));
+    assert_eq!(matches(&mut core), [(2, 1..2), (3, 0..1)]);
+    // h is on row 3 and i on row 4.
+    core.find(search("hi", false), last_row(&core));
+    assert_eq!(matches(&mut core), []);
+    // A piece is read with the rows beside it, so i does not start a line.
+    core.find(search("^i", true), last_row(&core));
+    assert_eq!(matches(&mut core), []);
+    core.find(search("^a", true), last_row(&core));
+    assert_eq!(matches(&mut core), [(0, 0..1)]);
+    core.find(search("x$", true), last_row(&core));
+    assert_eq!(matches(&mut core), [(11, 1..2)]);
+}
+
+#[test]
+fn the_row_after_a_piece_reads_the_same_on_the_screen_and_after_it() {
+    // Five rows of one line, the last blank: pieces of rows 0 to 3 and of row 4. The line ends in
+    // row 4, whose blanks are not part of it on the screen or in the scrollback, so `$` finds h.
+    let mut core = core(2, 6, b"abcdefgh  \r\n");
+    core.find(search("h$", true), last_row(&core));
+    assert_eq!(matches(&mut core), [(3, 1..2)]);
+    core.interpret(b"\n\n\n\n\n");
+    assert_eq!(matches(&mut core), [(3, 1..2)]);
+    assert!(core.terminal.found_fresh());
+}
+
+#[test]
+fn matches_keep_up_with_output_as_a_search_of_the_rows_finds() {
+    let mut found = 0;
+    for seed in 1..=40 {
+        let mut random = Random::new(seed);
+        let mut core = core(12, 4, b"");
+        core.set_scrollback(16);
+        let output = [SAMPLE, &hostile(&mut random, 3_000)].concat();
+        let (query, regex) =
+            [("e", false), ("[a-z]+", true), ("^.", true), (" ", false)][random.below(4)];
+        core.find(search(query, regex), last_row(&core));
+        for piece in output.chunks(1 + random.below(64)) {
+            core.interpret(piece);
+            match random.below(16) {
+                0 => core.resize(Size {
+                    cols: 1 + random.below(16) as u16,
+                    rows: 1 + random.below(6) as u16,
+                }),
+                1 => core.clear(),
+                2 => core.set_scrollback(random.below(20)),
+                3 => core.find_next(random.below(2) == 0),
+                _ => {}
+            }
+            if random.below(3) == 0 {
+                core.refind();
+                assert!(core.terminal.found_fresh(), "seed {seed}");
+                core.terminal.check();
+                found += core.found().map_or(0, |found| found.count());
+            }
+        }
+    }
+    // The rule was checked on matches, not only on nothing.
+    assert!(found > 1_000, "{found} matches");
+}
+
+#[test]
+fn reading_the_matches_changes_nothing() {
+    let make = || {
+        let mut core = core(4, 2, b"ab\r\nab\r\nab");
+        core.find(search("ab", false), 2);
+        core.interpret(b"\r\nab");
+        core.refind();
+        core
+    };
+    let (read, unread) = (make(), make());
+    let found = read.found().expect("a search");
+    assert_eq!((found.count(), found.current()), (4, Some(2)));
+    assert_eq!(found.current_rows(), Some(2..=2));
+    assert!(read.terminal == unread.terminal);
+}
+
+#[test]
+fn a_query_keeps_its_first_1024_characters() {
+    let text = "a".repeat(QUERY);
+    // One line of four rows, which find searches as one text.
+    let mut core = core(256, 4, text.as_bytes());
+    core.find(search(&[text.as_str(), "b"].concat(), false), 3);
+    assert_eq!(core.found().map(|found| found.count()), Some(1));
+    // The longest query is a pattern, whatever its characters, in both letter cases.
+    let longest: String = "aäßİσςж中".chars().cycle().take(QUERY).collect();
+    core.find(search(&longest, false), 3);
+    assert_eq!(core.found().map(|found| found.invalid()), Some(false));
+    // A pattern too large to search is not one.
+    core.find(search(r"\w{1000}", true), 3);
+    assert_eq!(core.found().map(|found| found.invalid()), Some(true));
+}
+
 #[test]
 fn resizing_to_the_same_size_changes_nothing() {
     let mut core = core(10, 3, b"\x1b[2;3r0123456789");
@@ -1106,6 +1266,37 @@ fn a_terminal_fits_on_a_small_stack() {
         .join()
         .expect("no overflow");
     assert_eq!(size, Size { cols: 80, rows: 24 });
+}
+
+/// The slowest pattern find searches over the most rows the scrollback keeps, 200 wide: `\b`
+/// over text that is not ASCII, which the lazy DFA leaves to the PikeVM. Run with
+/// `cargo test --release -p terminal-core -- --ignored`.
+#[test]
+#[ignore = "a measurement, for release builds"]
+fn the_slowest_pattern_searches_a_full_scrollback_in_seconds() {
+    let line: String = "\u{421}\u{44a}\u{435}\u{448}\u{44c} \u{436}\u{435} \u{4e2d}\u{6587} "
+        .chars()
+        .cycle()
+        .take(199)
+        .collect();
+    let line = [line.as_bytes(), b"\r\n"].concat();
+    let mut core = TerminalCore::new(
+        Size {
+            cols: 200,
+            rows: 50,
+        },
+        None,
+    );
+    core.set_scrollback(100_000);
+    for _ in 0..100_050 {
+        core.interpret(&line);
+    }
+    let start = std::time::Instant::now();
+    core.find(search(r"(?:\b\w+\b.*){4}z", true), last_row(&core));
+    let seconds = start.elapsed().as_secs_f64();
+    std::println!("{seconds:.1} s");
+    assert_eq!(core.found().map(|found| found.invalid()), Some(false));
+    assert!(seconds < 30.0, "{seconds:.1} s");
 }
 
 /// PERF-06: plain text at 25 MB/s or more. Run with

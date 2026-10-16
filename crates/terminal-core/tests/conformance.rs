@@ -58,6 +58,20 @@
 //! |....|
 //! copy ab\ncd                                             the text copying gives, or with no
 //! copy                                                    text that it gives none
+//! find foo                                                looks for text, or with `case`
+//! find case regex ^a.c                                    first for letter case to count and
+//! find                                                    `regex` for a pattern; for nothing
+//! next up                                                 the match above the current one, or
+//!                                                         `down` below it
+//! found 2 of 5                                            the current match and the count, `+`
+//! found 2 of 5+                                           after it when there are more, `0`
+//! found 0                                                 for none, `invalid` for no pattern
+//! found invalid                                           and `nothing` while nothing is
+//! found nothing                                           looked for
+//! matches                                                 every row there is, the scrollback's
+//! |.**.|                                                  then the screen's, `*` for a cell a
+//! |#...|                                                  match holds and `#` for one of the
+//!                                                         current match's
 //! ```
 //!
 //! A row is the text of its cells. A wide character takes two columns of it, as it does in a
@@ -74,6 +88,9 @@
 //! A row of links has a letter for each cell. `.` is no link, and `a` to `z` the links the case
 //! named before with `link`. Cells with the same letter are one link, and cells with letters of
 //! their own are links of their own, even when the URIs are the same.
+//!
+//! `found` and `matches` first bring the matches up to date, as the Tab does before each frame.
+//! `find` searches from the screen's last row, as from a view at the bottom.
 //!
 //! A place to select is a row and a column counted from 1, as `cursor` counts them, from the
 //! top left of the screen as it is at that step. Row 0 is the scrollback's newest row, -1 the
@@ -95,7 +112,7 @@ use std::fs;
 use std::path::Path;
 
 use terminal_core::{
-    Clipboard, Color, CursorShape, Event, LinkId, Modes, MouseFormat, MouseTracking, Place,
+    Clipboard, Color, CursorShape, Event, LinkId, Modes, MouseFormat, MouseTracking, Place, Search,
     Selecting, Selection, Size, Style, TerminalCore, ThemeColor, Underline,
 };
 
@@ -187,6 +204,13 @@ enum Kind {
     /// The rows of selected cells, as the case drew them.
     Selected(Vec<String>),
     Copy(Option<String>),
+    Find(Option<Search>),
+    /// The match above the current one when true, or below it.
+    Next(bool),
+    /// What find found, as the case wrote it after `found`.
+    Found(String),
+    /// Every row there is as the case drew its matches.
+    Matches(Vec<String>),
 }
 
 /// A place to select as a case writes it: the row and the column counted from 1 from the
@@ -328,7 +352,11 @@ fn parse(file: &str, text: &str, problems: &mut Vec<String>) -> Vec<Case> {
     // The size the case has reached: rows are drawn at it.
     let mut now = Size { cols: 0, rows: 0 };
     let mut broken = false;
-    let mut lines = text.lines().enumerate().map(|(at, line)| (at + 1, line));
+    let mut lines = text
+        .lines()
+        .enumerate()
+        .map(|(at, line)| (at + 1, line))
+        .peekable();
 
     while let Some((line, content)) = lines.next() {
         let mut problem = |why: String| problems.push(format!("{file}:{line}: {why}"));
@@ -417,6 +445,24 @@ fn parse(file: &str, text: &str, problems: &mut Vec<String>) -> Vec<Case> {
                     }
                 }
                 why.map_or(Ok(Kind::Selected(rows)), Err)
+            }
+            "find" if rest.is_empty() => Ok(Kind::Find(None)),
+            "find" => parse_find(rest),
+            "next" if rest == "up" => Ok(Kind::Next(true)),
+            "next" if rest == "down" => Ok(Kind::Next(false)),
+            "found" if !rest.is_empty() => Ok(Kind::Found(rest.to_string())),
+            "matches" if rest.is_empty() => {
+                let mut rows = Vec::new();
+                let mut why = None;
+                while let Some((at, row)) = lines.next_if(|(_, row)| row.starts_with('|')) {
+                    match parse_matches(row, now.cols) {
+                        Ok(()) => rows.push(row.to_string()),
+                        Err(error) => {
+                            why.get_or_insert(format!("row on line {at}: {error}"));
+                        }
+                    }
+                }
+                why.map_or(Ok(Kind::Matches(rows)), Err)
             }
             "scrollback" => match rest.parse::<usize>() {
                 Ok(count) => read_rows(&mut lines, count, "scrollback").map(Kind::Scrollback),
@@ -599,6 +645,38 @@ fn parse_selected(text: &str, cols: u16) -> Result<(), String> {
         ))?;
     if let Some(other) = inside.chars().find(|char| !matches!(char, '*' | '.')) {
         return Err(format!("{other:?} is neither * nor ."));
+    }
+    let cells = inside.chars().count();
+    if cells != usize::from(cols) {
+        return Err(format!("{cells} cells on a screen {cols} wide"));
+    }
+    Ok(())
+}
+
+/// What `find` looks for: `case` and `regex` first, in that order, then the text, which may
+/// start with neither word and a space.
+fn parse_find(text: &str) -> Result<Kind, String> {
+    let (case, text) = match text.strip_prefix("case ") {
+        Some(rest) => (true, rest),
+        None => (false, text),
+    };
+    let (regex, text) = match text.strip_prefix("regex ") {
+        Some(rest) => (true, rest),
+        None => (false, text),
+    };
+    let query =
+        String::from_utf8(unescape(text)?).map_err(|_| "a query that is not UTF-8".to_string())?;
+    Ok(Kind::Find(Some(Search { query, case, regex })))
+}
+
+/// Checks a row of matches drawn as `|`, `.`, `*` or `#` for each of the `cols` cells, and `|`.
+fn parse_matches(text: &str, cols: u16) -> Result<(), String> {
+    let inside = text
+        .strip_prefix('|')
+        .and_then(|inside| inside.strip_suffix('|'))
+        .ok_or(format!("{text:?} is not a row of matches between two |"))?;
+    if let Some(other) = inside.chars().find(|char| !matches!(char, '*' | '#' | '.')) {
+        return Err(format!("{other:?} is none of *, # and ."));
     }
     let cells = inside.chars().count();
     if cells != usize::from(cols) {
@@ -1037,6 +1115,28 @@ fn run(case: &Case, bytewise: bool) -> Vec<(usize, String)> {
                     ));
                 }
             }
+            Kind::Find(search) => {
+                let last = live(&core) as u64 + u64::from(core.size().rows) - 1;
+                core.find(search.clone(), last);
+            }
+            Kind::Next(up) => core.find_next(*up),
+            Kind::Found(expected) => {
+                core.refind();
+                let actual = describe_found(&core);
+                if actual != *expected {
+                    problem(format!("expected found {expected}, got found {actual}"));
+                }
+            }
+            Kind::Matches(expected) => {
+                core.refind();
+                let actual = draw_matches(&core);
+                if actual != expected.join("\n") {
+                    problem(format!(
+                        "the matches differ\nexpected\n{}\ngot\n{actual}",
+                        expected.join("\n")
+                    ));
+                }
+            }
             Kind::Copy(expected) => {
                 let actual = core.copy();
                 if actual != *expected {
@@ -1094,6 +1194,48 @@ fn draw_selected(core: &TerminalCore) -> String {
                 .map(|col| if taken.contains(&col) { '*' } else { '.' })
                 .collect();
             format!("|{cells}|")
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// What find found, as a case writes it after `found`.
+fn describe_found(core: &TerminalCore) -> String {
+    match core.found() {
+        None => "nothing".to_string(),
+        Some(found) if found.invalid() => "invalid".to_string(),
+        Some(found) => match found.current() {
+            None => "0".to_string(),
+            Some(current) => format!(
+                "{} of {}{}",
+                current + 1,
+                found.count(),
+                if found.more() { "+" } else { "" }
+            ),
+        },
+    }
+}
+
+/// Every row there is, the scrollback's then the screen's, as a case draws the matches: `*` for
+/// a cell a match holds and `#` for one the current match does.
+fn draw_matches(core: &TerminalCore) -> String {
+    let found = core.found();
+    let cols = usize::from(core.size().cols);
+    let first = if core.modes().alternate_screen {
+        live(core) as u64
+    } else {
+        core.scrollback().start()
+    };
+    let last = live(core) as u64 + u64::from(core.size().rows);
+    (first..last)
+        .map(|number| {
+            let mut cells = vec!['.'; cols];
+            for (taken, current) in found.iter().flat_map(|found| found.cols(number)) {
+                for cell in &mut cells[taken] {
+                    *cell = if current { '#' } else { '*' };
+                }
+            }
+            format!("|{}|", cells.into_iter().collect::<String>())
         })
         .collect::<Vec<_>>()
         .join("\n")

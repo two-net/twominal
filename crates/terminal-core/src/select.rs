@@ -14,8 +14,8 @@
 use alloc::string::String;
 use core::ops::{Range, RangeInclusive};
 
-use crate::screen::{Cell, Row, Screen};
-use crate::scrollback::Scrollback;
+use crate::rows::Rows;
+use crate::screen::{Cell, Row};
 
 /// What a word does not hold, besides blanks: Alacritty's `semantic_escape_chars`. So a path
 /// and a URL's parts are words, and `file.rs:12` is two.
@@ -66,55 +66,7 @@ pub(crate) struct Selection {
     to: Spot,
 }
 
-/// The rows of the screen shown, and of the scrollback above the primary screen, by number.
-#[derive(Clone, Copy)]
-pub(crate) struct Rows<'a> {
-    pub(crate) screen: &'a Screen,
-    pub(crate) scrollback: &'a Scrollback,
-    /// The alternate screen is shown, which has no scrollback above it.
-    pub(crate) alternate: bool,
-    pub(crate) cols: usize,
-}
-
-impl<'a> Rows<'a> {
-    /// The number of the screen's first row.
-    fn live(&self) -> u64 {
-        self.scrollback.start() + self.scrollback.len() as u64
-    }
-
-    /// The number of the oldest row there is.
-    fn first(&self) -> u64 {
-        if self.alternate {
-            self.live()
-        } else {
-            self.scrollback.start()
-        }
-    }
-
-    /// The number of the screen's last row.
-    fn last(&self) -> u64 {
-        self.live() + self.screen.rows().len() as u64 - 1
-    }
-
-    /// Row `number`, if there is one.
-    pub(crate) fn get(&self, number: u64) -> Option<&'a Row> {
-        if number < self.first() {
-            return None;
-        }
-        match number.checked_sub(self.live()) {
-            Some(on_screen) => self.screen.rows().get(usize::try_from(on_screen).ok()?),
-            None => self
-                .scrollback
-                .get((number - self.scrollback.start()) as usize),
-        }
-    }
-
-    /// The cell at `col` of row `number`'s line, if the line reaches it. A scrollback row is
-    /// kept without the blanks at its end, and a row that wraps early without its last cell.
-    fn cell(&self, number: u64, col: usize) -> Option<&'a Cell> {
-        self.get(number)?.line().get(col)
-    }
-
+impl Rows<'_> {
     /// The boundary `at` falls on, taken to the nearest there is. Above the first row it is
     /// that row's start and below the last that row's end, as a drag past the edge selects to
     /// them; for a block the row and the column are each taken to their nearest.

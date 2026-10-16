@@ -52,6 +52,12 @@ pub struct Palette {
     pub cursor_text: Rgb,
     /// The background of the cells selected (TERM-17). Their text keeps its color.
     pub selection: Rgb,
+    /// The background of the cells find's matches hold (TERM-18).
+    pub find: Rgb,
+    /// The background of the cells the current match holds.
+    pub find_current: Rgb,
+    /// The color of the text the matches hold, on either background.
+    pub find_text: Rgb,
 }
 
 /// The levels of each component in xterm's 6×6×6 cube, colors 16 to 231.
@@ -103,6 +109,10 @@ pub(crate) struct Colors {
     pub(crate) cursor_text: Rgb,
     /// The theme's: no program sets it.
     pub(crate) selection: Rgb,
+    /// The theme's, as are the next two: no program sets them.
+    pub(crate) find: Rgb,
+    pub(crate) find_current: Rgb,
+    pub(crate) find_text: Rgb,
     /// The 256 colors SGR names by number.
     indexed: [Rgb; 256],
 }
@@ -122,6 +132,9 @@ impl Colors {
             cursor: color(ThemeColor::Cursor),
             cursor_text: palette.cursor_text,
             selection: palette.selection,
+            find: palette.find,
+            find_current: palette.find_current,
+            find_text: palette.find_text,
             indexed: std::array::from_fn(|index| color(ThemeColor::Palette(index as u8))),
         }
     }
@@ -180,6 +193,30 @@ impl Colors {
                 ink.underline_color
             },
             ..ink
+        }
+    }
+
+    /// How a cell that looks like `look` is drawn when a match holds it, the current one when
+    /// `current`: on the match's background, its text in the matches' color, its underline too
+    /// unless the underline has a color of its own. Its attributes stay.
+    pub(crate) fn found(&self, look: Look, current: bool) -> Look {
+        let ink = look.ink;
+        Look {
+            ink: Ink {
+                color: self.find_text,
+                underline_color: if ink.underline_color == ink.color {
+                    self.find_text
+                } else {
+                    ink.underline_color
+                },
+                ..ink
+            },
+            background: if current {
+                self.find_current
+            } else {
+                self.find
+            },
+            hidden: look.hidden,
         }
     }
 

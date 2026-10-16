@@ -12,6 +12,17 @@ publish = false
 # with it. Compare again before raising it.
 unicode-width = { version = "=0.2.2", default-features = false }
 vte = { version = "0.15", default-features = false }
+# Find (TERM-18, TERM-19): the meta regex, without std. Its searches take time linear in the
+# text, whatever the pattern (REL-02).
+regex-automata = { version = "0.4", default-features = false, features = [
+    "alloc",
+    "syntax",
+    "meta",
+    "nfa-pikevm",
+    "hybrid",
+    "perf-literal-substring",
+    "unicode",
+] }
 
 # cargo-fuzz builds with `--cfg fuzzing`, which makes `fuzz.rs` public for the fuzz crate.
 [lints.rust]

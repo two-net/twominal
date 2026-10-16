@@ -6,7 +6,7 @@
 //! DESIGN.md §3 lists. The kitty cases are kitty's own, from `kitty_tests/keys.py`, given as
 //! the DOM would give the key. The mouse's reports are xterm's, from `button.c`.
 
-use terminal_core::{Keyboard, Modes, MouseFormat, MouseTracking};
+use terminal_core::{Keyboard, Modes, MouseFormat, MouseTracking, Search};
 
 use super::*;
 
@@ -142,7 +142,10 @@ fn sent_on(macos: bool, modes: &Modes, event: &Event) -> String {
             | Action::Paste
             | Action::PastePrimary
             | Action::SelectAll
-            | Action::ConfirmPaste { .. }),
+            | Action::ConfirmPaste { .. }
+            | Action::Find(_)
+            | Action::FindStep { .. }
+            | Action::FindBar),
         ) => {
             panic!("a key meant {action:?}")
         }
@@ -1299,7 +1302,7 @@ fn focus_is_reported_when_the_program_asked() {
 /// Whether `event` is one of Twominal's shortcuts on Linux, which the program never hears.
 fn is_shortcut(event: &Event, modes: &Modes) -> bool {
     super::key::read(&event.0, false)
-        .is_some_and(|press| super::shortcut::find(&press, modes, false).is_some())
+        .is_some_and(|press| super::shortcut::read(&press, modes, false).is_some())
 }
 
 /// What `event` means to an Input Handler as on macOS or not, with a grid of 24 rows.
@@ -1482,6 +1485,393 @@ fn a_key_taken_repeats_as_taken_and_its_release_is_dropped() {
         handle(key("PageUp").release()),
         Some(Action::Send(_))
     ));
+}
+
+// ---------------------------------------------------------------------------------------
+// The find bar (TERM-18)
+// ---------------------------------------------------------------------------------------
+
+/// What `query` looks for, letter case not counting, as plain text.
+fn looks_for(query: &str) -> Option<Action> {
+    Some(Action::Find(Some(Search {
+        query: query.to_string(),
+        case: false,
+        regex: false,
+    })))
+}
+
+/// An Input Handler as on macOS or not whose find bar is open and has the keys.
+fn bar(macos: bool) -> InputHandler {
+    let mut input = InputHandler::on(os(macos));
+    input.resize(GRID);
+    input.handle(InputEvent::Find(FindEvent::Open), &Modes::default());
+    input
+}
+
+/// What the key `event` means to `input`, with no mode set.
+fn press(input: &mut InputHandler, event: Event) -> Option<Action> {
+    input.handle(InputEvent::Key(event.0), &Modes::default())
+}
+
+/// Types `text` into `input`, a key at a time.
+fn type_in(input: &mut InputHandler, text: &str) {
+    for char in text.chars() {
+        press(input, key(&char.to_string()));
+    }
+}
+
+/// The find bar's query, with `|` where its caret is.
+fn query(input: &InputHandler) -> String {
+    let bar = input.find_bar();
+    let mut query = bar.query().to_string();
+    query.insert(bar.caret(), '|');
+    query
+}
+
+#[test]
+fn find_is_mod_with_f_and_gives_the_bar_the_keys() {
+    for modes in [Modes::default(), flags(0b11111)] {
+        for (macos, event) in [
+            (true, key("f").meta()),
+            (false, key("F").ctrl().shift()),
+            // On a layout that types no ASCII there, the key in its place on a US keyboard.
+            (false, key("А").code("KeyF").ctrl().shift()),
+            // On Dvorak, the key that types f.
+            (true, key("f").code("KeyY").meta()),
+        ] {
+            let mut input = InputHandler::on(os(macos));
+            // An empty query looks for nothing.
+            assert_eq!(
+                input.handle(InputEvent::Key(event.0.clone()), &modes),
+                Some(Action::Find(None))
+            );
+            assert!(input.find_bar().is_open() && input.find_bar().is_focused());
+        }
+    }
+    // Each OS's keys only, and Ctrl with the letter alone is still the program's.
+    assert_ne!(
+        shortcut_on(true, &Modes::default(), &key("F").ctrl().shift()),
+        Some(Action::Find(None))
+    );
+    assert_eq!(sent(&key("f").ctrl()), "\x06");
+}
+
+#[test]
+fn the_bar_edits_its_query_as_a_text_field_on_linux() {
+    let mut input = bar(false);
+    assert_eq!(press(&mut input, key("f")), looks_for("f"));
+    type_in(&mut input, "oo bar");
+    assert_eq!(query(&input), "foo bar|");
+    assert_eq!(press(&mut input, key("Backspace")), looks_for("foo ba"));
+    assert_eq!(press(&mut input, key("ArrowLeft")), Some(Action::FindBar));
+    assert_eq!(query(&input), "foo b|a");
+    press(&mut input, key("Home"));
+    assert_eq!(query(&input), "|foo ba");
+    assert_eq!(press(&mut input, key("Delete")), looks_for("oo ba"));
+    press(&mut input, key("ArrowRight").ctrl());
+    assert_eq!(query(&input), "oo| ba");
+    press(&mut input, key("End"));
+    press(&mut input, key("Backspace").ctrl());
+    assert_eq!(query(&input), "oo |");
+    press(&mut input, key("Home"));
+    press(&mut input, key("Delete").ctrl());
+    assert_eq!(query(&input), "| ");
+    // Nothing to move past or delete.
+    assert_eq!(press(&mut input, key("ArrowLeft")), None);
+    // Shift moves, the bar selecting only the whole query.
+    press(&mut input, key("End").shift());
+    assert_eq!(query(&input), " |");
+    // A typed character with AltGr.
+    assert_eq!(
+        press(&mut input, key("€").alt_graph().ctrl().alt()),
+        looks_for(" €")
+    );
+}
+
+#[test]
+fn the_bar_edits_its_query_as_a_text_field_on_macos() {
+    let mut input = bar(true);
+    type_in(&mut input, "foo bar");
+    press(&mut input, key("Backspace").alt());
+    assert_eq!(query(&input), "foo |");
+    press(&mut input, key("ArrowLeft").alt());
+    assert_eq!(query(&input), "|foo ");
+    press(&mut input, key("ArrowRight").meta());
+    assert_eq!(query(&input), "foo |");
+    // Option types what the layout gives it.
+    assert_eq!(
+        press(&mut input, key("é").code("KeyE").alt()),
+        looks_for("foo é")
+    );
+    press(&mut input, key("ArrowLeft").meta());
+    press(&mut input, key("ArrowRight"));
+    press(&mut input, key("Backspace").meta());
+    assert_eq!(query(&input), "|oo é");
+    // Cmd with another key is nothing, and types nothing.
+    assert_eq!(press(&mut input, key("x").meta()), None);
+}
+
+#[test]
+fn enter_steps_up_shift_enter_down_and_esc_closes() {
+    for macos in [true, false] {
+        let mut input = bar(macos);
+        type_in(&mut input, "x");
+        assert_eq!(
+            press(&mut input, key("Enter")),
+            Some(Action::FindStep { up: true })
+        );
+        assert_eq!(
+            press(&mut input, key("Enter").shift()),
+            Some(Action::FindStep { up: false })
+        );
+        assert_eq!(
+            press(&mut input, key("Enter").code("NumpadEnter")),
+            Some(Action::FindStep { up: true })
+        );
+        assert_eq!(press(&mut input, key("Escape")), Some(Action::Find(None)));
+        assert!(!input.find_bar().is_open());
+        // Esc is the program's again.
+        assert_eq!(
+            press(&mut input, key("Escape")),
+            Some(Action::Type(b"\x1b".to_vec()))
+        );
+    }
+}
+
+#[test]
+fn the_toggles_are_cmd_option_on_macos_and_alt_elsewhere() {
+    let search = |case, regex| {
+        Some(Action::Find(Some(Search {
+            query: "x".to_string(),
+            case,
+            regex,
+        })))
+    };
+    let mut input = bar(true);
+    type_in(&mut input, "x");
+    assert_eq!(
+        press(&mut input, key("ç").code("KeyC").alt().meta()),
+        search(true, false)
+    );
+    assert_eq!(
+        press(&mut input, key("®").code("KeyR").alt().meta()),
+        search(true, true)
+    );
+    // Option alone types.
+    assert_eq!(
+        press(&mut input, key("ç").code("KeyC").alt()),
+        Some(Action::Find(Some(Search {
+            query: "xç".to_string(),
+            case: true,
+            regex: true,
+        })))
+    );
+    let mut input = bar(false);
+    type_in(&mut input, "x");
+    assert_eq!(press(&mut input, key("c").alt()), search(true, false));
+    assert_eq!(press(&mut input, key("r").alt()), search(true, true));
+    assert_eq!(press(&mut input, key("c").alt()), search(false, true));
+}
+
+#[test]
+fn no_key_reaches_the_program_while_the_bar_has_the_keys() {
+    // Every key and every release would be reported.
+    let modes = flags(0b11111);
+    for event in every_key() {
+        for event in with_every_modifier(&event) {
+            if is_shortcut(&event, &modes) {
+                continue;
+            }
+            let mut input = bar(false);
+            for kind in [Kind::Press, Kind::Repeat, Kind::Release] {
+                let mut event = event.0.clone();
+                event.kind = kind;
+                let action = input.handle(InputEvent::Key(event.clone()), &modes);
+                assert!(
+                    !matches!(action, Some(Action::Type(_) | Action::Send(_))),
+                    "{event:?} meant {action:?}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn a_key_the_program_had_goes_on_being_the_programs() {
+    let modes = flags(0b11111);
+    let mut input = InputHandler::on(Os::Linux);
+    let handle =
+        |input: &mut InputHandler, event: Event| input.handle(InputEvent::Key(event.0), &modes);
+    assert!(matches!(
+        handle(&mut input, key("x")),
+        Some(Action::Type(_))
+    ));
+    input.handle(InputEvent::Find(FindEvent::Open), &modes);
+    // Its repeats are dropped while the bar has the keys, and its release is the program's.
+    assert_eq!(handle(&mut input, key("x").repeat()), None);
+    assert!(matches!(
+        handle(&mut input, key("x").release()),
+        Some(Action::Send(_))
+    ));
+    // Esc closes the bar, and the program does not hear it come up.
+    assert_eq!(handle(&mut input, key("Escape")), Some(Action::Find(None)));
+    assert_eq!(handle(&mut input, key("Escape").release()), None);
+    // A key held in the bar repeats there.
+    input.handle(InputEvent::Find(FindEvent::Open), &modes);
+    type_in(&mut input, "ab");
+    assert_eq!(handle(&mut input, key("Backspace")), looks_for("a"));
+    assert_eq!(
+        handle(&mut input, key("Backspace").repeat()),
+        Some(Action::Find(None))
+    );
+}
+
+#[test]
+fn the_bar_takes_pastes_and_what_an_input_method_commits() {
+    let modes = Modes::default();
+    let mut input = warning();
+    // A paste waits to be confirmed, and the bar does not take its place.
+    assert_eq!(
+        input.paste("ls\nrm".to_string(), &modes),
+        Some(Action::ConfirmPaste { lines: 2 })
+    );
+    input.handle(InputEvent::Find(FindEvent::Open), &modes);
+    assert_eq!(
+        input.paste("a\nb\tc".to_string(), &modes),
+        looks_for("a b c")
+    );
+    assert_eq!(
+        input.handle(InputEvent::Paste("d".to_string()), &modes),
+        looks_for("a b cd")
+    );
+    // The text being composed is the bar's, and not at the cursor.
+    assert_eq!(
+        input.handle(InputEvent::Compose("に".to_string()), &modes),
+        Some(Action::FindBar)
+    );
+    assert_eq!(input.find_bar().composing(), "に");
+    assert_eq!(input.composing(), "");
+    assert_eq!(
+        input.handle(InputEvent::Text("日".to_string()), &modes),
+        looks_for("a b cd日")
+    );
+    assert_eq!(input.find_bar().composing(), "");
+    input.handle(InputEvent::Find(FindEvent::Close), &modes);
+    assert_eq!(
+        input.confirm_paste(true, &modes),
+        Some(Action::Type(b"ls\rrm".to_vec()))
+    );
+}
+
+#[test]
+fn a_query_keeps_1024_characters() {
+    let mut input = bar(false);
+    let long = "x".repeat(2000);
+    input.paste(long, &Modes::default());
+    assert_eq!(input.find_bar().query().chars().count(), 1024);
+    assert_eq!(press(&mut input, key("y")), None);
+    assert_eq!(input.find_bar().query().chars().count(), 1024);
+}
+
+#[test]
+fn an_input_method_that_commits_nothing_leaves_the_query() {
+    let modes = Modes::default();
+    let mut input = bar(false);
+    type_in(&mut input, "foo");
+    input.handle(InputEvent::SelectAll, &modes);
+    assert_eq!(input.handle(InputEvent::Text(String::new()), &modes), None);
+    input.handle(InputEvent::Compose("に".to_string()), &modes);
+    assert_eq!(
+        input.handle(InputEvent::Text(String::new()), &modes),
+        Some(Action::FindBar)
+    );
+    assert_eq!(input.find_bar().query(), "foo");
+    assert!(input.find_bar().is_selected());
+}
+
+#[test]
+fn mod_f_again_selects_the_query_and_typing_takes_its_place() {
+    let modes = Modes::default();
+    let mut input = bar(true);
+    type_in(&mut input, "ab");
+    press(&mut input, key("Escape"));
+    // The bar opens with the query it had, selected.
+    assert_eq!(press(&mut input, key("f").meta()), looks_for("ab"));
+    assert!(input.find_bar().is_selected());
+    assert_eq!(press(&mut input, key("c")), looks_for("c"));
+    // Mod+A and the webview's Select All select it while the bar has the keys.
+    assert_eq!(press(&mut input, key("a").meta()), Some(Action::FindBar));
+    assert_eq!(press(&mut input, key("ArrowLeft")), Some(Action::FindBar));
+    assert_eq!(query(&input), "|c");
+    assert_eq!(
+        input.handle(InputEvent::SelectAll, &modes),
+        Some(Action::FindBar)
+    );
+    assert_eq!(
+        press(&mut input, key("Backspace")),
+        Some(Action::Find(None))
+    );
+    // Copy is still the selection's.
+    assert_eq!(press(&mut input, key("c").meta()), Some(Action::Copy));
+}
+
+#[test]
+fn a_press_on_the_grid_gives_the_keys_back() {
+    let modes = Modes::default();
+    let mut input = bar(false);
+    type_in(&mut input, "x");
+    assert!(matches!(
+        input.handle(down(1, 1).into(), &modes),
+        Some(Action::Select(..))
+    ));
+    assert!(input.find_bar().is_open() && !input.find_bar().is_focused());
+    assert_eq!(
+        press(&mut input, key("y")),
+        Some(Action::Type(b"y".to_vec()))
+    );
+    // A click in the field gives them to the bar again.
+    assert_eq!(
+        input.handle(InputEvent::Find(FindEvent::Focus), &modes),
+        Some(Action::FindBar)
+    );
+    assert_eq!(press(&mut input, key("y")), looks_for("xy"));
+}
+
+#[test]
+fn the_bars_buttons() {
+    let modes = Modes::default();
+    let mut input = InputHandler::on(Os::Linux);
+    let find = |input: &mut InputHandler, event| input.handle(InputEvent::Find(event), &modes);
+    // Closed, they do nothing.
+    for event in [
+        FindEvent::Focus,
+        FindEvent::Up,
+        FindEvent::Down,
+        FindEvent::Case,
+        FindEvent::Regex,
+        FindEvent::Close,
+    ] {
+        assert_eq!(find(&mut input, event), None, "{event:?}");
+    }
+    assert_eq!(find(&mut input, FindEvent::Open), Some(Action::Find(None)));
+    type_in(&mut input, "x");
+    assert_eq!(
+        find(&mut input, FindEvent::Up),
+        Some(Action::FindStep { up: true })
+    );
+    assert_eq!(
+        find(&mut input, FindEvent::Down),
+        Some(Action::FindStep { up: false })
+    );
+    assert_eq!(
+        find(&mut input, FindEvent::Regex),
+        Some(Action::Find(Some(Search {
+            query: "x".to_string(),
+            case: false,
+            regex: true,
+        })))
+    );
+    assert_eq!(find(&mut input, FindEvent::Close), Some(Action::Find(None)));
 }
 
 #[test]

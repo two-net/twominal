@@ -6,7 +6,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use terminal_core::{
-    Color, CursorShape, Place, Selecting, Size, Style, TerminalCore, ThemeColor, Underline,
+    Color, CursorShape, Place, Search, Selecting, Size, Style, TerminalCore, ThemeColor, Underline,
 };
 
 use super::color::Ink;
@@ -22,6 +22,9 @@ fn palette() -> Palette {
         cursor: Rgb::new(250, 250, 0),
         cursor_text: Rgb::new(0, 0, 50),
         selection: Rgb::new(60, 60, 120),
+        find: Rgb::new(200, 160, 0),
+        find_current: Rgb::new(250, 120, 0),
+        find_text: Rgb::new(0, 0, 0),
     }
 }
 
@@ -677,7 +680,7 @@ fn frames_add_up_to_what_a_full_frame_draws() {
 
         for step in 0..40 {
             core.interpret(output(&mut random).as_bytes());
-            match random.below(18) {
+            match random.below(20) {
                 0 => {
                     let size = Size {
                         cols: 1 + random.below(24) as u16,
@@ -760,8 +763,23 @@ fn frames_add_up_to_what_a_full_frame_draws() {
                         core.extend(at);
                     }
                 }
+                // The user looks for something, or goes to another match.
+                16 | 17 => {
+                    let (query, regex) =
+                        [("l", false), ("E", false), ("[a-z]+", true), ("^.", true)]
+                            [random.below(4)];
+                    let search = Search {
+                        query: query.to_string(),
+                        case: random.below(2) == 0,
+                        regex,
+                    };
+                    core.find(Some(search), live(&core) + u64::from(core.size().rows) - 1);
+                }
+                18 => core.find_next(random.below(2) == 0),
                 _ => {}
             }
+            // The Tab brings the matches up to date before each frame.
+            core.refind();
             let composing = random.pick(&composings);
             if let Some(frame) = renderer.frame(&core, composing) {
                 if frame.full.is_none() && frame.rows.is_empty() {
@@ -923,6 +941,210 @@ fn a_wide_character_at_a_blocks_edge_is_highlighted_whole() {
             color: selection,
         }]
     );
+}
+
+// ---------------------------------------------------------------------------------------
+// Find (TERM-18)
+// ---------------------------------------------------------------------------------------
+
+/// The number of `core`'s screen's first row.
+fn live(core: &TerminalCore) -> u64 {
+    let scrollback = core.scrollback();
+    scrollback.start() + scrollback.len() as u64
+}
+
+/// Has `core` look for `query`, as plain text or a regular expression, from its last row.
+fn find(core: &mut TerminalCore, query: &str, regex: bool) {
+    let search = Search {
+        query: query.to_string(),
+        case: false,
+        regex,
+    };
+    core.find(Some(search), live(core) + u64::from(core.size().rows) - 1);
+}
+
+/// A span of `count` cells from `col` in `color`.
+fn span(col: u16, count: u16, color: Rgb) -> Span {
+    Span { col, count, color }
+}
+
+#[test]
+fn matches_are_drawn_in_the_find_colors_and_the_current_one_in_its_own() {
+    let mut core = core(12, 1, "foo bar \x1b[4;31mfoo");
+    find(&mut core, "foo", false);
+    let frame = first(&core);
+    let palette = palette();
+    assert_eq!(
+        frame.rows[0].spans,
+        [span(0, 3, palette.find), span(8, 3, palette.find_current)]
+    );
+    // The text is the matches' color, its underline too, and keeps its attributes.
+    assert_eq!(ink_at(&frame, 0).color, palette.find_text);
+    let current = ink_at(&frame, 8);
+    assert_eq!(
+        (current.color, current.underline_color, current.underline),
+        (palette.find_text, palette.find_text, 1)
+    );
+    assert_eq!(ink_at(&frame, 4).color, palette.foreground);
+}
+
+#[test]
+fn the_selection_is_drawn_over_a_match() {
+    let mut core = core(8, 1, "foo");
+    find(&mut core, "foo", false);
+    core.select(on(&core, 0, 1, false), Selecting::Characters);
+    core.extend(on(&core, 0, 2, true));
+    let frame = first(&core);
+    let palette = palette();
+    assert_eq!(
+        frame.rows[0].spans,
+        [
+            span(0, 1, palette.find_current),
+            span(1, 2, palette.selection)
+        ]
+    );
+    // Selected, the text keeps its own color.
+    assert_eq!(ink_at(&frame, 1).color, palette.foreground);
+}
+
+#[test]
+fn a_match_ends_a_ligature_at_its_edge() {
+    let mut core = core(20, 1, "a != b -> c");
+    find(&mut core, "=", false);
+    assert_eq!(
+        texts(&first(&core).rows[0]),
+        [joined(0, "a !"), text(3, "="), joined(5, "b -> c")]
+    );
+}
+
+#[test]
+fn only_the_rows_whose_matches_changed_are_sent() {
+    let mut core = core(6, 3, "one\r\ntwo\r\nsix");
+    let mut renderer = renderer(6, 3);
+    renderer.frame(&core, "").unwrap();
+    find(&mut core, "o", false);
+    assert_eq!(indexes(&renderer.frame(&core, "").unwrap()), [0, 1]);
+    assert!(renderer.frame(&core, "").is_none());
+    // The current match moves from the second row to the first.
+    core.find_next(true);
+    assert_eq!(indexes(&renderer.frame(&core, "").unwrap()), [0, 1]);
+    // Output that adds a match sends its row.
+    core.interpret(b"o");
+    core.refind();
+    assert_eq!(indexes(&renderer.frame(&core, "").unwrap()), [2]);
+    core.find(None, 0);
+    assert_eq!(indexes(&renderer.frame(&core, "").unwrap()), [0, 1, 2]);
+}
+
+/// A find bar open with `query`, its caret at the end, and the keys.
+fn bar(query: &str) -> FindBar {
+    FindBar {
+        query: query.to_string(),
+        caret: query.len(),
+        focused: true,
+        ..FindBar::default()
+    }
+}
+
+#[test]
+fn the_find_bar_alone_makes_a_frame() {
+    let mut core = core(6, 2, "foo");
+    let mut renderer = renderer(6, 2);
+    renderer.frame(&core, "").unwrap();
+    renderer.set_find(Some(bar("")));
+    let frame = renderer.frame(&core, "").unwrap();
+    assert!(frame.rows.is_empty() && frame.find.is_some());
+    // The same bar again is no frame.
+    renderer.set_find(Some(bar("")));
+    assert!(renderer.frame(&core, "").is_none());
+    renderer.set_find(Some(bar("f")));
+    find(&mut core, "f", false);
+    let frame = renderer.frame(&core, "").unwrap();
+    let find = frame.find.unwrap();
+    assert_eq!((find.current, find.count), (Some(0), 1));
+    // The caret moved, or the bar lost the keys.
+    renderer.set_find(Some(FindBar {
+        caret: 0,
+        ..bar("f")
+    }));
+    assert!(renderer.frame(&core, "").unwrap().find.is_some());
+    // Closed, the next frame has no bar.
+    renderer.set_find(None);
+    core.find(None, 0);
+    let frame = renderer.frame(&core, "").unwrap();
+    assert!(frame.find.is_none());
+    assert!(!frame.json().contains("\"find\""));
+}
+
+#[test]
+fn the_find_bar_is_written_with_its_query_cut_at_the_caret() {
+    let mut core = core(6, 2, "a(b");
+    let mut renderer = renderer(6, 2);
+    renderer.set_find(Some(FindBar {
+        query: "a(\"\u{7}b".to_string(),
+        caret: 2,
+        composing: "に".to_string(),
+        selected: true,
+        case: true,
+        regex: true,
+        focused: false,
+    }));
+    find(&mut core, "a(", true);
+    let json = renderer.frame(&core, "").unwrap().json();
+    assert!(
+        json.contains(
+            r#""find":{"query":["a(","に","\"\u0007b"],"match":[0,0],"selected":true,"case":true,"regex":true,"invalid":true},"#
+        ),
+        "{json}"
+    );
+    // A caret that is not on a character's start is at the end.
+    renderer.set_find(Some(FindBar {
+        query: "é".to_string(),
+        caret: 1,
+        ..FindBar::default()
+    }));
+    let json = renderer.frame(&core, "").unwrap().json();
+    assert!(
+        json.contains(r#""find":{"query":["é","",""],"match":[0,0],"invalid":true},"#),
+        "{json}"
+    );
+}
+
+#[test]
+fn the_view_moves_to_show_the_current_match_in_its_middle() {
+    // The lines 1 to 30 on 8 rows: 22 rows of scrollback, numbered from 0.
+    let lines: Vec<String> = (1..=30).map(|line| line.to_string()).collect();
+    let core = core(6, 8, &lines.join("\r\n"));
+    let mut renderer = renderer(6, 8);
+    // Line 5, on row 4, goes to the view's middle.
+    renderer.reveal(&core, 4..=4);
+    renderer.frame(&core, "").unwrap();
+    assert_eq!(renderer.row_number(0), Some(1));
+    // In the view, it stays where it is, and nothing is drawn again.
+    renderer.reveal(&core, 5..=6);
+    assert!(renderer.frame(&core, "").is_none());
+    assert_eq!(renderer.row_number(0), Some(1));
+    // In the rows the bar lies over, it moves, and no further back than the oldest row.
+    renderer.reveal(&core, 2..=2);
+    renderer.frame(&core, "").unwrap();
+    assert_eq!(renderer.row_number(0), Some(0));
+    // A match taller than the view shows its first row at the top.
+    renderer.reveal(&core, 10..=20);
+    renderer.frame(&core, "").unwrap();
+    assert_eq!(renderer.row_number(0), Some(10));
+    // Near the newest output, the view follows it again.
+    renderer.reveal(&core, 29..=29);
+    renderer.frame(&core, "").unwrap();
+    assert_eq!(renderer.row_number(0), Some(22));
+    assert!(renderer.view.is_none());
+}
+
+#[test]
+fn the_view_does_not_move_on_the_alternate_screen() {
+    let core = core(6, 3, "\x1b[?1049hx");
+    let mut renderer = renderer(6, 3);
+    renderer.reveal(&core, 0..=0);
+    assert!(renderer.view.is_none());
 }
 
 #[test]

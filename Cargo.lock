@@ -3535,6 +3535,7 @@ dependencies = [
 name = "terminal-core"
 version = "0.1.0"
 dependencies = [
+ "regex-automata",
  "unicode-width",
  "vte",
 ]
