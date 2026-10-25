@@ -5,7 +5,63 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <link rel="stylesheet" href="styles.css" />
     <title>Twominal</title>
+    <script type="module" src="js/main.js"></script>
   </head>
 
-  <body></body>
+  <body>
+    <nav id="tabbar" aria-label="Tabs" hidden>
+      <div class="tabs" role="tablist"></div>
+      <button class="new-tab" type="button" aria-label="New tab" title="New Tab (⌘T)">+</button>
+    </nav>
+
+    <main id="terminal-area">
+      <div id="views"></div>
+      <div id="overlay-layer"></div>
+      <textarea
+        id="input"
+        aria-label="Terminal input"
+        autocapitalize="off"
+        autocomplete="off"
+        autocorrect="off"
+        spellcheck="false"
+      ></textarea>
+    </main>
+
+    <dialog id="shortcuts" aria-labelledby="shortcuts-title">
+      <h2 id="shortcuts-title">Keyboard Shortcuts</h2>
+      <div class="shortcut-groups"></div>
+      <form method="dialog" class="dialog-actions">
+        <button value="done">Done</button>
+      </form>
+    </dialog>
+
+    <dialog id="tour" aria-labelledby="tour-title">
+      <h1 id="tour-title" class="wordmark" aria-label="Twominal">
+        twominal<span class="wordmark-cursor" aria-hidden="true"></span>
+      </h1>
+      <p class="tour-lede">Your shell, with fish-style help built in. No fish required.</p>
+      <ul class="tour-items">
+        <li>
+          <h2>Suggestions</h2>
+          <p>As you type, the likely rest of the command appears dimmed. Press <kbd>→</kbd> to take it.</p>
+        </li>
+        <li>
+          <h2>Completions</h2>
+          <p>Press <kbd>⇥</kbd> to complete commands, paths, options and git branches, each with a short description.</p>
+        </li>
+        <li>
+          <h2>Themes</h2>
+          <p>Twominal follows your Mac’s light or dark appearance. Pick Dark or Light in Settings to keep one.</p>
+        </li>
+        <li>
+          <h2>Vim</h2>
+          <p>Turn on Vim keys for the command line in Settings, and press <kbd>⇧⌘C</kbd> to move through scrollback the Vim way.</p>
+        </li>
+      </ul>
+      <form method="dialog" class="dialog-actions">
+        <p class="hint">Open this again from Help ▸ Welcome Tour.</p>
+        <button value="done" autofocus>Start typing</button>
+      </form>
+    </dialog>
+  </body>
 </html>
